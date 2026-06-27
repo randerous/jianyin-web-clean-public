@@ -81,6 +81,18 @@ function errorMessage(error) {
   return redactSensitiveText(error instanceof Error ? error.message : String(error));
 }
 
+function pipeUpstreamBody(upstream, res, errorCode = "upstream_stream_failed") {
+  const stream = Readable.fromWeb(upstream.body);
+  stream.on("error", (error) => {
+    if (!res.headersSent) {
+      res.status(502).json({ error: errorCode, message: errorMessage(error) });
+      return;
+    }
+    res.end();
+  });
+  stream.pipe(res);
+}
+
 function upstreamJsonError(url, response, text) {
   const sample = redactSensitiveText(text).slice(0, 120).replace(/\s+/g, " ");
   const host = (() => {
@@ -483,15 +495,19 @@ async function writeSharedState(state) {
 	  return { songs, rawCount, total, hasMore };
 	}
 
-	async function resolveFlacUrl(id, format, bitrate, time, sign) {
+	function flacCacheKey(id, format, bitrate, time, sign) {
+	  return `${cleanText(id).replace(/^flac_/, "")}:${cleanText(format, "flac").toLowerCase()}:${cleanText(bitrate, cleanText(format).toLowerCase() === "flac" ? "2000" : "320")}:${cleanText(time)}:${cleanText(sign)}`;
+	}
+
+	async function resolveFlacUrl(id, format, bitrate, time, sign, options = {}) {
 	  const cleanId = cleanText(id).replace(/^flac_/, "");
 	  const cleanFormat = cleanText(format, "flac").toLowerCase();
 	  const cleanBitrate = cleanText(bitrate, cleanFormat === "flac" ? "2000" : "320");
 	  const cleanTime = cleanText(time);
 	  const cleanSign = cleanText(sign);
-	  const cacheKey = `${cleanId}:${cleanFormat}:${cleanBitrate}:${cleanTime}:${cleanSign}`;
+	  const cacheKey = flacCacheKey(cleanId, cleanFormat, cleanBitrate, cleanTime, cleanSign);
 	  const cached = flacStreamCache.get(cacheKey);
-	  if (cached && cached.expiresAt > Date.now()) return cached.data;
+	  if (!options.forceRefresh && cached && cached.expiresAt > Date.now()) return cached.data;
 	  const body = await postFlacApi("getUrl", {
 	    songid: cleanId,
 	    format: cleanFormat,
@@ -901,11 +917,38 @@ function playableRejectReason(data) {
 	  });
 	}
 
+	function formatLrcTime(ms) {
+	  const totalMs = Math.max(0, Number(ms) || 0);
+	  const minutes = Math.floor(totalMs / 60000);
+	  const seconds = Math.floor((totalMs % 60000) / 1000);
+	  const millis = Math.floor(totalMs % 1000);
+	  return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(millis).padStart(3, "0")}`;
+	}
+
+	function normalizeYrcLyric(content) {
+	  const raw = cleanText(content);
+	  if (!raw) return "";
+	  const lines = raw.split(/\r?\n/).map((line) => {
+	    const trimmed = line.trim();
+	    if (!trimmed) return "";
+	    try {
+	      const parsed = JSON.parse(trimmed);
+	      const text = Array.isArray(parsed?.c)
+	        ? parsed.c.map((item) => cleanText(item?.tx)).join("").replace(/:\s*/g, ": ").trim()
+	        : cleanText(parsed?.tx);
+	      if (!text) return "";
+	      return `[${formatLrcTime(parsed?.t)}]${text}`;
+	    } catch {
+	      return "";
+	    }
+	  }).filter(Boolean);
+	  return lines.join("\n");
+	}
+
 	function parseLyricBody(body) {
-	  const yrc = cleanText(body?.yrc?.lyric);
-	  if (yrc) return yrc;
 	  const lrc = cleanText(body?.lrc?.lyric);
-	  return normalizeLegacyLrcTimestamps(lrc);
+	  if (lrc) return normalizeLegacyLrcTimestamps(lrc);
+	  return normalizeYrcLyric(body?.yrc?.lyric);
 	}
 
 	function parseBiliCookieMid(cookie) {
@@ -1216,7 +1259,7 @@ app.get("/api/netease/stream/:id", async (req, res) => {
       if (value) res.setHeader(header, value);
     }
     res.setHeader("Cache-Control", "no-store");
-    Readable.fromWeb(upstream.body).pipe(res);
+    pipeUpstreamBody(upstream, res, "netease_stream_failed");
   } catch (error) {
     res.status(502).json({ error: "netease_stream_failed", message: errorMessage(error) });
   }
@@ -1352,8 +1395,8 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 	    return;
 	  }
 	  try {
-	    const data = await resolveFlacUrl(id, req.query.format, req.query.bitrate, req.query.time, req.query.sign);
-	    const upstream = await fetchImpl(data.url, {
+	    let data = await resolveFlacUrl(id, req.query.format, req.query.bitrate, req.query.time, req.query.sign);
+	    let upstream = await fetchImpl(data.url, {
 	      headers: {
 	        "User-Agent": FLAC_USER_AGENT,
 	        Referer: FLAC_BASE_URL,
@@ -1363,8 +1406,21 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 	      redirect: "follow"
 	    });
 	    if (!upstream.ok && upstream.status !== 206) {
-	      res.status(502).json({ error: "flac_upstream_failed", message: `upstream status ${upstream.status}` });
-	      return;
+	      flacStreamCache.delete(flacCacheKey(id, req.query.format, req.query.bitrate, req.query.time, req.query.sign));
+	      data = await resolveFlacUrl(id, req.query.format, req.query.bitrate, req.query.time, req.query.sign, { forceRefresh: true });
+	      upstream = await fetchImpl(data.url, {
+	        headers: {
+	          "User-Agent": FLAC_USER_AGENT,
+	          Referer: FLAC_BASE_URL,
+	          Accept: "audio/*,*/*;q=0.8",
+	          ...(req.headers.range ? { Range: req.headers.range } : {})
+	        },
+	        redirect: "follow"
+	      });
+	      if (!upstream.ok && upstream.status !== 206) {
+	        res.status(502).json({ error: "flac_upstream_failed", message: `upstream status ${upstream.status}` });
+	        return;
+	      }
 	    }
 	    if (!upstream.body) {
 	      res.status(502).json({ error: "flac_upstream_empty", message: "test source audio upstream failed" });
@@ -1376,7 +1432,7 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 	      if (value) res.setHeader(header, value);
 	    }
 	    res.setHeader("Cache-Control", "no-store");
-	    Readable.fromWeb(upstream.body).pipe(res);
+	    pipeUpstreamBody(upstream, res, "flac_stream_failed");
 	  } catch (error) {
 	    res.status(502).json({ error: "flac_stream_failed", message: errorMessage(error) });
 	  }
@@ -1449,7 +1505,7 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 	      if (value) res.setHeader(header, value);
 	    }
 	    res.setHeader("Cache-Control", "no-store");
-	    Readable.fromWeb(upstream.body).pipe(res);
+	    pipeUpstreamBody(upstream, res, "bili_stream_failed");
 	  } catch (error) {
 	    res.status(502).json({ error: "bili_stream_failed", message: errorMessage(error) });
 	  }

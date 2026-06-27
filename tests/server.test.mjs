@@ -245,6 +245,33 @@ test("lyrics endpoint falls back to direct Netease web APIs", async () => {
   assert.equal(result.body.lrc, "[00:00.00]direct lyric");
 });
 
+test("lyrics endpoint converts Netease yrc json lines to LRC", async () => {
+  const neteaseClient = {
+    async cloudsearch() {
+      return { body: { result: { songs: [song(386175, "倔强")] } } };
+    },
+    async lyric({ id }) {
+      assert.equal(id, "386175");
+      return {
+        body: {
+          yrc: {
+            lyric: [
+              JSON.stringify({ t: 0, c: [{ tx: "作词: " }, { tx: "五月天 阿信" }] }),
+              JSON.stringify({ t: 18520, c: [{ tx: "当我和世界不一样" }] })
+            ].join("\n")
+          }
+        }
+      };
+    }
+  };
+  const baseUrl = await startTestServer({ neteaseClient });
+
+  const result = await getJson(`${baseUrl}/api/lyrics?name=${encodeURIComponent("倔强")}&artist=${encodeURIComponent("五月天")}&source=flac`);
+
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.lrc, "[00:00.000]作词: 五月天 阿信\n[00:18.520]当我和世界不一样");
+});
+
 test("stream revalidates playback data and forwards range requests", async () => {
   let upstreamRange = "";
   let upstreamCalls = 0;

@@ -1020,3 +1020,299 @@ test("flac test source searches, filters, resolves, and plays full songs", async
   await page.locator(".now-playing").click();
   await expect(page.locator(".player-sheet")).toContainText("dance with me");
 });
+
+test("flac playback refreshes expired search signature before playing", async ({ page }) => {
+  const searchRequests: URLSearchParams[] = [];
+  const songRequests: string[] = [];
+  const streamRequests: string[] = [];
+  await page.route("**/api/flac/search**", async (route) => {
+    const url = new URL(route.request().url());
+    searchRequests.push(url.searchParams);
+    const isRefresh = searchRequests.length > 1;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        songs: [{
+          id: "flac_15368606",
+          name: "September",
+          artist: "Earth, Wind & Fire",
+          pic: "/assets/icon.png",
+          cover: "/assets/icon.png",
+          url: `/api/flac/stream/15368606?format=flac&bitrate=2000&time=${isRefresh ? "fresh-time" : "old-time"}&sign=${isRefresh ? "fresh-sign" : "old-sign"}`,
+          source: "flac",
+          remotePlayable: true,
+          verifiedPlayable: true,
+          durationMs: 213000,
+          br: 2000000,
+          level: "flac",
+          type: "flac",
+          audioType: "flac",
+          quality: "flac",
+          time: isRefresh ? "fresh-time" : "old-time",
+          sign: isRefresh ? "fresh-sign" : "old-sign"
+        }],
+        filtered: 0,
+        page: 1,
+        limit: 30,
+        total: 1,
+        hasMore: false
+      })
+    });
+  });
+  await page.route(/\/api\/flac\/song\/15368606.*/, async (route) => {
+    const url = new URL(route.request().url());
+    songRequests.push(url.searchParams.toString());
+    const sign = url.searchParams.get("sign");
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        url: `/api/flac/stream/15368606?format=flac&bitrate=2000&time=${url.searchParams.get("time")}&sign=${sign}`,
+        durationMs: 65000,
+        verifiedPlayable: true,
+        br: 2000000,
+        level: "flac",
+        type: "flac",
+        audioType: "flac",
+        quality: "flac"
+      })
+    });
+  });
+  await page.route("**/api/flac/stream/15368606**", async (route) => {
+    const url = new URL(route.request().url());
+    streamRequests.push(url.searchParams.toString());
+    if (url.searchParams.get("sign") === "old-sign") {
+      await route.fulfill({ status: 410, contentType: "text/plain", body: "expired" });
+      return;
+    }
+    await route.fulfill({
+      path: fullSongFile,
+      headers: {
+        "content-type": "audio/wav",
+        "accept-ranges": "bytes"
+      }
+    });
+  });
+
+  await page.locator("nav button").nth(1).click();
+  await page.locator(".search-toolbar .segmented button").nth(2).click();
+  await page.locator('.search-box input[name="keyword"]').fill("September Earth Wind Fire");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".song-row", { hasText: "September" })).toBeVisible();
+  await page.locator(".song-row", { hasText: "September" }).locator(".song-hit").click();
+
+  await expect(page.locator(".now-playing")).toContainText("September");
+  await expectAudioPlaying(page);
+  expect(searchRequests.length).toBeGreaterThanOrEqual(2);
+  expect(songRequests.some((query) => query.includes("sign=old-sign"))).toBe(false);
+  expect(songRequests.some((query) => query.includes("sign=fresh-sign"))).toBe(true);
+  expect(streamRequests.some((query) => query.includes("sign=old-sign"))).toBe(false);
+  expect(streamRequests.some((query) => query.includes("sign=fresh-sign"))).toBe(true);
+});
+
+test("flac playback resumes from current time after mid-song signature refresh", async ({ page }) => {
+  const searchRequests: string[] = [];
+  const songRequests: string[] = [];
+  await page.route("**/api/flac/search**", async (route) => {
+    const url = new URL(route.request().url());
+    searchRequests.push(url.searchParams.get("keyword") ?? "");
+    const refreshCount = searchRequests.length - 1;
+    const signature = `fresh-${refreshCount + 1}`;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        songs: [{
+          id: "flac_15368606",
+          name: "September",
+          artist: "Earth, Wind & Fire",
+          pic: "/assets/icon.png",
+          cover: "/assets/icon.png",
+          url: `/api/flac/stream/15368606?format=flac&bitrate=2000&time=${signature}-time&sign=${signature}-sign`,
+          source: "flac",
+          remotePlayable: true,
+          verifiedPlayable: true,
+          durationMs: 213000,
+          br: 2000000,
+          level: "flac",
+          type: "flac",
+          audioType: "flac",
+          quality: "flac",
+          time: `${signature}-time`,
+          sign: `${signature}-sign`
+        }],
+        filtered: 0,
+        page: 1,
+        limit: 30,
+        total: 1,
+        hasMore: false
+      })
+    });
+  });
+  await page.route(/\/api\/flac\/song\/15368606.*/, async (route) => {
+    const url = new URL(route.request().url());
+    songRequests.push(url.searchParams.toString());
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        url: `/api/flac/stream/15368606?format=flac&bitrate=2000&time=${url.searchParams.get("time")}&sign=${url.searchParams.get("sign")}`,
+        durationMs: 65000,
+        verifiedPlayable: true,
+        br: 2000000,
+        level: "flac",
+        type: "flac",
+        audioType: "flac",
+        quality: "flac"
+      })
+    });
+  });
+  await page.route("**/api/flac/stream/15368606**", async (route) => {
+    await route.fulfill({
+      path: fullSongFile,
+      headers: {
+        "content-type": "audio/wav",
+        "accept-ranges": "bytes"
+      }
+    });
+  });
+
+  await page.locator("nav button").nth(1).click();
+  await page.locator(".search-toolbar .segmented button").nth(2).click();
+  await page.locator('.search-box input[name="keyword"]').fill("September Earth Wind Fire");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".song-row", { hasText: "September" })).toBeVisible();
+  await page.locator(".song-row", { hasText: "September" }).locator(".song-hit").click();
+  await expectAudioPlaying(page);
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.src)).toContain("fresh-2-sign");
+  await expect.poll(() => page.evaluate(() => typeof window.JianyinRecoverAudio)).toBe("function");
+
+  await page.locator("audio").evaluate((audio: HTMLAudioElement) => {
+    audio.currentTime = 37;
+    audio.dispatchEvent(new Event("timeupdate"));
+  });
+  await page.evaluate(() => window.JianyinRecoverAudio?.());
+
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.src)).toContain("fresh-3-sign");
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.currentTime)).toBeGreaterThan(36);
+  expect(searchRequests.length).toBeGreaterThanOrEqual(3);
+  expect(songRequests.some((query) => query.includes("sign=fresh-3-sign"))).toBe(true);
+});
+
+test("flac search queue refreshes expired signatures when advancing", async ({ page }) => {
+  const searchRequests: string[] = [];
+  const songRequests: string[] = [];
+  const streamRequests: string[] = [];
+  const songsById = {
+    "111": {
+      id: "flac_111",
+      name: "First Track",
+      artist: "Queue Artist",
+      pic: "/assets/icon.png",
+      cover: "/assets/icon.png",
+      source: "flac",
+      remotePlayable: true,
+      verifiedPlayable: true,
+      durationMs: 65000,
+      br: 2000000,
+      level: "flac",
+      type: "flac",
+      audioType: "flac",
+      quality: "flac"
+    },
+    "222": {
+      id: "flac_222",
+      name: "Second Track",
+      artist: "Queue Artist",
+      pic: "/assets/icon.png",
+      cover: "/assets/icon.png",
+      source: "flac",
+      remotePlayable: true,
+      verifiedPlayable: true,
+      durationMs: 65000,
+      br: 2000000,
+      level: "flac",
+      type: "flac",
+      audioType: "flac",
+      quality: "flac"
+    }
+  };
+  const withSignature = (song: typeof songsById[keyof typeof songsById], signature: "old" | "fresh") => ({
+    ...song,
+    url: `/api/flac/stream/${song.id.replace(/^flac_/, "")}?format=flac&bitrate=2000&time=${signature}-time-${song.id}&sign=${signature}-sign-${song.id}`,
+    time: `${signature}-time-${song.id}`,
+    sign: `${signature}-sign-${song.id}`
+  });
+
+  await page.route("**/api/flac/search**", async (route) => {
+    const url = new URL(route.request().url());
+    const keyword = url.searchParams.get("keyword") ?? "";
+    searchRequests.push(keyword);
+    const songs = keyword === "First Track Queue Artist"
+      ? [withSignature(songsById["111"], "fresh")]
+      : keyword === "Second Track Queue Artist"
+        ? [withSignature(songsById["222"], "fresh")]
+        : [withSignature(songsById["111"], "old"), withSignature(songsById["222"], "old")];
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        songs,
+        filtered: 0,
+        page: 1,
+        limit: 30,
+        total: songs.length,
+        hasMore: false
+      })
+    });
+  });
+  await page.route(/\/api\/flac\/song\/(111|222).*/, async (route) => {
+    const url = new URL(route.request().url());
+    songRequests.push(`${url.pathname}?${url.searchParams.toString()}`);
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        url: `/api/flac/stream/${url.pathname.split("/").pop()}?format=flac&bitrate=2000&time=${url.searchParams.get("time")}&sign=${url.searchParams.get("sign")}`,
+        durationMs: 65000,
+        verifiedPlayable: true,
+        br: 2000000,
+        level: "flac",
+        type: "flac",
+        audioType: "flac",
+        quality: "flac"
+      })
+    });
+  });
+  await page.route(/\/api\/flac\/stream\/(111|222).*/, async (route) => {
+    const url = new URL(route.request().url());
+    streamRequests.push(`${url.pathname}?${url.searchParams.toString()}`);
+    if (url.searchParams.get("sign")?.startsWith("old-sign")) {
+      await route.fulfill({ status: 410, contentType: "text/plain", body: "expired" });
+      return;
+    }
+    await route.fulfill({
+      path: fullSongFile,
+      headers: {
+        "content-type": "audio/wav",
+        "accept-ranges": "bytes"
+      }
+    });
+  });
+
+  await page.locator("nav button").nth(1).click();
+  await page.locator(".search-toolbar .segmented button").nth(2).click();
+  await page.locator('.search-box input[name="keyword"]').fill("Queue Artist");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".song-row", { hasText: "First Track" })).toBeVisible();
+  await page.locator(".song-row", { hasText: "First Track" }).locator(".song-hit").click();
+  await expect(page.locator(".now-playing")).toContainText("First Track");
+  await expectAudioPlaying(page);
+
+  await page.locator('button[aria-label="下一首"]').click();
+  await expect(page.locator(".now-playing")).toContainText("Second Track");
+  await expectAudioPlaying(page);
+
+  expect(searchRequests).toContain("First Track Queue Artist");
+  expect(searchRequests).toContain("Second Track Queue Artist");
+  expect(songRequests.some((query) => query.includes("old-sign"))).toBe(false);
+  expect(songRequests.some((query) => query.includes("fresh-sign-flac_111"))).toBe(true);
+  expect(songRequests.some((query) => query.includes("fresh-sign-flac_222"))).toBe(true);
+  expect(streamRequests.some((query) => query.includes("old-sign"))).toBe(false);
+  expect(streamRequests.some((query) => query.includes("fresh-sign-flac_222"))).toBe(true);
+});

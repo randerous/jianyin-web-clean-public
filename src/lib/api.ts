@@ -252,7 +252,11 @@ export async function resolveBiliSong(song: Song) {
   };
 }
 
-export async function resolveFlacSong(song: Song) {
+export async function resolveFlacSong(song: Song, options: { refresh?: boolean } = {}) {
+  if (options.refresh) {
+    const refreshed = await refreshFlacSong(song);
+    if (refreshed) return fetchResolvedFlacSong(refreshed);
+  }
   try {
     return await fetchResolvedFlacSong(song);
   } catch (error) {

@@ -85,6 +85,7 @@ declare global {
     JianyinAndroid?: {
       setPlaybackState?: (active: boolean, title?: string, artist?: string) => void;
     };
+    JianyinRecoverAudio?: () => void;
   }
 }
 
@@ -214,6 +215,10 @@ export default function App() {
   const queueRef = useRef(queue);
   const queueIndexRef = useRef(queueIndex);
   const modeRef = useRef(mode);
+  const playingRef = useRef(playing);
+  const positionRef = useRef(position);
+  const audioAttemptRef = useRef<{ song: Song; source: Song[] } | null>(null);
+  const audioRetryRef = useRef<{ key: string; at: number } | null>(null);
 
   const currentSong = queue[queueIndex] ?? null;
   const librarySongs = useMemo(() => allLibrarySongs(playlists, history), [history, playlists]);
@@ -239,6 +244,14 @@ export default function App() {
   useEffect(() => {
     modeRef.current = mode;
   }, [mode]);
+
+  useEffect(() => {
+    playingRef.current = playing;
+  }, [playing]);
+
+  useEffect(() => {
+    positionRef.current = position;
+  }, [position]);
 
   useEffect(() => {
     try {
@@ -399,6 +412,7 @@ export default function App() {
     const targetSrc = currentSong.url ? new URL(currentSong.url, window.location.href).href : "";
     if (targetSrc && audio.src !== targetSrc) {
       audio.src = currentSong.url;
+      positionRef.current = 0;
       setPosition(0);
       setDuration(0);
     }
@@ -412,33 +426,37 @@ export default function App() {
     }
   }, [currentSong, playing]);
 
-  const resolvePlayable = useCallback(async (song: Song): Promise<Song> => {
+  const resolvePlayable = useCallback(async (song: Song, options: { refresh?: boolean } = {}): Promise<Song> => {
     if (song.localKey) {
       const blob = await loadLocalFile(song.localKey);
       if (!blob) throw new Error("本地文件不在当前浏览器，请重新导入");
       return { ...song, url: URL.createObjectURL(blob), needsImport: false };
     }
-    if (verifiedUrlMatchesQuality(song, playQuality)) return song;
+    if (!options.refresh && verifiedUrlMatchesQuality(song, playQuality)) return song;
     if (song.source === "netease") return resolveNeteaseSong(song, playQuality);
     if (song.source === "bili") return resolveBiliSong(song);
-    if (song.source === "flac") return resolveFlacSong(song);
+    if (song.source === "flac") return resolveFlacSong(song, { refresh: options.refresh ?? true });
     if (song.url && !song.url.startsWith("local-file:")) return song;
     throw new Error("当前歌曲没有可播放链接");
   }, [playQuality]);
 
-  const playSong = useCallback(async (song: Song, source?: Song[], options: { quiet?: boolean } = {}) => {
+  const playSong = useCallback(async (song: Song, source?: Song[], options: { quiet?: boolean; startAt?: number; refresh?: boolean } = {}) => {
     try {
-      const playable = await resolvePlayable(song);
+      const playable = await resolvePlayable(song, { refresh: options.refresh });
       const nextQueue = playableSongs((source?.length ? source : [playable]).map((item) => songKey(item) === songKey(song) ? playable : item));
       const nextIndex = Math.max(0, nextQueue.findIndex((item) => songKey(item) === songKey(playable)));
       setQueue(nextQueue);
       setQueueIndex(nextIndex);
       setHistory((items) => [playable, ...items.filter((item) => songKey(item) !== songKey(playable))].slice(0, 30));
       setPlaying(true);
+      audioAttemptRef.current = { song: playable, source: nextQueue };
       if (audioRef.current) {
+        const startAt = Math.max(0, options.startAt ?? 0);
         audioRef.current.src = playable.url;
-        audioRef.current.currentTime = 0;
         audioRef.current.playbackRate = playbackSpeed;
+        audioRef.current.currentTime = startAt;
+        positionRef.current = startAt;
+        setPosition(startAt);
         await audioRef.current.play();
       }
       return true;
@@ -448,6 +466,46 @@ export default function App() {
       return false;
     }
   }, [playbackSpeed, resolvePlayable]);
+
+  const retryCurrentSongAfterAudioError = useCallback(async () => {
+    const audio = audioRef.current;
+    const attempt = audioAttemptRef.current;
+    const song = attempt?.song ?? queueRef.current[queueIndexRef.current];
+    if (!song || song.source !== "flac") return;
+    const resumeAt = Math.max(audio?.currentTime || 0, positionRef.current);
+    const retryAt = Math.floor(resumeAt);
+    const key = songKey(song);
+    if (audioRetryRef.current?.key === key && Math.abs(audioRetryRef.current.at - retryAt) <= 1) return;
+    audioRetryRef.current = { key, at: retryAt };
+    const source = attempt?.source?.length ? attempt.source : queueRef.current;
+    const ok = await playSong(song, source, { quiet: true, startAt: resumeAt, refresh: true });
+    if (!ok) {
+      audioRetryRef.current = null;
+      setPlaying(false);
+      setToast("播放链接已过期，重新获取失败");
+    }
+  }, [playSong]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const handlePlaybackIssue = () => {
+      void retryCurrentSongAfterAudioError();
+    };
+    audio.addEventListener("error", handlePlaybackIssue);
+    return () => {
+      audio.removeEventListener("error", handlePlaybackIssue);
+    };
+  }, [retryCurrentSongAfterAudioError]);
+
+  useEffect(() => {
+    window.JianyinRecoverAudio = () => {
+      void retryCurrentSongAfterAudioError();
+    };
+    return () => {
+      delete window.JianyinRecoverAudio;
+    };
+  }, [retryCurrentSongAfterAudioError]);
 
   const playQueueIndex = useCallback((index: number) => {
     const items = queueRef.current;
@@ -515,6 +573,7 @@ export default function App() {
     setHandler("seekto", (details) => {
       if (typeof details.seekTime === "number" && audioRef.current) {
         audioRef.current.currentTime = details.seekTime;
+        positionRef.current = details.seekTime;
         setPosition(details.seekTime);
       }
     });
@@ -950,9 +1009,14 @@ export default function App() {
     <div className="app-shell">
       <audio
         ref={audioRef}
-        onTimeUpdate={(event) => setPosition(event.currentTarget.currentTime)}
+        onTimeUpdate={(event) => {
+          positionRef.current = event.currentTarget.currentTime;
+          audioRetryRef.current = null;
+          setPosition(event.currentTarget.currentTime);
+        }}
         onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
         onEnded={handleAudioEnded}
+        onError={() => void retryCurrentSongAfterAudioError()}
       />
       <input ref={fileInputRef} hidden type="file" accept="audio/*" multiple onChange={importFiles} />
       <input ref={restoreInputRef} hidden type="file" accept="application/json,.json" onChange={restore} />
@@ -1125,6 +1189,7 @@ export default function App() {
           onPrevious={previousSong}
           onSeek={(value) => {
             if (audioRef.current) audioRef.current.currentTime = value;
+            positionRef.current = value;
             setPosition(value);
           }}
           onMode={setMode}

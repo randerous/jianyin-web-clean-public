@@ -12,19 +12,27 @@ $ErrorLogFile = Join-Path $LogDir "jianyin-web-clean-server-error.log"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
 $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-if (-not $listener) {
-    Start-Process -FilePath $NodeExe `
-        -ArgumentList @("server.mjs", "--port", "$Port") `
-        -WorkingDirectory $ProjectDir `
-        -RedirectStandardOutput $LogFile `
-        -RedirectStandardError $ErrorLogFile `
-        -WindowStyle Hidden
-
-    $deadline = (Get-Date).AddSeconds(15)
-    do {
-        Start-Sleep -Milliseconds 300
-        $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-    } while (-not $listener -and (Get-Date) -lt $deadline)
+if ($listener) {
+    $listener | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
+        $process = Get-Process -Id $_ -ErrorAction SilentlyContinue
+        if ($process) {
+            Stop-Process -Id $process.Id -Force
+        }
+    }
+    Start-Sleep -Milliseconds 600
 }
+
+Start-Process -FilePath $NodeExe `
+    -ArgumentList @("server.mjs", "--port", "$Port") `
+    -WorkingDirectory $ProjectDir `
+    -RedirectStandardOutput $LogFile `
+    -RedirectStandardError $ErrorLogFile `
+    -WindowStyle Hidden
+
+$deadline = (Get-Date).AddSeconds(15)
+do {
+    Start-Sleep -Milliseconds 300
+    $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+} while (-not $listener -and (Get-Date) -lt $deadline)
 
 Start-Process $Url

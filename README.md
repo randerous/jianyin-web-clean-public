@@ -25,11 +25,7 @@ npm run build
 
 ```powershell
 npm install
-npm run build
-npx cap sync android
-node .\scripts\prepare-android-embedded-backend.mjs
-cd android
-.\gradlew.bat assembleDebug -PjianyinAbi=arm64-v8a
+npm run android:apk
 ```
 
 生成的 APK 位于：

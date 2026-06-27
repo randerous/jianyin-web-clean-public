@@ -4,9 +4,12 @@ build/
 tests/.playwright-results/
 test-results/
 playwright-report/
+tests/*.broken-*
 .jianyin-shared-state.json
 .jianyin-worktree.txt
 .DS_Store
+.env
+.env.*
 screenshots/
 screenshot-playlist-backup.json
 logs/

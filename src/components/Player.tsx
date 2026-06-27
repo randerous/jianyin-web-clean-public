@@ -1,5 +1,5 @@
 import { ArrowLeft, ChevronDown, ChevronUp, Disc3, Download, FileText, Gauge, Heart, Image, ListMusic, MoreVertical, Pause, Play, Repeat, Repeat1, Shuffle, SkipBack, SkipForward, Timer, Waves, X } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { activeLyricIndex, formatTime, parseLrc } from "../lib/lyrics";
 import { songKey } from "../lib/storage";
 import type { Playlist, ProgressStyle, Song } from "../types";
@@ -70,8 +70,10 @@ export default function Player(props: Props) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [view, setView] = useState<"cover" | "lyrics">("lyrics");
   const [queueOpen, setQueueOpen] = useState(false);
+  const lyricPanelRef = useRef<HTMLDivElement | null>(null);
+  const activeLyricRef = useRef<HTMLParagraphElement | null>(null);
   const lyrics = parseLrc(props.song.lrc);
-  const active = activeLyricIndex(lyrics, props.position);
+  const active = lyrics.length ? Math.max(0, activeLyricIndex(lyrics, props.position)) : -1;
   const selectedQueueSongs = props.queue.filter((item) => props.selectedKeys.has(songKey(item)));
   const sleepLabel = props.sleepTimerUntil ? `剩余 ${Math.max(0, Math.ceil((props.sleepTimerUntil - Date.now()) / 1000))} 秒` : "未设置";
   const pickLrc = () => {
@@ -87,6 +89,14 @@ export default function Player(props: Props) {
     { value: "repeat", label: "单曲循环", icon: <Repeat1 /> },
     { value: "shuffle", label: "随机播放", icon: <Shuffle /> }
   ];
+
+  useEffect(() => {
+    if (view !== "lyrics" || !activeLyricRef.current || !lyricPanelRef.current) return;
+    const panel = lyricPanelRef.current;
+    const line = activeLyricRef.current;
+    const nextTop = line.offsetTop - panel.clientHeight / 2 + line.clientHeight / 2;
+    panel.scrollTo({ top: Math.max(0, nextTop), behavior: "smooth" });
+  }, [active, view]);
   const queueContent = (
     <>
       <div className="queue-title"><ListMusic /> 播放列表</div>
@@ -160,10 +170,31 @@ export default function Player(props: Props) {
           <button className={`album-stage player-pane ${view === "cover" ? "active" : ""}`} onClick={props.onFloatingLyric} aria-label={props.floatingLyric ? "关闭桌面歌词" : "开启桌面歌词"}>
             <img src={props.song.cover || "/assets/icon.png"} alt="" />
           </button>
-          <div className={`lyric-panel player-pane ${view === "lyrics" ? "active" : ""}`}>
-            {lyrics.length ? lyrics.map((line, index) => (
-              <p key={`${line.time}-${line.text}`} className={index === active ? "current" : ""}>{line.text}</p>
-            )) : <p className="empty-text">{props.lyricsLoading ? "正在获取歌词..." : props.autoLyricsEnabled ? "暂无歌词，打开更多可手动获取" : "自动获取歌词已关闭"}</p>}
+          <div ref={lyricPanelRef} className={`lyric-panel player-pane ${view === "lyrics" ? "active" : ""}`}>
+            {lyrics.length ? (
+              <>
+                <div className="lyric-scroll-spacer" aria-hidden="true" />
+                {lyrics.map((line, index) => (
+                  <p
+                    key={`${line.time}-${line.text}`}
+                    ref={index === active ? activeLyricRef : null}
+                    className={index === active ? "current" : ""}
+                  >
+                    {line.text}
+                  </p>
+                ))}
+                <div className="lyric-scroll-spacer" aria-hidden="true" />
+              </>
+            ) : (
+              <div className="lyric-empty-state">
+                <p className="empty-text">{props.lyricsLoading ? "正在获取歌词..." : props.autoLyricsEnabled ? "暂无歌词" : "自动获取歌词已关闭"}</p>
+                {props.song.source !== "local" && (
+                  <button className="lyric-fetch-button" onClick={props.onFetchLyrics} disabled={props.lyricsLoading}>
+                    <FileText /> {props.lyricsLoading ? "正在获取" : "获取歌词"}
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </div>
 

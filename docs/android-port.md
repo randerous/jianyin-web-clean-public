@@ -8,36 +8,32 @@ This project is packaged as a Capacitor Android app targeting Android 15
 - React/Vite UI
 - Local playlists, local audio imports, IndexedDB persistence, backup/restore
 - Browser/WebView audio playback and MediaSession integration
+- Embedded Node backend at `http://127.0.0.1:5188`
+- Remote Netease, Bili, and FLAC search/stream proxy routes
 
-The Node `server.mjs` proxy is not embedded in the APK. Remote Netease, Bili,
-FLAC search, streaming, account cookie validation, and shared-state sync need a
-reachable proxy backend.
+The Android app must not depend on a backend running on the computer. The
+embedded backend is prepared into `assets/www/nodejs-project` before Gradle
+builds the APK.
 
-## Backend URL
+## Build Workflow
 
-Run the proxy on your computer or server:
-
-```bash
-npm install
-node server.mjs --dev --host 0.0.0.0 --port 5188
-```
-
-On Android, open `Settings` and set `API backend URL`, for example:
-
-```text
-http://192.168.1.10:5188
-```
-
-Use your computer's LAN IP, not `127.0.0.1`, when testing on a physical phone.
-For the Android emulator, `http://10.0.2.2:5188` points at the host machine.
-
-## Build
+Use one command:
 
 ```bash
-npm run android:sync
-cd android
-.\gradlew.bat assembleDebug
+npm run android:apk
 ```
+
+That command is the source of truth for Android packaging. It runs, in order:
+
+1. `npm run build`
+2. `npx cap sync android`
+3. `node scripts/prepare-android-embedded-backend.mjs`
+4. `android/gradlew assembleDebug -PjianyinAbi=arm64-v8a`
+5. APK asset verification
+
+Do not run `npx cap sync android` and then Gradle directly when making a test
+APK. That skips the embedded backend preparation step and can produce a broken
+package.
 
 The debug APK is generated at:
 
@@ -45,12 +41,37 @@ The debug APK is generated at:
 android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
+The workflow verifies that the APK contains both:
+
+```text
+assets/public/index.html
+assets/www/nodejs-project/server.mjs
+```
+
+## Useful Commands
+
+Prepare Android assets without building an APK:
+
+```bash
+npm run android:sync
+```
+
+Open the Android project:
+
+```bash
+npm run android:open
+```
+
+Install the debug APK on a connected device:
+
+```bash
+adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+```
+
 ## Android 15 Notes
 
-- `android/variables.gradle` locks `compileSdkVersion` and `targetSdkVersion`
-  to `35`.
+- `android/variables.gradle` locks `targetSdkVersion` to `35`.
 - `MainActivity` enables edge-to-edge with AndroidX Activity.
 - CSS uses safe-area insets so the status bar and gesture navigation do not
   cover content in Android 15 edge-to-edge mode.
-- Cleartext traffic is allowed for LAN proxy development. Use HTTPS for a
-  production backend before publishing.
+- Cleartext traffic is allowed only for the app-local `127.0.0.1` backend.
