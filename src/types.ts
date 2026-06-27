@@ -51,6 +51,7 @@ export type PersistedState = {
   downloadQuality: PlayQuality;
   progressStyle: ProgressStyle;
   lyricSource: LyricSource;
+  autoLyricsEnabled: boolean;
   playbackSpeed: number;
   fadeEnabled: boolean;
   autoCacheEnabled: boolean;

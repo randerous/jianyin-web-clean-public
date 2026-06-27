@@ -207,6 +207,16 @@ async function writeSharedState(state) {
 	  return headers;
 	}
 
+	function neteaseHeaders(cookie = "") {
+	  const headers = {
+	    "User-Agent": NETEASE_USER_AGENT,
+	    Referer: NETEASE_REFERER,
+	    Accept: "application/json,text/plain,*/*"
+	  };
+	  if (cookie) headers.Cookie = cookie;
+	  return headers;
+	}
+
 	async function fetchJsonUrl(url, headers = {}) {
 	  const response = await fetchImpl(url, { headers, redirect: "follow" });
 	  const text = await response.text();
@@ -646,12 +656,44 @@ function lyricCall() {
 }
 
 async function fetchNeteaseLyric(id) {
-  const result = await lyricCall()({ id, cookie: neteaseAccountCookie });
-  return parseLyricBody(result.body);
+  try {
+    const result = await lyricCall()({ id, cookie: neteaseAccountCookie });
+    const lyric = parseLyricBody(result.body);
+    if (lyric) return lyric;
+  } catch {
+    // Fall through to the direct web endpoint; the library call can fail when its upstream proxy resets.
+  }
+  return fetchNeteaseLyricDirect(id);
+}
+
+async function fetchNeteaseLyricDirect(id) {
+  const url = new URL("https://music.163.com/api/song/lyric");
+  url.searchParams.set("id", String(id));
+  url.searchParams.set("lv", "1");
+  url.searchParams.set("kv", "1");
+  url.searchParams.set("tv", "-1");
+  const body = await fetchJsonUrl(url.toString(), neteaseHeaders(neteaseAccountCookie));
+  return parseLyricBody(body);
+}
+
+async function searchNeteaseSongsDirect(keyword, limit = 12) {
+  const url = new URL("https://music.163.com/api/search/get/web");
+  url.searchParams.set("s", keyword);
+  url.searchParams.set("type", "1");
+  url.searchParams.set("limit", String(limit));
+  url.searchParams.set("offset", "0");
+  const body = await fetchJsonUrl(url.toString(), neteaseHeaders(neteaseAccountCookie));
+  return body?.result?.songs ?? [];
 }
 
 async function findLyricCandidate(keyword, artist) {
-  const songs = await searchSongs(keyword, 12);
+  let songs = [];
+  try {
+    songs = await searchSongs(keyword, 12);
+  } catch {
+    songs = await searchNeteaseSongsDirect(keyword, 12);
+  }
+  if (!songs.length) songs = await searchNeteaseSongsDirect(keyword, 12);
   const wantedArtist = normalizeMatchText(artist);
   const wantedTitle = normalizeMatchText(keyword.replace(artist, ""));
   return songs.find((song) => {
@@ -1504,7 +1546,7 @@ return app;
 export async function startServer({ listenPort = port, dev = isDev } = {}) {
   const app = await createApp({ dev, hmrPort: listenPort + 10000 });
   return app.listen(listenPort, "127.0.0.1", () => {
-    console.log(`Jianyin Web Clean running at http://127.0.0.1:${listenPort}/`);
+    console.log(`拾音 running at http://127.0.0.1:${listenPort}/`);
   });
 }
 

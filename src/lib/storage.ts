@@ -102,6 +102,7 @@ function serializeState(state: PersistedState): PersistedState {
     downloadQuality: state.downloadQuality,
     progressStyle: state.progressStyle,
     lyricSource: state.lyricSource,
+    autoLyricsEnabled: state.autoLyricsEnabled,
     playbackSpeed: state.playbackSpeed,
     fadeEnabled: state.fadeEnabled,
     autoCacheEnabled: state.autoCacheEnabled,
@@ -133,6 +134,7 @@ export function normalizeState(value: unknown): PersistedState {
   const downloadQuality = ["jymaster", "sky", "jyeffect", "hires", "lossless", "exhigh", "standard"].includes(String(raw.downloadQuality)) ? raw.downloadQuality as PersistedState["downloadQuality"] : "exhigh";
   const progressStyle = raw.progressStyle === "round" || raw.progressStyle === "audio" ? raw.progressStyle : "default";
   const lyricSource = raw.lyricSource === "embedded" ? "embedded" : "network";
+  const autoLyricsEnabled = raw.autoLyricsEnabled !== false;
   const playbackSpeed = typeof raw.playbackSpeed === "number" && Number.isFinite(raw.playbackSpeed) ? Math.min(4, Math.max(0.25, raw.playbackSpeed)) : 1;
   return {
     playlists: withFavorites.map((playlist) => playlist.id === FAVORITES_ID ? { ...playlist, songs: favorites } : playlist),
@@ -146,6 +148,7 @@ export function normalizeState(value: unknown): PersistedState {
     downloadQuality,
     progressStyle,
     lyricSource,
+    autoLyricsEnabled,
     playbackSpeed,
     fadeEnabled: Boolean(raw.fadeEnabled),
     autoCacheEnabled: Boolean(raw.autoCacheEnabled),

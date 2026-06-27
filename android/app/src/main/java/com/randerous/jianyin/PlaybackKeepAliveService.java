@@ -69,7 +69,7 @@ public class PlaybackKeepAliveService extends Service {
         if (powerManager == null) {
             return;
         }
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Jianyin:Playback");
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Shiyin:Playback");
         wakeLock.setReferenceCounted(false);
         wakeLock.acquire();
     }
@@ -89,7 +89,7 @@ public class PlaybackKeepAliveService extends Service {
             launchIntent,
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
-        String safeTitle = title == null || title.isEmpty() ? "Jianyin" : title;
+        String safeTitle = title == null || title.isEmpty() ? "拾音" : title;
         String safeArtist = artist == null || artist.isEmpty() ? "Playing music" : artist;
         return new NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(getApplicationInfo().icon)
@@ -113,7 +113,7 @@ public class PlaybackKeepAliveService extends Service {
         }
         NotificationChannel channel = new NotificationChannel(
             CHANNEL_ID,
-            "Jianyin playback",
+            "拾音 playback",
             NotificationManager.IMPORTANCE_LOW
         );
         channel.setShowBadge(false);

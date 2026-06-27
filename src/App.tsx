@@ -5,6 +5,7 @@ import {
   Cloud,
   Download,
   FileAudio,
+  FileText,
   Flame,
   Heart,
   Home,
@@ -157,6 +158,7 @@ export default function App() {
   const [downloadQuality, setDownloadQuality] = useState<PlayQuality>(initial.downloadQuality);
   const [progressStyle, setProgressStyle] = useState<ProgressStyle>(initial.progressStyle);
   const [lyricSource, setLyricSource] = useState<LyricSource>(initial.lyricSource);
+  const [autoLyricsEnabled, setAutoLyricsEnabled] = useState(initial.autoLyricsEnabled);
   const [playbackSpeed, setPlaybackSpeed] = useState(initial.playbackSpeed);
   const [fadeEnabled, setFadeEnabled] = useState(initial.fadeEnabled);
   const [autoCacheEnabled, setAutoCacheEnabled] = useState(initial.autoCacheEnabled);
@@ -263,6 +265,7 @@ export default function App() {
       downloadQuality,
       progressStyle,
       lyricSource,
+      autoLyricsEnabled,
       playbackSpeed,
       fadeEnabled,
       autoCacheEnabled,
@@ -275,11 +278,11 @@ export default function App() {
     } catch {
       setToast("浏览器存储空间不足，本次修改可能不会保存");
     }
-  }, [autoCacheEnabled, autoPlayOnStart, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
+  }, [autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
 
   useEffect(() => {
     let live = true;
-    const localState: PersistedState = { playlists, favorites, history, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart };
+    const localState: PersistedState = { playlists, favorites, history, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart };
     void loadSharedState()
       .then(async (shared) => hydrateLocalSongs(shared ? mergeStates(localState, shared) : localState))
       .then((result) => {
@@ -295,6 +298,7 @@ export default function App() {
         setDownloadQuality(result.state.downloadQuality);
         setProgressStyle(result.state.progressStyle);
         setLyricSource(result.state.lyricSource);
+        setAutoLyricsEnabled(result.state.autoLyricsEnabled);
         setPlaybackSpeed(result.state.playbackSpeed);
         setFadeEnabled(result.state.fadeEnabled);
         setAutoCacheEnabled(result.state.autoCacheEnabled);
@@ -573,7 +577,7 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!currentSong || currentSong.lrc || currentSong.source === "local") return;
+    if (!autoLyricsEnabled || !currentSong || currentSong.lrc || currentSong.source === "local") return;
     const key = songKey(currentSong);
     let cancelled = false;
     setLyricsLoadingKey(key);
@@ -591,6 +595,34 @@ export default function App() {
     return () => {
       cancelled = true;
     };
+  }, [autoLyricsEnabled, currentSong, updateSongEverywhere]);
+
+  const fetchLyricsForCurrentSong = useCallback(async (force = false) => {
+    if (!currentSong) return;
+    if (currentSong.source === "local") {
+      setToast("本地音乐请导入 LRC 歌词文件");
+      return;
+    }
+    if (currentSong.lrc && !force) {
+      setToast("当前歌曲已有歌词");
+      return;
+    }
+    const key = songKey(currentSong);
+    setLyricsLoadingKey(key);
+    setToast("正在获取歌词...");
+    try {
+      const lrc = await fetchLyricsForSong(currentSong);
+      if (!lrc.trim()) {
+        setToast("没有找到歌词");
+        return;
+      }
+      updateSongEverywhere(currentSong, (song) => ({ ...song, lrc }));
+      setToast("歌词已更新");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "歌词获取失败");
+    } finally {
+      setLyricsLoadingKey((value) => value === key ? "" : value);
+    }
   }, [currentSong, updateSongEverywhere]);
 
   const cacheDownloadedSong = useCallback(async (original: Song, target: Song) => {
@@ -743,11 +775,11 @@ export default function App() {
   }, []);
 
   const backup = useCallback(async () => {
-    const state: PersistedState = { playlists, favorites, history, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart };
+    const state: PersistedState = { playlists, favorites, history, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart };
     const payload = await makeBackup(state);
     downloadJson(`jianyin_web_clean_${new Date().toISOString().replace(/[:.]/g, "-")}.json`, payload);
     setToast(payload.localFiles?.length ? `已导出备份，包含 ${payload.localFiles.length} 个本地音频` : "已导出备份");
-  }, [autoCacheEnabled, autoPlayOnStart, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
+  }, [autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
 
   const restore = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -768,6 +800,7 @@ export default function App() {
         setDownloadQuality(hydrated.state.downloadQuality);
         setProgressStyle(hydrated.state.progressStyle);
         setLyricSource(hydrated.state.lyricSource);
+        setAutoLyricsEnabled(hydrated.state.autoLyricsEnabled);
         setPlaybackSpeed(hydrated.state.playbackSpeed);
         setFadeEnabled(hydrated.state.fadeEnabled);
         setAutoCacheEnabled(hydrated.state.autoCacheEnabled);
@@ -929,7 +962,7 @@ export default function App() {
       <aside className="rail">
         <button className="brand" onClick={() => setTab("home")} aria-label="打开首页">
           <img src="/assets/icon.png" alt="" />
-          <span>简音</span>
+          <span>拾音</span>
         </button>
         <nav>
           <NavButton active={tab === "home"} icon={<Home />} label="首页" onClick={() => setTab("home")} />
@@ -1101,6 +1134,7 @@ export default function App() {
           playbackSpeed={playbackSpeed}
           progressStyle={progressStyle}
           floatingLyric={floatingLyric}
+          autoLyricsEnabled={autoLyricsEnabled}
           lyricsLoading={lyricsLoadingKey === songKey(currentSong)}
           sleepTimerUntil={sleepTimerUntil}
           playlists={playlists}
@@ -1112,6 +1146,7 @@ export default function App() {
             setToast(`已设置定时关闭：${seconds < 60 ? `${seconds} 秒` : `${Math.round(seconds / 60)} 分钟`}`);
           }}
           onFloatingLyric={() => setFloatingLyric((value) => !value)}
+          onFetchLyrics={() => void fetchLyricsForCurrentSong(true)}
           onPickLrc={() => lrcInputRef.current?.click()}
           onPickCover={() => coverInputRef.current?.click()}
           onQueueMove={moveQueueItem}
@@ -1167,6 +1202,7 @@ export default function App() {
                 <option value="embedded">本地内嵌优先</option>
               </select>
             </label>
+            <label className="switch-line"><span><FileText /> 自动获取歌词</span><input type="checkbox" checked={autoLyricsEnabled} onChange={(event) => setAutoLyricsEnabled(event.target.checked)} /></label>
             <label>
               主题
               <select value={theme} onChange={(event) => setTheme(event.target.value as Theme)}>
@@ -1287,7 +1323,7 @@ function HomeScreen({ data, loading, error, onPlay, onOpenPlaylist, onOpenRemote
   return (
     <section className="screen">
       <header className="topbar">
-        <div><span className="kicker">Android 5.0.0 Replica</span><h1>简音</h1></div>
+        <div><span className="kicker">Android 5.0.0 Replica</span><h1>拾音</h1></div>
         <div className="top-actions">
           <span className={`status-pill ${proxyOnline ? "online" : ""}`}>{proxyOnline ? "网易云官方接口" : "本地兜底"}</span>
           <button className="icon-button" onClick={onRefresh} aria-label="刷新推荐" disabled={loading}><RefreshCw /></button>

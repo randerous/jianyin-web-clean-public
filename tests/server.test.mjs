@@ -210,6 +210,41 @@ test("lyrics endpoint finds Netease lyric by song title and artist", async () =>
   assert.equal(result.body.lrc, "[00:00.00]Do you remember");
 });
 
+test("lyrics endpoint falls back to direct Netease web APIs", async () => {
+  const neteaseClient = {
+    async cloudsearch() {
+      throw new Error("read ECONNRESET");
+    },
+    async lyric() {
+      throw new Error("read ECONNRESET");
+    }
+  };
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/api/search/get/web") {
+      assert.equal(parsed.searchParams.get("s"), "September Artist 91");
+      return new Response(JSON.stringify({
+        result: { songs: [song(91, "September")] }
+      }), { headers: { "content-type": "application/json" } });
+    }
+    if (parsed.pathname === "/api/song/lyric") {
+      assert.equal(parsed.searchParams.get("id"), "91");
+      return new Response(JSON.stringify({
+        lrc: { lyric: "[00:00.00]direct lyric" }
+      }), { headers: { "content-type": "application/json" } });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const baseUrl = await startTestServer({ neteaseClient, fetchImpl });
+
+  const result = await getJson(`${baseUrl}/api/lyrics?name=${encodeURIComponent("September")}&artist=${encodeURIComponent("Artist 91")}&source=flac`);
+
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.provider, "netease");
+  assert.equal(result.body.id, "netease_91");
+  assert.equal(result.body.lrc, "[00:00.00]direct lyric");
+});
+
 test("stream revalidates playback data and forwards range requests", async () => {
   let upstreamRange = "";
   let upstreamCalls = 0;

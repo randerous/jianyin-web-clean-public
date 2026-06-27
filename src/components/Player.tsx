@@ -18,6 +18,7 @@ type Props = {
   playbackSpeed: number;
   progressStyle: ProgressStyle;
   floatingLyric: boolean;
+  autoLyricsEnabled: boolean;
   lyricsLoading: boolean;
   sleepTimerUntil: number | null;
   playlists: Playlist[];
@@ -35,6 +36,7 @@ type Props = {
   onProgressStyle: (value: ProgressStyle) => void;
   onSleepTimer: (seconds: number) => void;
   onFloatingLyric: () => void;
+  onFetchLyrics: () => void;
   onQueueRemove: (song: Song) => void;
   onQueueSelect: (song: Song) => void;
   onQueueMove: (index: number, direction: -1 | 1) => void;
@@ -135,6 +137,7 @@ export default function Player(props: Props) {
             {menuOpen && <div className="more-panel">
               <strong>更多选项</strong>
               <button onClick={props.onDownload}><Download /> 下载歌曲</button>
+              <button onClick={() => { props.onFetchLyrics(); setMenuOpen(false); }} disabled={props.lyricsLoading}><FileText /> {props.song.lrc ? "重新获取歌词" : props.lyricsLoading ? "正在获取歌词" : "获取歌词"}</button>
               <button onClick={pickLrc}><FileText /> 选择 LRC 文件</button>
               <button onClick={pickCover}><Image /> 选择封面</button>
               <button onClick={() => props.onSleepTimer(15)}><Timer /> 定时关闭 <span>{sleepLabel}</span></button>
@@ -160,7 +163,7 @@ export default function Player(props: Props) {
           <div className={`lyric-panel player-pane ${view === "lyrics" ? "active" : ""}`}>
             {lyrics.length ? lyrics.map((line, index) => (
               <p key={`${line.time}-${line.text}`} className={index === active ? "current" : ""}>{line.text}</p>
-            )) : <p className="empty-text">{props.lyricsLoading ? "正在自动获取歌词..." : "暂无歌词"}</p>}
+            )) : <p className="empty-text">{props.lyricsLoading ? "正在获取歌词..." : props.autoLyricsEnabled ? "暂无歌词，打开更多可手动获取" : "自动获取歌词已关闭"}</p>}
           </div>
         </div>
 

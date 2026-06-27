@@ -39,7 +39,7 @@ public class MainActivity extends BridgeActivity {
                 DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
                 request.setMimeType(mimeType);
                 request.setTitle(fileName);
-                request.setDescription("Jianyin");
+                request.setDescription("拾音");
                 request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
                 request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName);
                 if (userAgent != null) {

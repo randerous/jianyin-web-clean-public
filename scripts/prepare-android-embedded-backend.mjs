@@ -215,7 +215,7 @@ function writeBootstrapPage() {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Jianyin</title>
+    <title>拾音</title>
     <style>
       html, body {
         margin: 0;
@@ -234,7 +234,7 @@ function writeBootstrapPage() {
     </style>
   </head>
   <body>
-    <div class="status" id="status">Starting Jianyin...</div>
+    <div class="status" id="status">正在启动拾音...</div>
     <script src="cordova.js"></script>
     <script>
       (function () {
@@ -300,7 +300,7 @@ function writeBootstrapPage() {
           window.nodejs.start("main.cjs", function (error) {
             if (error) {
               if (/Engine already started/i.test(String(error))) {
-                setStatus("Opening Jianyin...");
+                setStatus("正在打开拾音...");
                 waitForServer(Date.now() + 15000);
                 return;
               }
@@ -309,7 +309,7 @@ function writeBootstrapPage() {
               setTimeout(startNode, 1000);
               return;
             }
-            setStatus("Opening Jianyin...");
+            setStatus("正在打开拾音...");
             waitForServer(Date.now() + 15000);
           }, { redirectOutputToLogcat: true });
         }

@@ -2,7 +2,7 @@ import type { CapacitorConfig } from "@capacitor/cli";
 
 const config: CapacitorConfig = {
   appId: "com.randerous.jianyin",
-  appName: "Jianyin",
+  appName: "拾音",
   webDir: "dist",
   bundledWebRuntime: false,
   android: {

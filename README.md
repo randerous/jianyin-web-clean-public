@@ -1,4 +1,4 @@
-# 简音 Web Clean
+# 拾音
 
 一个基于 React、Vite、Express 和 Capacitor 的音乐播放器项目，包含桌面 Web 版和 Android 版。
 
