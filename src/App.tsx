@@ -32,6 +32,7 @@ import SongRow from "./components/SongRow";
 import {
   checkProxy,
   fetchNeteaseHome,
+  fetchLyricsForSong,
   getBiliAccountStatus,
   getApiBaseUrl,
   getNeteaseAccountStatus,
@@ -199,6 +200,7 @@ export default function App() {
   const [apiBaseInput, setApiBaseInput] = useState(() => getApiBaseUrl());
   const [objectUrls, setObjectUrls] = useState<string[]>([]);
   const [floatingLyric, setFloatingLyric] = useState(false);
+  const [lyricsLoadingKey, setLyricsLoadingKey] = useState("");
   const [sleepTimerUntil, setSleepTimerUntil] = useState<number | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -569,6 +571,27 @@ export default function App() {
       return { ...playlist, songs, cover: songKey(songs[0] ?? target) === key ? songs[0]?.cover ?? playlist.cover : playlist.cover };
     }));
   }, []);
+
+  useEffect(() => {
+    if (!currentSong || currentSong.lrc || currentSong.source === "local") return;
+    const key = songKey(currentSong);
+    let cancelled = false;
+    setLyricsLoadingKey(key);
+    void fetchLyricsForSong(currentSong)
+      .then((lrc) => {
+        if (cancelled || !lrc.trim()) return;
+        updateSongEverywhere(currentSong, (song) => song.lrc ? song : { ...song, lrc });
+      })
+      .catch(() => {
+        // Lyrics are best-effort; playback should never be blocked by lyric lookup.
+      })
+      .finally(() => {
+        if (!cancelled) setLyricsLoadingKey((value) => value === key ? "" : value);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentSong, updateSongEverywhere]);
 
   const cacheDownloadedSong = useCallback(async (original: Song, target: Song) => {
     if (target.localKey || !isRemoteSong(target) || !target.url || target.url.startsWith("local-file:")) return target;
@@ -1078,6 +1101,7 @@ export default function App() {
           playbackSpeed={playbackSpeed}
           progressStyle={progressStyle}
           floatingLyric={floatingLyric}
+          lyricsLoading={lyricsLoadingKey === songKey(currentSong)}
           sleepTimerUntil={sleepTimerUntil}
           playlists={playlists}
           selectedKeys={selected}

@@ -976,6 +976,14 @@ test("flac test source searches, filters, resolves, and plays full songs", async
       })
     });
   });
+  await page.route("**/api/lyrics**", async (route) => {
+    const url = new URL(route.request().url());
+    expect(url.searchParams.get("name")).toBe("Boogie Wonderland");
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ lrc: "[00:00.00]dance with me", provider: "netease", id: "netease_91" })
+    });
+  });
 
   await page.locator("nav button").nth(1).click();
   await page.locator(".search-toolbar .segmented button").nth(2).click();
@@ -1009,4 +1017,6 @@ test("flac test source searches, filters, resolves, and plays full songs", async
   await expectAudioLongerThan(page, 60);
   expect(songRequests).toEqual(["format=flac&bitrate=2000&time=23456&sign=signed2"]);
   await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.src)).toContain("full-song-65s.wav");
+  await page.locator(".now-playing").click();
+  await expect(page.locator(".player-sheet")).toContainText("dance with me");
 });

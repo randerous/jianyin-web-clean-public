@@ -18,6 +18,7 @@ type Props = {
   playbackSpeed: number;
   progressStyle: ProgressStyle;
   floatingLyric: boolean;
+  lyricsLoading: boolean;
   sleepTimerUntil: number | null;
   playlists: Playlist[];
   selectedKeys: Set<string>;
@@ -159,7 +160,7 @@ export default function Player(props: Props) {
           <div className={`lyric-panel player-pane ${view === "lyrics" ? "active" : ""}`}>
             {lyrics.length ? lyrics.map((line, index) => (
               <p key={`${line.time}-${line.text}`} className={index === active ? "current" : ""}>{line.text}</p>
-            )) : <p className="empty-text">暂无歌词</p>}
+            )) : <p className="empty-text">{props.lyricsLoading ? "正在自动获取歌词..." : "暂无歌词"}</p>}
           </div>
         </div>
 

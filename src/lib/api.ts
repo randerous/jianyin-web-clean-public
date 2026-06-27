@@ -224,6 +224,17 @@ export async function resolveNeteaseSong(song: Song, quality: PlayQuality = "exh
   };
 }
 
+export async function fetchLyricsForSong(song: Song) {
+  const params = new URLSearchParams({
+    name: song.name,
+    artist: song.artist,
+    source: song.source
+  });
+  if (song.source === "netease") params.set("id", song.id.replace(/^netease_/, ""));
+  const data = await fetchJson<{ lrc?: string }>(`/api/lyrics?${params.toString()}`);
+  return typeof data.lrc === "string" ? data.lrc : "";
+}
+
 export async function resolveBiliSong(song: Song) {
   const bvid = song.bvid || song.id.replace(/^bili_/, "").split("_")[0];
   const cid = song.cid;

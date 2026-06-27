@@ -189,6 +189,27 @@ test("song resolve rejects no-url, trial, and 30-second playback data", async ()
 	  assert.equal(exact.body.reason, "too_short");
 });
 
+test("lyrics endpoint finds Netease lyric by song title and artist", async () => {
+  const neteaseClient = {
+    async cloudsearch({ keywords }) {
+      assert.match(keywords, /September/);
+      return { body: { result: { songs: [song(91, "September")] } } };
+    },
+    async lyric({ id }) {
+      assert.equal(id, "91");
+      return { body: { lrc: { lyric: "[00:00.00]Do you remember" } } };
+    }
+  };
+  const baseUrl = await startTestServer({ neteaseClient });
+
+  const result = await getJson(`${baseUrl}/api/lyrics?name=${encodeURIComponent("September")}&artist=${encodeURIComponent("Artist 91")}&source=flac`);
+
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.provider, "netease");
+  assert.equal(result.body.id, "netease_91");
+  assert.equal(result.body.lrc, "[00:00.00]Do you remember");
+});
+
 test("stream revalidates playback data and forwards range requests", async () => {
   let upstreamRange = "";
   let upstreamCalls = 0;

@@ -632,6 +632,37 @@ function mapSong(song) {
   };
 }
 
+function normalizeMatchText(value) {
+  return cleanText(value).toLowerCase().replace(/\s+/g, "");
+}
+
+function songArtistText(song) {
+  const artists = song?.ar ?? song?.artists ?? [];
+  return artists.map((artist) => cleanText(artist?.name)).filter(Boolean).join("/");
+}
+
+function lyricCall() {
+  return typeof netease.lyric_new === "function" ? netease.lyric_new.bind(netease) : netease.lyric.bind(netease);
+}
+
+async function fetchNeteaseLyric(id) {
+  const result = await lyricCall()({ id, cookie: neteaseAccountCookie });
+  return parseLyricBody(result.body);
+}
+
+async function findLyricCandidate(keyword, artist) {
+  const songs = await searchSongs(keyword, 12);
+  const wantedArtist = normalizeMatchText(artist);
+  const wantedTitle = normalizeMatchText(keyword.replace(artist, ""));
+  return songs.find((song) => {
+    const title = normalizeMatchText(song?.name);
+    const artists = normalizeMatchText(songArtistText(song));
+    const titleMatches = wantedTitle ? title.includes(wantedTitle) || wantedTitle.includes(title) : true;
+    const artistMatches = wantedArtist ? artists.includes(wantedArtist) || wantedArtist.includes(artists) : true;
+    return titleMatches && artistMatches;
+  }) ?? songs[0] ?? null;
+}
+
 function isFullPlayableUrlData(data) {
   const url = cleanText(data?.url);
   const time = Number(data?.time ?? 0);
@@ -1040,10 +1071,9 @@ app.get("/api/netease/song/:id", async (req, res) => {
 
   try {
 	    const quality = normalizeQuality(req.query.quality);
-	    const lyricCall = typeof netease.lyric_new === "function" ? netease.lyric_new.bind(netease) : netease.lyric.bind(netease);
 	    const [urlResult, lyricResult] = await Promise.allSettled([
 	      resolveSongUrl(id, quality, neteaseAccountCookie),
-	      lyricCall({ id, cookie: neteaseAccountCookie })
+	      fetchNeteaseLyric(id)
 	    ]);
     if (urlResult.status === "rejected") throw urlResult.reason;
     const data = urlResult.value ?? {};
@@ -1055,7 +1085,7 @@ app.get("/api/netease/song/:id", async (req, res) => {
       });
       return;
     }
-	    const lrc = lyricResult.status === "fulfilled" ? parseLyricBody(lyricResult.value.body) : "";
+	    const lrc = lyricResult.status === "fulfilled" ? lyricResult.value : "";
 	    res.json({
 	      url: streamPath(id, quality),
 	      lrc,
@@ -1069,6 +1099,36 @@ app.get("/api/netease/song/:id", async (req, res) => {
 	    });
   } catch (error) {
     res.status(502).json({ error: "netease_song_failed", message: errorMessage(error) });
+  }
+});
+
+app.get("/api/lyrics", async (req, res) => {
+  const rawId = cleanText(req.query.id).replace(/^netease_/, "");
+  const name = cleanText(req.query.name);
+  const artist = cleanText(req.query.artist);
+  try {
+    let id = /^\d+$/.test(rawId) ? rawId : "";
+    if (!id) {
+      const keyword = [name, artist].filter(Boolean).join(" ").trim();
+      if (!keyword) {
+        res.status(400).json({ error: "song_required", message: "song id or name is required" });
+        return;
+      }
+      const candidate = await findLyricCandidate(keyword, artist);
+      id = String(candidate?.id ?? "");
+    }
+    if (!/^\d+$/.test(id)) {
+      res.status(404).json({ error: "lyrics_not_found", message: "没有找到歌词" });
+      return;
+    }
+    const lrc = await fetchNeteaseLyric(id);
+    if (!lrc) {
+      res.status(404).json({ error: "lyrics_not_found", message: "没有找到歌词" });
+      return;
+    }
+    res.json({ lrc, provider: "netease", id: `netease_${id}` });
+  } catch (error) {
+    res.status(502).json({ error: "lyrics_failed", message: errorMessage(error) });
   }
 });
 
