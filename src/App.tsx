@@ -1,0 +1,1591 @@
+import {
+  ArchiveRestore,
+  ChevronLeft,
+  ChevronRight,
+  Cloud,
+  Download,
+  FileAudio,
+  Flame,
+  Heart,
+  Home,
+  Library,
+  ListPlus,
+  Music,
+  Pause,
+  Play,
+  Plus,
+  RefreshCw,
+  Search,
+  Settings,
+  SkipForward,
+  Square,
+  SquareCheckBig,
+  Star,
+  UserRound,
+  Trash2,
+  X
+} from "lucide-react";
+import { ChangeEvent, FormEvent, MouseEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Modal from "./components/Modal";
+import Player from "./components/Player";
+import SongRow from "./components/SongRow";
+import {
+  checkProxy,
+  fetchNeteaseHome,
+  getBiliAccountStatus,
+  getApiBaseUrl,
+  getNeteaseAccountStatus,
+  importNeteasePlaylist,
+  loginBiliCookie,
+  loginNeteaseCookie,
+  logoutBiliCookie,
+  logoutNeteaseCookie,
+  FLAC_SEARCH_PAGE_SIZE,
+  resolveBiliSong,
+  resolveFlacSong,
+  resolveNeteaseSong,
+  searchBili,
+  searchFlac,
+  searchNetease,
+  setApiBaseUrl,
+  syncBiliAccountPlaylists,
+  syncNeteaseAccountPlaylists
+} from "./lib/api";
+import { activeLyricIndex, formatTime, parseLrc } from "./lib/lyrics";
+import {
+  downloadJson,
+  hydrateLocalSongs,
+  loadLocalFile,
+  loadSharedState,
+  loadState,
+  makeBackup,
+  mergeStates,
+  restoreBackup,
+  saveLocalFile,
+  saveSharedState,
+  saveState,
+  songKey
+} from "./lib/storage";
+import { FAVORITES_ID, cover, recommendedKeywords, seedPlaylists, seedSongs } from "./data/seed";
+import type { AccountState, LyricSource, PersistedState, PlayQuality, Playlist, ProgressStyle, Song, Theme } from "./types";
+
+type Tab = "home" | "search" | "mine";
+type PlayMode = "sequence" | "repeat" | "shuffle";
+type SearchSource = "netease" | "bili" | "flac";
+type HomeData = {
+  radarSongs: Song[];
+  hotSongs: Song[];
+  recommendedPlaylists: Playlist[];
+};
+
+declare global {
+  interface Window {
+    JianyinAndroid?: {
+      setPlaybackState?: (active: boolean, title?: string, artist?: string) => void;
+    };
+  }
+}
+
+const qualityOptions: { value: PlayQuality; label: string }[] = [
+  { value: "jymaster", label: "超清母带" },
+  { value: "sky", label: "沉浸环绕声" },
+  { value: "jyeffect", label: "高清环绕声" },
+  { value: "hires", label: "Hi-Res" },
+  { value: "lossless", label: "无损" },
+  { value: "exhigh", label: "极高" },
+  { value: "standard", label: "标准" }
+];
+
+function qualityLabel(value: string | undefined) {
+  return qualityOptions.find((item) => item.value === value)?.label ?? value ?? "未知";
+}
+
+function playableSongs(songs: Song[]) {
+  return songs.filter((song) => !song.needsImport && (song.url || song.localKey || song.remotePlayable || isRemoteSong(song)));
+}
+
+function isRemoteSong(song: Song) {
+  return song.source === "netease" || song.source === "bili" || song.source === "flac";
+}
+
+function verifiedUrlMatchesQuality(song: Song, quality: PlayQuality) {
+  if (!song.url || song.url.startsWith("local-file:")) return false;
+  if (song.source !== "netease") return false;
+  if (!song.verifiedPlayable) return false;
+  return song.url.includes(`quality=${encodeURIComponent(quality)}`) || song.quality === quality;
+}
+
+function createLocalSong(file: File, index: number): Song {
+  const localKey = `local_${file.name}_${file.lastModified}_${file.size}_${index}`;
+  return {
+    id: localKey,
+    name: file.name.replace(/\.[^.]+$/, ""),
+    artist: "本地文件",
+    url: URL.createObjectURL(file),
+    cover: cover(index + 1),
+    source: "local",
+    localKey
+  };
+}
+
+function uniqueSongs(songs: Song[]) {
+  const seen = new Set<string>();
+  return songs.filter((song) => {
+    const key = songKey(song);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function allLibrarySongs(playlists: Playlist[], history: Song[]) {
+  return uniqueSongs([...seedSongs, ...playlists.flatMap((playlist) => playlist.songs), ...history]);
+}
+
+export default function App() {
+  const initial = useMemo(loadState, []);
+  const [tab, setTab] = useState<Tab>("home");
+  const [playlists, setPlaylists] = useState(initial.playlists);
+  const [favorites, setFavorites] = useState(initial.favorites);
+  const [history, setHistory] = useState(initial.history);
+  const [queue, setQueue] = useState(initial.queue);
+  const [queueIndex, setQueueIndex] = useState(initial.queueIndex);
+  const [searchHistory, setSearchHistory] = useState(initial.searchHistory);
+  const [theme, setTheme] = useState<Theme>(initial.theme);
+  const [playQuality, setPlayQuality] = useState<PlayQuality>(initial.playQuality);
+  const [downloadQuality, setDownloadQuality] = useState<PlayQuality>(initial.downloadQuality);
+  const [progressStyle, setProgressStyle] = useState<ProgressStyle>(initial.progressStyle);
+  const [lyricSource, setLyricSource] = useState<LyricSource>(initial.lyricSource);
+  const [playbackSpeed, setPlaybackSpeed] = useState(initial.playbackSpeed);
+  const [fadeEnabled, setFadeEnabled] = useState(initial.fadeEnabled);
+  const [autoCacheEnabled, setAutoCacheEnabled] = useState(initial.autoCacheEnabled);
+  const [keepQueueOnExit, setKeepQueueOnExit] = useState(initial.keepQueueOnExit);
+  const [autoPlayOnStart, setAutoPlayOnStart] = useState(initial.autoPlayOnStart);
+  const [homeData, setHomeData] = useState<HomeData>({
+    radarSongs: seedSongs.slice(0, 8),
+    hotSongs: seedSongs.slice(2, 8),
+    recommendedPlaylists: seedPlaylists.filter((playlist) => playlist.id !== FAVORITES_ID)
+  });
+  const [homeLoading, setHomeLoading] = useState(false);
+  const [homeError, setHomeError] = useState("");
+  const [query, setQuery] = useState("");
+  const [searchSource, setSearchSource] = useState<SearchSource>("flac");
+  const [remoteResults, setRemoteResults] = useState<Song[]>([]);
+  const [searchPageInfo, setSearchPageInfo] = useState({ page: 1, pageSize: FLAC_SEARCH_PAGE_SIZE, total: null as number | null, hasMore: false });
+  const [searching, setSearching] = useState(false);
+  const [proxyOnline, setProxyOnline] = useState(false);
+  const [toast, setToast] = useState("");
+  const [playing, setPlaying] = useState(false);
+  const [position, setPosition] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [playerOpen, setPlayerOpen] = useState(false);
+  const [activePlaylistId, setActivePlaylistId] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [mode, setMode] = useState<PlayMode>("sequence");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [newPlaylistName, setNewPlaylistName] = useState("");
+  const [neteaseOpen, setNeteaseOpen] = useState(false);
+  const [neteaseInput, setNeteaseInput] = useState("");
+  const [neteaseError, setNeteaseError] = useState("");
+  const [neteaseBusy, setNeteaseBusy] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [neteaseAccount, setNeteaseAccount] = useState<AccountState>({ loggedIn: false });
+  const [biliAccount, setBiliAccount] = useState<AccountState>({ loggedIn: false });
+  const [accountCookie, setAccountCookie] = useState("");
+  const [accountProvider, setAccountProvider] = useState<"netease" | "bili">("netease");
+  const [accountBusy, setAccountBusy] = useState(false);
+  const [accountError, setAccountError] = useState("");
+  const [apiBaseInput, setApiBaseInput] = useState(() => getApiBaseUrl());
+  const [objectUrls, setObjectUrls] = useState<string[]>([]);
+  const [floatingLyric, setFloatingLyric] = useState(false);
+  const [sleepTimerUntil, setSleepTimerUntil] = useState<number | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const restoreInputRef = useRef<HTMLInputElement | null>(null);
+  const lrcInputRef = useRef<HTMLInputElement | null>(null);
+  const coverInputRef = useRef<HTMLInputElement | null>(null);
+  const searchRunRef = useRef(0);
+  const sharedStateReadyRef = useRef(false);
+  const queueRef = useRef(queue);
+  const queueIndexRef = useRef(queueIndex);
+  const modeRef = useRef(mode);
+
+  const currentSong = queue[queueIndex] ?? null;
+  const librarySongs = useMemo(() => allLibrarySongs(playlists, history), [history, playlists]);
+  const favoriteKeys = useMemo(() => new Set(favorites.map(songKey)), [favorites]);
+  const activePlaylist = playlists.find((playlist) => playlist.id === activePlaylistId) ?? null;
+  const searchResults = useMemo(() => {
+    const key = query.trim().toLowerCase();
+    if (!key) return [];
+    return uniqueSongs([
+      ...remoteResults,
+      ...librarySongs.filter((song) => [song.name, song.artist, song.source].some((value) => value.toLowerCase().includes(key)))
+    ]);
+  }, [librarySongs, query, remoteResults]);
+
+  useEffect(() => {
+    queueRef.current = queue;
+  }, [queue]);
+
+  useEffect(() => {
+    queueIndexRef.current = queueIndex;
+  }, [queueIndex]);
+
+  useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
+  useEffect(() => {
+    try {
+      window.JianyinAndroid?.setPlaybackState?.(playing && Boolean(currentSong), currentSong?.name ?? "", currentSong?.artist ?? "");
+    } catch {
+      // Android bridge is only available inside the packaged app.
+    }
+  }, [currentSong, playing]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
+
+  useEffect(() => {
+    const state: PersistedState = {
+      playlists,
+      favorites,
+      history,
+      queue: keepQueueOnExit ? queue : [],
+      queueIndex: keepQueueOnExit ? queueIndex : -1,
+      searchHistory,
+      theme,
+      playQuality,
+      downloadQuality,
+      progressStyle,
+      lyricSource,
+      playbackSpeed,
+      fadeEnabled,
+      autoCacheEnabled,
+      keepQueueOnExit,
+      autoPlayOnStart
+    };
+    try {
+      saveState(state);
+      if (sharedStateReadyRef.current) void saveSharedState(state).catch(() => setToast("共享歌单保存失败"));
+    } catch {
+      setToast("浏览器存储空间不足，本次修改可能不会保存");
+    }
+  }, [autoCacheEnabled, autoPlayOnStart, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
+
+  useEffect(() => {
+    let live = true;
+    const localState: PersistedState = { playlists, favorites, history, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart };
+    void loadSharedState()
+      .then(async (shared) => hydrateLocalSongs(shared ? mergeStates(localState, shared) : localState))
+      .then((result) => {
+        if (!live) return;
+        setPlaylists(result.state.playlists);
+        setFavorites(result.state.favorites);
+        setHistory(result.state.history);
+        setQueue(result.state.queue);
+        setQueueIndex(result.state.queueIndex);
+        setSearchHistory(result.state.searchHistory);
+        setTheme(result.state.theme);
+        setPlayQuality(result.state.playQuality);
+        setDownloadQuality(result.state.downloadQuality);
+        setProgressStyle(result.state.progressStyle);
+        setLyricSource(result.state.lyricSource);
+        setPlaybackSpeed(result.state.playbackSpeed);
+        setFadeEnabled(result.state.fadeEnabled);
+        setAutoCacheEnabled(result.state.autoCacheEnabled);
+        setKeepQueueOnExit(result.state.keepQueueOnExit);
+        setAutoPlayOnStart(result.state.autoPlayOnStart);
+        setObjectUrls((items) => {
+          items.forEach(URL.revokeObjectURL);
+          return result.urls;
+        });
+        saveState(result.state);
+        sharedStateReadyRef.current = true;
+      })
+      .catch(() => {
+        if (live) sharedStateReadyRef.current = true;
+      });
+    return () => {
+      live = false;
+      objectUrls.forEach(URL.revokeObjectURL);
+    };
+  }, []);
+
+  const refreshHome = useCallback(async () => {
+    setHomeLoading(true);
+    setHomeError("");
+    try {
+      const data = await fetchNeteaseHome(playQuality);
+      setHomeData({
+        radarSongs: data.radarSongs.length ? data.radarSongs : seedSongs.slice(0, 8),
+        hotSongs: data.hotSongs.length ? data.hotSongs : seedSongs.slice(2, 8),
+        recommendedPlaylists: data.recommendedPlaylists.length ? data.recommendedPlaylists : seedPlaylists.filter((playlist) => playlist.id !== FAVORITES_ID)
+      });
+      setProxyOnline(true);
+    } catch (error) {
+      setHomeError(error instanceof Error ? error.message : "首页推荐加载失败");
+      setProxyOnline(false);
+      setHomeData({
+        radarSongs: seedSongs.slice(0, 8),
+        hotSongs: seedSongs.slice(2, 8),
+        recommendedPlaylists: seedPlaylists.filter((playlist) => playlist.id !== FAVORITES_ID)
+      });
+    } finally {
+      setHomeLoading(false);
+    }
+  }, [playQuality]);
+
+  useEffect(() => {
+    void refreshHome();
+  }, [refreshHome]);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = window.setTimeout(() => setToast(""), 2500);
+    return () => window.clearTimeout(timer);
+  }, [toast]);
+
+  useEffect(() => {
+    void checkProxy().then(setProxyOnline);
+    void getNeteaseAccountStatus().then(setNeteaseAccount).catch(() => setNeteaseAccount({ loggedIn: false }));
+    void getBiliAccountStatus().then(setBiliAccount).catch(() => setBiliAccount({ loggedIn: false }));
+  }, []);
+
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.playbackRate = playbackSpeed;
+  }, [playbackSpeed]);
+
+  useEffect(() => {
+    if (!sleepTimerUntil) return;
+    const delay = sleepTimerUntil - Date.now();
+    if (delay <= 0) {
+      audioRef.current?.pause();
+      setPlaying(false);
+      setSleepTimerUntil(null);
+      setToast("定时关闭已执行");
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      audioRef.current?.pause();
+      setPlaying(false);
+      setSleepTimerUntil(null);
+      setToast("定时关闭已执行");
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [sleepTimerUntil]);
+
+  useEffect(() => {
+    if (!("mediaSession" in navigator) || !currentSong) return;
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: currentSong.name,
+      artist: currentSong.artist,
+      artwork: currentSong.cover ? [{ src: currentSong.cover, sizes: "512x512", type: "image/png" }] : []
+    });
+    navigator.mediaSession.playbackState = playing ? "playing" : "paused";
+  }, [currentSong, playing]);
+
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || !currentSong) return;
+    const targetSrc = currentSong.url ? new URL(currentSong.url, window.location.href).href : "";
+    if (targetSrc && audio.src !== targetSrc) {
+      audio.src = currentSong.url;
+      setPosition(0);
+      setDuration(0);
+    }
+    if (playing && currentSong.url) {
+      audio.play().catch(() => {
+        setPlaying(false);
+        setToast("浏览器阻止了自动播放，请再次点击播放");
+      });
+    } else {
+      audio.pause();
+    }
+  }, [currentSong, playing]);
+
+  const resolvePlayable = useCallback(async (song: Song): Promise<Song> => {
+    if (song.localKey) {
+      const blob = await loadLocalFile(song.localKey);
+      if (!blob) throw new Error("本地文件不在当前浏览器，请重新导入");
+      return { ...song, url: URL.createObjectURL(blob), needsImport: false };
+    }
+    if (verifiedUrlMatchesQuality(song, playQuality)) return song;
+    if (song.source === "netease") return resolveNeteaseSong(song, playQuality);
+    if (song.source === "bili") return resolveBiliSong(song);
+    if (song.source === "flac") return resolveFlacSong(song);
+    if (song.url && !song.url.startsWith("local-file:")) return song;
+    throw new Error("当前歌曲没有可播放链接");
+  }, [playQuality]);
+
+  const playSong = useCallback(async (song: Song, source?: Song[], options: { quiet?: boolean } = {}) => {
+    try {
+      const playable = await resolvePlayable(song);
+      const nextQueue = playableSongs((source?.length ? source : [playable]).map((item) => songKey(item) === songKey(song) ? playable : item));
+      const nextIndex = Math.max(0, nextQueue.findIndex((item) => songKey(item) === songKey(playable)));
+      setQueue(nextQueue);
+      setQueueIndex(nextIndex);
+      setHistory((items) => [playable, ...items.filter((item) => songKey(item) !== songKey(playable))].slice(0, 30));
+      setPlaying(true);
+      if (audioRef.current) {
+        audioRef.current.src = playable.url;
+        audioRef.current.currentTime = 0;
+        audioRef.current.playbackRate = playbackSpeed;
+        await audioRef.current.play();
+      }
+      return true;
+    } catch (error) {
+      setPlaying(false);
+      if (!options.quiet) setToast(error instanceof Error ? error.message : "无法播放这首歌");
+      return false;
+    }
+  }, [playbackSpeed, resolvePlayable]);
+
+  const playQueueIndex = useCallback((index: number) => {
+    const items = queueRef.current;
+    if (!items.length) return;
+    const normalized = (index + items.length) % items.length;
+    const target = items[normalized];
+    if (target) void playSong(target, items);
+  }, [playSong]);
+
+  const advanceQueue = useCallback(async (direction: -1 | 1, options: { quiet?: boolean } = {}) => {
+    const items = queueRef.current;
+    if (!items.length) return;
+    const rawIndex = queueIndexRef.current;
+    const currentIndex = rawIndex >= 0 && rawIndex < items.length ? rawIndex : direction > 0 ? -1 : 0;
+    const indices = Array.from({ length: items.length }, (_, offset) => (currentIndex + direction * (offset + 1) + items.length) % items.length);
+    const ordered = modeRef.current === "shuffle" ? [...indices].sort(() => Math.random() - 0.5) : indices;
+
+    for (const index of ordered) {
+      const target = items[index];
+      if (target && await playSong(target, items, { quiet: true })) return;
+    }
+
+    setPlaying(false);
+    if (!options.quiet) setToast("播放列表里的歌曲都无法播放");
+  }, [playSong]);
+
+  const nextSong = useCallback(() => {
+    void advanceQueue(1);
+  }, [advanceQueue]);
+
+  const previousSong = useCallback(() => {
+    void advanceQueue(-1);
+  }, [advanceQueue]);
+
+  const handleAudioEnded = useCallback(() => {
+    if (modeRef.current === "repeat" && audioRef.current) {
+      audioRef.current.currentTime = 0;
+      void audioRef.current.play().catch(() => {
+        setPlaying(false);
+        setToast("无法继续播放当前歌曲");
+      });
+      return;
+    }
+    void advanceQueue(1, { quiet: true });
+  }, [advanceQueue]);
+
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    const setHandler = (action: MediaSessionAction, handler: MediaSessionActionHandler | null) => {
+      try {
+        navigator.mediaSession.setActionHandler(action, handler);
+      } catch {
+        // Some browsers expose MediaSession but not every action.
+      }
+    };
+    setHandler("play", () => {
+      if (currentSong) void playSong(currentSong, queue);
+    });
+    setHandler("pause", () => {
+      audioRef.current?.pause();
+      setPlaying(false);
+    });
+    setHandler("previoustrack", () => playQueueIndex(queueIndex - 1));
+    setHandler("nexttrack", () => nextSong());
+    setHandler("seekto", (details) => {
+      if (typeof details.seekTime === "number" && audioRef.current) {
+        audioRef.current.currentTime = details.seekTime;
+        setPosition(details.seekTime);
+      }
+    });
+  }, [currentSong, nextSong, playQueueIndex, playSong, queue, queueIndex]);
+
+  const togglePlayback = useCallback(() => {
+    if (!currentSong) return;
+    if (playing) {
+      audioRef.current?.pause();
+      setPlaying(false);
+      return;
+    }
+    void playSong(currentSong, queue);
+  }, [currentSong, playSong, playing, queue]);
+
+  const toggleFavorite = useCallback((song: Song) => {
+    const favoriteSong = isRemoteSong(song) ? { ...song, remotePlayable: true, needsImport: false } : song;
+    setFavorites((items) => {
+      const exists = items.some((item) => songKey(item) === songKey(favoriteSong));
+      const next = exists ? items.filter((item) => songKey(item) !== songKey(favoriteSong)) : [favoriteSong, ...items];
+      setPlaylists((playlists) => playlists.map((playlist) => playlist.id === FAVORITES_ID ? { ...playlist, songs: next, cover: next[0]?.cover ?? playlist.cover } : playlist));
+      setToast(exists ? "已取消喜欢" : "已添加到我喜欢的音乐");
+      return next;
+    });
+  }, []);
+
+  const addSongsToPlaylist = useCallback((playlistId: string, songs: Song[]) => {
+    setPlaylists((items) => items.map((playlist) => {
+      if (playlist.id !== playlistId) return playlist;
+      const existing = new Set(playlist.songs.map(songKey));
+      const additions = songs.filter((song) => !existing.has(songKey(song)));
+      const nextSongs = [...additions, ...playlist.songs];
+      setToast(`已添加 ${additions.length} 首到 ${playlist.name}`);
+      return { ...playlist, songs: nextSongs, cover: nextSongs[0]?.cover ?? playlist.cover };
+    }));
+    setSelected(new Set());
+  }, []);
+
+  const addSongsToQueue = useCallback((songs: Song[]) => {
+    const additions = playableSongs(songs);
+    if (!additions.length) {
+      setToast("没有可加入播放队列的歌曲");
+      return;
+    }
+    setQueue((items) => uniqueSongs([...items, ...additions]));
+    setToast(`已添加 ${additions.length} 首歌曲到播放队列`);
+    setSelected(new Set());
+  }, []);
+
+  const updateSongEverywhere = useCallback((target: Song, updater: (song: Song) => Song) => {
+    const key = songKey(target);
+    const update = (song: Song) => songKey(song) === key ? updater(song) : song;
+    setQueue((items) => items.map(update));
+    setHistory((items) => items.map(update));
+    setFavorites((items) => items.map(update));
+    setPlaylists((items) => items.map((playlist) => {
+      const songs = playlist.songs.map(update);
+      return { ...playlist, songs, cover: songKey(songs[0] ?? target) === key ? songs[0]?.cover ?? playlist.cover : playlist.cover };
+    }));
+  }, []);
+
+  const cacheDownloadedSong = useCallback(async (original: Song, target: Song) => {
+    if (target.localKey || !isRemoteSong(target) || !target.url || target.url.startsWith("local-file:")) return target;
+    try {
+      const response = await fetch(target.url);
+      if (!response.ok) throw new Error("download cache failed");
+      const blob = await response.blob();
+      const localKey = `download_${target.source}_${target.id}`.replace(/[^a-zA-Z0-9_.-]/g, "_");
+      await saveLocalFile(localKey, blob);
+      const cached: Song = {
+        ...target,
+        localKey,
+        url: `local-file:${localKey}`,
+        needsImport: false,
+        remotePlayable: true
+      };
+      updateSongEverywhere(original, () => cached);
+      return cached;
+    } catch {
+      return target;
+    }
+  }, [updateSongEverywhere]);
+
+  const importLrcForCurrentSong = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !currentSong) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const lrc = String(reader.result ?? "");
+      updateSongEverywhere(currentSong, (song) => ({ ...song, lrc }));
+      setToast("已应用本地 LRC 歌词");
+    };
+    reader.onerror = () => setToast("LRC 文件读取失败");
+    reader.readAsText(file);
+  }, [currentSong, updateSongEverywhere]);
+
+  const importCoverForCurrentSong = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !currentSong) return;
+    if (!file.type.startsWith("image/")) {
+      setToast("请选择图片文件");
+      return;
+    }
+    const coverKey = `cover_${songKey(currentSong)}_${file.lastModified}_${file.size}`;
+    await saveLocalFile(coverKey, file);
+    const coverUrl = URL.createObjectURL(file);
+    setObjectUrls((items) => [...items, coverUrl]);
+    updateSongEverywhere(currentSong, (song) => ({ ...song, cover: coverUrl, coverKey }));
+    setToast("已应用本地封面");
+  }, [currentSong, updateSongEverywhere]);
+
+  const moveQueueItem = useCallback((index: number, direction: -1 | 1) => {
+    const items = queueRef.current;
+    const toIndex = index + direction;
+    if (index < 0 || index >= items.length || toIndex < 0 || toIndex >= items.length) return;
+    const next = [...items];
+    const [item] = next.splice(index, 1);
+    next.splice(toIndex, 0, item);
+    const current = queueIndexRef.current;
+    const nextQueueIndex =
+      current === index ? toIndex
+        : index < current && toIndex >= current ? current - 1
+          : index > current && toIndex <= current ? current + 1
+            : current;
+    setQueue(next);
+    setQueueIndex(nextQueueIndex);
+  }, []);
+
+  const importAndOpenNeteasePlaylist = useCallback(async (playlistId: string) => {
+    setHomeLoading(true);
+    try {
+      const playlist = await importNeteasePlaylist(playlistId.replace(/^netease_playlist_/, ""), playQuality);
+      setPlaylists((items) => [playlist, ...items.filter((item) => item.id !== playlist.id)]);
+      setActivePlaylistId(playlist.id);
+      setProxyOnline(true);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "歌单打开失败");
+      setProxyOnline(false);
+    } finally {
+      setHomeLoading(false);
+    }
+  }, [playQuality]);
+
+  const submitSearch = useCallback(async (value = query, page = 1) => {
+    const text = value.trim();
+    if (!text) return;
+    const runId = searchRunRef.current + 1;
+    searchRunRef.current = runId;
+    setQuery(text);
+    setSearchHistory((items) => [text, ...items.filter((item) => item !== text)].slice(0, 12));
+    setSelected(new Set());
+    setSearching(true);
+    try {
+      if (searchSource === "flac") {
+        const result = await searchFlac(text, page);
+        if (searchRunRef.current !== runId) return;
+        setRemoteResults(result.songs);
+        setSearchPageInfo({ page: result.page, pageSize: result.pageSize, total: result.total, hasMore: result.hasMore });
+        setProxyOnline(true);
+        return;
+      }
+      const songs = searchSource === "bili" ? await searchBili(text) : await searchNetease(text, playQuality);
+      if (searchRunRef.current !== runId) return;
+      setRemoteResults(songs);
+      setSearchPageInfo({ page: 1, pageSize: FLAC_SEARCH_PAGE_SIZE, total: null, hasMore: false });
+      setProxyOnline(true);
+    } catch (error) {
+      if (searchRunRef.current !== runId) return;
+      setRemoteResults([]);
+      setSearchPageInfo({ page: 1, pageSize: FLAC_SEARCH_PAGE_SIZE, total: null, hasMore: false });
+      setProxyOnline(false);
+      setToast(error instanceof Error ? error.message : "搜索接口不可用，当前显示本地曲库结果");
+    } finally {
+      if (searchRunRef.current === runId) setSearching(false);
+    }
+  }, [playQuality, query, searchSource]);
+
+  const changeSearchSource = useCallback((source: SearchSource) => {
+    searchRunRef.current += 1;
+    setSearchSource(source);
+    setRemoteResults([]);
+    setSearchPageInfo({ page: 1, pageSize: FLAC_SEARCH_PAGE_SIZE, total: null, hasMore: false });
+    setSelected(new Set());
+    setSearching(false);
+  }, []);
+
+  const importFiles = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []).filter((file) => file.type.startsWith("audio/"));
+    if (!files.length) {
+      setToast("请选择音频文件");
+      return;
+    }
+    const songs = files.map(createLocalSong);
+    await Promise.all(songs.map((song, index) => saveLocalFile(song.localKey!, files[index])));
+    const playlist: Playlist = {
+      id: `local_${Date.now()}`,
+      name: `本地歌单_${songs.length}首`,
+      cover: songs[0]?.cover ?? cover(1),
+      songs,
+      source: "local"
+    };
+    setPlaylists((items) => [playlist, ...items]);
+    setActivePlaylistId(playlist.id);
+    setTab("mine");
+    setToast(`已导入 ${songs.length} 首本地音乐`);
+    event.target.value = "";
+  }, []);
+
+  const backup = useCallback(async () => {
+    const state: PersistedState = { playlists, favorites, history, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart };
+    const payload = await makeBackup(state);
+    downloadJson(`jianyin_web_clean_${new Date().toISOString().replace(/[:.]/g, "-")}.json`, payload);
+    setToast(payload.localFiles?.length ? `已导出备份，包含 ${payload.localFiles.length} 个本地音频` : "已导出备份");
+  }, [autoCacheEnabled, autoPlayOnStart, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
+
+  const restore = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async () => {
+      try {
+        const restored = await restoreBackup(JSON.parse(String(reader.result)));
+        const hydrated = await hydrateLocalSongs(restored);
+        setPlaylists(hydrated.state.playlists);
+        setFavorites(hydrated.state.favorites);
+        setHistory(hydrated.state.history);
+        setQueue(hydrated.state.queue);
+        setQueueIndex(hydrated.state.queueIndex);
+        setSearchHistory(hydrated.state.searchHistory);
+        setTheme(hydrated.state.theme);
+        setPlayQuality(hydrated.state.playQuality);
+        setDownloadQuality(hydrated.state.downloadQuality);
+        setProgressStyle(hydrated.state.progressStyle);
+        setLyricSource(hydrated.state.lyricSource);
+        setPlaybackSpeed(hydrated.state.playbackSpeed);
+        setFadeEnabled(hydrated.state.fadeEnabled);
+        setAutoCacheEnabled(hydrated.state.autoCacheEnabled);
+        setKeepQueueOnExit(hydrated.state.keepQueueOnExit);
+        setAutoPlayOnStart(hydrated.state.autoPlayOnStart);
+        setToast("备份已恢复");
+      } catch {
+        setToast("备份文件无法解析");
+      }
+    };
+    reader.readAsText(file);
+    event.target.value = "";
+  }, []);
+
+  const resolveDownloadable = useCallback(async (song: Song) => {
+    if (song.localKey) return resolvePlayable(song);
+    if (song.source === "netease") return resolveNeteaseSong(song, downloadQuality);
+    if (song.source === "flac") return resolveFlacSong(song);
+    return resolvePlayable(song);
+  }, [downloadQuality, resolvePlayable]);
+
+  const downloadSong = useCallback(async (song: Song) => {
+    try {
+      const target = await resolveDownloadable(song);
+      await cacheDownloadedSong(song, target);
+      const anchor = document.createElement("a");
+      anchor.href = target.url;
+      anchor.download = `${target.name}-${target.artist}`.replace(/[\\/:*?"<>|]/g, "_");
+      anchor.target = "_blank";
+      anchor.rel = "noopener";
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      setToast("已发起下载");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "无法下载这首歌");
+    }
+  }, [cacheDownloadedSong, resolveDownloadable]);
+
+  const downloadSongs = useCallback((songs: Song[]) => {
+    if (!songs.length) {
+      setToast("请先选择歌曲");
+      return;
+    }
+    songs.forEach((song) => void downloadSong(song));
+    setSelected(new Set());
+  }, [downloadSong]);
+
+  const importNetease = useCallback(async () => {
+    setNeteaseBusy(true);
+    setNeteaseError("");
+    try {
+      const playlist = await importNeteasePlaylist(neteaseInput, playQuality);
+      setPlaylists((items) => [playlist, ...items.filter((item) => item.id !== playlist.id)]);
+      setActivePlaylistId(playlist.id);
+      setTab("mine");
+      setNeteaseOpen(false);
+      setNeteaseInput("");
+      setProxyOnline(true);
+      setToast(`已导入网易云歌单：${playlist.name}`);
+    } catch (error) {
+      setNeteaseError(error instanceof Error ? error.message : "导入失败");
+      setProxyOnline(false);
+    } finally {
+      setNeteaseBusy(false);
+    }
+  }, [neteaseInput, playQuality]);
+
+  const mergeSyncedPlaylists = useCallback((incoming: Playlist[]) => {
+    if (!incoming.length) {
+      setToast("没有同步到可完整播放的歌单");
+      return;
+    }
+    setPlaylists((items) => [...incoming, ...items.filter((item) => !incoming.some((playlist) => playlist.id === item.id))]);
+    setActivePlaylistId(incoming[0].id);
+    setTab("mine");
+    setToast(`已同步 ${incoming.length} 个歌单`);
+  }, []);
+
+  const loginAccount = useCallback(async () => {
+    setAccountBusy(true);
+    setAccountError("");
+    try {
+      if (accountProvider === "netease") {
+        const status = await loginNeteaseCookie(accountCookie);
+        setNeteaseAccount(status);
+        const synced = await syncNeteaseAccountPlaylists(playQuality);
+        mergeSyncedPlaylists(synced);
+      } else {
+        const status = await loginBiliCookie(accountCookie);
+        setBiliAccount(status);
+        const synced = await syncBiliAccountPlaylists();
+        mergeSyncedPlaylists(synced);
+      }
+      setAccountOpen(false);
+      setAccountCookie("");
+    } catch (error) {
+      setAccountError(error instanceof Error ? error.message : "账号验证失败");
+      setAccountCookie("");
+    } finally {
+      setAccountBusy(false);
+    }
+  }, [accountCookie, accountProvider, mergeSyncedPlaylists, playQuality]);
+
+  const syncAccounts = useCallback(async (provider: "netease" | "bili") => {
+    setAccountBusy(true);
+    setAccountError("");
+    try {
+      const synced = provider === "netease" ? await syncNeteaseAccountPlaylists(playQuality) : await syncBiliAccountPlaylists();
+      mergeSyncedPlaylists(synced);
+      setAccountOpen(false);
+    } catch (error) {
+      setAccountError(error instanceof Error ? error.message : "同步失败");
+    } finally {
+      setAccountBusy(false);
+    }
+  }, [mergeSyncedPlaylists, playQuality]);
+
+  const logoutAccount = useCallback(async (provider: "netease" | "bili") => {
+    setAccountBusy(true);
+    setAccountError("");
+    try {
+      if (provider === "netease") {
+        await logoutNeteaseCookie();
+        setNeteaseAccount({ loggedIn: false });
+      } else {
+        await logoutBiliCookie();
+        setBiliAccount({ loggedIn: false });
+        setPlaylists((items) => items.filter((playlist) => playlist.source !== "bili"));
+      }
+      setToast("已退出账号");
+    } catch (error) {
+      setAccountError(error instanceof Error ? error.message : "退出失败");
+    } finally {
+      setAccountBusy(false);
+    }
+  }, []);
+
+  const saveApiBase = useCallback(() => {
+    const saved = setApiBaseUrl(apiBaseInput);
+    setApiBaseInput(saved);
+    void checkProxy().then(setProxyOnline);
+    setToast(saved ? "API backend saved" : "API backend reset");
+  }, [apiBaseInput]);
+
+  return (
+    <div className="app-shell">
+      <audio
+        ref={audioRef}
+        onTimeUpdate={(event) => setPosition(event.currentTarget.currentTime)}
+        onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
+        onEnded={handleAudioEnded}
+      />
+      <input ref={fileInputRef} hidden type="file" accept="audio/*" multiple onChange={importFiles} />
+      <input ref={restoreInputRef} hidden type="file" accept="application/json,.json" onChange={restore} />
+      <input ref={lrcInputRef} hidden type="file" accept=".lrc,text/plain" onChange={importLrcForCurrentSong} />
+      <input ref={coverInputRef} hidden type="file" accept="image/*" onChange={importCoverForCurrentSong} />
+
+      <aside className="rail">
+        <button className="brand" onClick={() => setTab("home")} aria-label="打开首页">
+          <img src="/assets/icon.png" alt="" />
+          <span>简音</span>
+        </button>
+        <nav>
+          <NavButton active={tab === "home"} icon={<Home />} label="首页" onClick={() => setTab("home")} />
+          <NavButton active={tab === "search"} icon={<Search />} label="搜索" onClick={() => setTab("search")} />
+          <NavButton active={tab === "mine"} icon={<Library />} label="我的" onClick={() => setTab("mine")} />
+        </nav>
+        <div className="boundary-note">
+          <strong>Web Clean</strong>
+          <span>网易云/Bili 账号 Cookie 只保存在本机服务内存；悬浮窗、蓝牙监听等 Android 系统能力用浏览器 MediaSession 和页面内歌词等价覆盖。</span>
+        </div>
+      </aside>
+
+      <main className="workspace">
+        {tab === "home" && (
+          <HomeScreen
+            data={homeData}
+            loading={homeLoading}
+            error={homeError}
+            onPlay={playSong}
+            onOpenPlaylist={setActivePlaylistId}
+            onOpenRemotePlaylist={(playlist) => void importAndOpenNeteasePlaylist(playlist.id)}
+            onRefresh={() => void refreshHome()}
+            proxyOnline={proxyOnline}
+          />
+        )}
+        {tab === "search" && (
+          <SearchScreen
+            query={query}
+            setQuery={setQuery}
+            source={searchSource}
+            setSource={changeSearchSource}
+            playQuality={playQuality}
+            setPlayQuality={setPlayQuality}
+            results={searchResults}
+            history={searchHistory}
+            searching={searching}
+            searchPage={searchPageInfo.page}
+            searchPageSize={searchPageInfo.pageSize}
+            searchTotal={searchPageInfo.total}
+            searchHasMore={searchPageInfo.hasMore}
+            proxyOnline={proxyOnline}
+            playlists={playlists}
+            selected={selected}
+            favoriteKeys={favoriteKeys}
+            onSearch={submitSearch}
+            onPage={(page) => submitSearch(query, page)}
+            onPlay={(song) => playSong(song, searchResults)}
+            onFavorite={toggleFavorite}
+            onSelect={(song) => setSelected((items) => {
+              const next = new Set(items);
+              const key = songKey(song);
+              next.has(key) ? next.delete(key) : next.add(key);
+              return next;
+            })}
+            onSelectAllVisible={() => setSelected((items) => {
+              const next = new Set(items);
+              searchResults.forEach((song) => next.add(songKey(song)));
+              return next;
+            })}
+            onDeselectAllVisible={() => setSelected((items) => {
+              const next = new Set(items);
+              searchResults.forEach((song) => next.delete(songKey(song)));
+              return next;
+            })}
+            onClearSelection={() => setSelected(new Set())}
+            onAdd={(playlistId) => addSongsToPlaylist(playlistId, searchResults.filter((song) => selected.has(songKey(song))))}
+            onAddToQueue={() => addSongsToQueue(searchResults.filter((song) => selected.has(songKey(song))))}
+            onDownloadSelected={() => downloadSongs(searchResults.filter((song) => selected.has(songKey(song))))}
+            onCreatePlaylistWithSelected={(name) => {
+              const songs = searchResults.filter((song) => selected.has(songKey(song)));
+              const playlist: Playlist = { id: `local_${Date.now()}`, name, cover: songs[0]?.cover ?? cover(3), songs, source: "local" };
+              setPlaylists((items) => [playlist, ...items]);
+              setSelected(new Set());
+              setToast(`已创建歌单并添加 ${songs.length} 首歌曲`);
+            }}
+            onHistoryClear={() => setSearchHistory([])}
+            onDownload={downloadSong}
+          />
+        )}
+        {tab === "mine" && (
+          <MineScreen
+            playlists={playlists}
+            history={history}
+            onPlay={playSong}
+            onOpenPlaylist={setActivePlaylistId}
+            onCreate={() => setCreateOpen(true)}
+            onImportLocal={() => fileInputRef.current?.click()}
+            onImportNetease={() => setNeteaseOpen(true)}
+            onAccounts={() => setAccountOpen(true)}
+            onBackup={backup}
+            onRestore={() => restoreInputRef.current?.click()}
+            onSettings={() => setSettingsOpen(true)}
+            onDelete={(playlist) => {
+              if (playlist.id === FAVORITES_ID) {
+                setToast("我喜欢的音乐不能删除");
+                return;
+              }
+              if (!window.confirm(`确认删除歌单“${playlist.name}”？`)) return;
+              setPlaylists((items) => items.filter((item) => item.id !== playlist.id));
+            }}
+          />
+        )}
+      </main>
+
+      <NowPlaying song={currentSong} playing={playing} position={position} duration={duration} onOpen={() => setPlayerOpen(true)} onToggle={togglePlayback} onNext={nextSong} />
+      <MobileNav tab={tab} setTab={setTab} />
+
+      {activePlaylist && (
+        <PlaylistDetail
+          playlist={activePlaylist}
+          library={librarySongs}
+          favoriteKeys={favoriteKeys}
+          selected={selected}
+          onClose={() => setActivePlaylistId(null)}
+          onPlay={playSong}
+          onFavorite={toggleFavorite}
+          onDownload={downloadSong}
+          onDownloadSelected={(songs) => downloadSongs(songs)}
+          onAddToQueue={(songs) => addSongsToQueue(songs)}
+          onSelect={(song) => setSelected((items) => {
+            const next = new Set(items);
+            const key = songKey(song);
+            next.has(key) ? next.delete(key) : next.add(key);
+            return next;
+          })}
+          onAddSelected={(songs) => addSongsToPlaylist(activePlaylist.id, songs)}
+          onCreatePlaylistWithSelected={(name, songs) => {
+            const playlist: Playlist = { id: `local_${Date.now()}`, name, cover: songs[0]?.cover ?? cover(3), songs, source: "local" };
+            setPlaylists((items) => [playlist, ...items]);
+            setSelected(new Set());
+            setToast(`已创建歌单并添加 ${songs.length} 首歌曲`);
+          }}
+          onRemoveSelected={() => {
+            if (activePlaylist.id === FAVORITES_ID) {
+              setToast("我喜欢的音乐不能移除歌曲");
+              setSelected(new Set());
+              return;
+            }
+            const keys = selected;
+            setPlaylists((items) => items.map((playlist) => playlist.id === activePlaylist.id ? { ...playlist, songs: playlist.songs.filter((song) => !keys.has(songKey(song))) } : playlist));
+            setSelected(new Set());
+          }}
+          onReverse={() => setPlaylists((items) => items.map((playlist) => playlist.id === activePlaylist.id ? { ...playlist, songs: [...playlist.songs].reverse() } : playlist))}
+        />
+      )}
+
+      {playerOpen && currentSong && (
+        <Player
+          song={currentSong}
+          queue={queue}
+          queueIndex={queueIndex}
+          playing={playing}
+          position={position}
+          duration={duration}
+          favorite={favoriteKeys.has(songKey(currentSong))}
+          mode={mode}
+          onClose={() => setPlayerOpen(false)}
+          onToggle={togglePlayback}
+          onNext={nextSong}
+          onPrevious={previousSong}
+          onSeek={(value) => {
+            if (audioRef.current) audioRef.current.currentTime = value;
+            setPosition(value);
+          }}
+          onMode={setMode}
+          onFavorite={() => toggleFavorite(currentSong)}
+          onQueuePlay={playQueueIndex}
+          onDownload={() => downloadSong(currentSong)}
+          playbackSpeed={playbackSpeed}
+          progressStyle={progressStyle}
+          floatingLyric={floatingLyric}
+          sleepTimerUntil={sleepTimerUntil}
+          playlists={playlists}
+          selectedKeys={selected}
+          onPlaybackSpeed={setPlaybackSpeed}
+          onProgressStyle={setProgressStyle}
+          onSleepTimer={(seconds) => {
+            setSleepTimerUntil(Date.now() + seconds * 1000);
+            setToast(`已设置定时关闭：${seconds < 60 ? `${seconds} 秒` : `${Math.round(seconds / 60)} 分钟`}`);
+          }}
+          onFloatingLyric={() => setFloatingLyric((value) => !value)}
+          onPickLrc={() => lrcInputRef.current?.click()}
+          onPickCover={() => coverInputRef.current?.click()}
+          onQueueMove={moveQueueItem}
+          onQueueRemove={(song) => {
+            setQueue((items) => {
+              const key = songKey(song);
+              const removeIndex = items.findIndex((item) => songKey(item) === key);
+              const next = items.filter((item) => songKey(item) !== key);
+              setQueueIndex((index) => {
+                if (!next.length) {
+                  setPlaying(false);
+                  audioRef.current?.pause();
+                  return -1;
+                }
+                if (removeIndex < 0) return Math.min(index, next.length - 1);
+                if (removeIndex < index) return Math.max(0, index - 1);
+                if (removeIndex === index) return Math.min(index, next.length - 1);
+                return Math.min(index, next.length - 1);
+              });
+              return next;
+            });
+          }}
+          onQueueSelect={(song) => setSelected((items) => {
+            const next = new Set(items);
+            const key = songKey(song);
+            next.has(key) ? next.delete(key) : next.add(key);
+            return next;
+          })}
+          onAddQueueSelection={(playlistId, songs) => addSongsToPlaylist(playlistId, songs)}
+          onDownloadSelected={downloadSongs}
+        />
+      )}
+
+      {settingsOpen && (
+        <Modal title="设置" onClose={() => setSettingsOpen(false)}>
+          <div className="settings-list">
+            <label>
+              播放音质
+              <select value={playQuality} onChange={(event) => setPlayQuality(event.target.value as PlayQuality)}>
+                {qualityOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+              </select>
+            </label>
+            <label>
+              下载音质
+              <select value={downloadQuality} onChange={(event) => setDownloadQuality(event.target.value as PlayQuality)}>
+                {qualityOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+              </select>
+            </label>
+            <label>
+              歌词来源
+              <select value={lyricSource} onChange={(event) => setLyricSource(event.target.value as LyricSource)}>
+                <option value="network">网络歌词优先</option>
+                <option value="embedded">本地内嵌优先</option>
+              </select>
+            </label>
+            <label>
+              主题
+              <select value={theme} onChange={(event) => setTheme(event.target.value as Theme)}>
+                <option value="light">浅色</option>
+                <option value="dark">深色</option>
+              </select>
+            </label>
+            <label>
+              API backend URL
+              <input value={apiBaseInput} onChange={(event) => setApiBaseInput(event.target.value)} placeholder="http://192.168.1.10:5188" />
+            </label>
+            <div className="account-actions">
+              <button onClick={saveApiBase}>Save backend</button>
+              <button onClick={() => { setApiBaseInput(""); setApiBaseUrl(""); void checkProxy().then(setProxyOnline); }}>Use same origin</button>
+            </div>
+            <p className="muted">Android builds load the UI from the app. Set this to your Node proxy, for example http://192.168.1.10:5188, when using Netease/Bili/FLAC APIs.</p>
+            <label className="switch-line"><span>歌曲淡入淡出</span><input type="checkbox" checked={fadeEnabled} onChange={(event) => setFadeEnabled(event.target.checked)} /></label>
+            <label className="switch-line"><span>自动缓存</span><input type="checkbox" checked={autoCacheEnabled} onChange={(event) => setAutoCacheEnabled(event.target.checked)} /></label>
+            <label className="switch-line"><span>离开后保留列表</span><input type="checkbox" checked={keepQueueOnExit} onChange={(event) => setKeepQueueOnExit(event.target.checked)} /></label>
+            <label className="switch-line"><span>启动时播放</span><input type="checkbox" checked={autoPlayOnStart} disabled={!keepQueueOnExit} onChange={(event) => setAutoPlayOnStart(event.target.checked)} /></label>
+            <button className="wide-action" onClick={() => setAccountOpen(true)}><UserRound /> 账号管理</button>
+            <button className="wide-action" onClick={backup}><Download /> 备份数据</button>
+            <button className="wide-action" onClick={() => restoreInputRef.current?.click()}><ArchiveRestore /> 恢复备份</button>
+            <p className="muted">默认音乐打开方式、蓝牙监听和 Android 系统悬浮窗属于系统能力；Web 端已用页面内浮动歌词与 MediaSession 覆盖可复刻部分。</p>
+          </div>
+        </Modal>
+      )}
+
+      {createOpen && (
+        <Modal title="创建新歌单" onClose={() => setCreateOpen(false)}>
+          <form className="form-stack" onSubmit={(event: FormEvent) => {
+            event.preventDefault();
+            const name = newPlaylistName.trim();
+            if (!name) {
+              setToast("请输入歌单名称");
+              return;
+            }
+            const playlist: Playlist = { id: `local_${Date.now()}`, name, cover: cover(3), songs: [], source: "local" };
+            setPlaylists((items) => [playlist, ...items]);
+            setActivePlaylistId(playlist.id);
+            setCreateOpen(false);
+            setNewPlaylistName("");
+          }}>
+            <input autoFocus value={newPlaylistName} onChange={(event) => setNewPlaylistName(event.target.value)} placeholder="歌单名称" />
+            <button className="primary-button" type="submit"><Plus /> 创建</button>
+          </form>
+        </Modal>
+      )}
+
+      {neteaseOpen && (
+        <Modal title="导入网易云歌单" onClose={() => setNeteaseOpen(false)}>
+          <form className="form-stack" onSubmit={(event: FormEvent) => { event.preventDefault(); void importNetease(); }}>
+            <input autoFocus value={neteaseInput} onChange={(event) => { setNeteaseInput(event.target.value); setNeteaseError(""); }} placeholder="歌单 ID 或分享链接" />
+            {neteaseError && <p className="field-error">{neteaseError}</p>}
+            <button className="primary-button" disabled={neteaseBusy} type="submit"><Cloud /> {neteaseBusy ? "导入中" : "导入"}</button>
+          </form>
+        </Modal>
+      )}
+
+      {accountOpen && (
+        <Modal title="账号管理" onClose={() => setAccountOpen(false)}>
+          <div className="settings-list">
+            <div className="account-status-grid">
+              <div>
+                <strong>网易云账号</strong>
+                <span>{neteaseAccount.loggedIn ? `已登录${neteaseAccount.nickname ? ` · ${neteaseAccount.nickname}` : ""}` : "未登录"}</span>
+              </div>
+              <div>
+                <strong>Bili 账号</strong>
+                <span>{biliAccount.loggedIn ? `已登录${biliAccount.nickname ? ` · ${biliAccount.nickname}` : ""}` : "未登录"}</span>
+              </div>
+            </div>
+            <div className="segmented">
+              <button className={accountProvider === "netease" ? "active" : ""} onClick={() => setAccountProvider("netease")}>网易云</button>
+              <button className={accountProvider === "bili" ? "active" : ""} onClick={() => setAccountProvider("bili")}>Bili</button>
+            </div>
+            <textarea value={accountCookie} onChange={(event) => { setAccountCookie(event.target.value); setAccountError(""); }} placeholder={accountProvider === "netease" ? "粘贴 MUSIC_U 等网易云 Cookie" : "粘贴 SESSDATA / DedeUserID / bili_jct Cookie 或 JSON"} />
+            {accountError && <p className="field-error">{accountError}</p>}
+            <button className="primary-button" disabled={accountBusy || !accountCookie.trim()} onClick={() => void loginAccount()}><UserRound /> {accountBusy ? "验证中" : "验证并同步"}</button>
+            <div className="account-actions">
+              <button disabled={accountBusy || !neteaseAccount.loggedIn} onClick={() => void syncAccounts("netease")}>同步网易云歌单</button>
+              <button disabled={accountBusy || !biliAccount.loggedIn} onClick={() => void syncAccounts("bili")}>同步 Bili 收藏夹</button>
+              <button disabled={accountBusy || !neteaseAccount.loggedIn} onClick={() => void logoutAccount("netease")}>退出网易云</button>
+              <button disabled={accountBusy || !biliAccount.loggedIn} onClick={() => void logoutAccount("bili")}>退出 Bili</button>
+            </div>
+            <p className="muted">Cookie 只用于本机代理向对应平台验证登录与同步歌单；验证失败不会保存，也不会创建假歌单。</p>
+          </div>
+        </Modal>
+      )}
+
+      {floatingLyric && currentSong && (
+        <FloatingLyric song={currentSong} position={position} onClose={() => setFloatingLyric(false)} />
+      )}
+
+      {toast && <div className="toast">{toast}</div>}
+    </div>
+  );
+}
+
+function NavButton({ active, icon, label, onClick }: { active: boolean; icon: React.ReactNode; label: string; onClick: () => void }) {
+  return <button className={`nav-button ${active ? "active" : ""}`} onClick={onClick}>{icon}<span>{label}</span></button>;
+}
+
+function MobileNav({ tab, setTab }: { tab: Tab; setTab: (tab: Tab) => void }) {
+  return <nav className="mobile-nav"><NavButton active={tab === "home"} icon={<Home />} label="首页" onClick={() => setTab("home")} /><NavButton active={tab === "search"} icon={<Search />} label="搜索" onClick={() => setTab("search")} /><NavButton active={tab === "mine"} icon={<Library />} label="我的" onClick={() => setTab("mine")} /></nav>;
+}
+
+function HomeScreen({ data, loading, error, onPlay, onOpenPlaylist, onOpenRemotePlaylist, onRefresh, proxyOnline }: {
+  data: HomeData;
+  loading: boolean;
+  error: string;
+  onPlay: (song: Song, source?: Song[]) => void;
+  onOpenPlaylist: (id: string) => void;
+  onOpenRemotePlaylist: (playlist: Playlist) => void;
+  onRefresh: () => void;
+  proxyOnline: boolean;
+}) {
+  return (
+    <section className="screen">
+      <header className="topbar">
+        <div><span className="kicker">Android 5.0.0 Replica</span><h1>简音</h1></div>
+        <div className="top-actions">
+          <span className={`status-pill ${proxyOnline ? "online" : ""}`}>{proxyOnline ? "网易云官方接口" : "本地兜底"}</span>
+          <button className="icon-button" onClick={onRefresh} aria-label="刷新推荐" disabled={loading}><RefreshCw /></button>
+        </div>
+      </header>
+      {error && <p className="field-error">{error}</p>}
+      <SectionTitle icon={<Music />} title="今日推荐" />
+      <div className="shelf-row today-shelf">
+        {data.radarSongs.map((song) => <CoverSong key={songKey(song)} song={song} songs={data.radarSongs} onPlay={onPlay} />)}
+      </div>
+      <SectionTitle icon={<Flame />} title="热歌推荐" />
+      <div className="shelf-row hot-shelf">
+        {data.hotSongs.map((song) => <CoverSong key={songKey(song)} song={song} songs={data.hotSongs} onPlay={onPlay} />)}
+      </div>
+      <SectionTitle icon={<Star />} title="个性化推荐" />
+      <div className="playlist-grid">
+        {data.recommendedPlaylists.map((playlist) => (
+          <button className="playlist-card cover-playlist" key={playlist.id} onClick={() => playlist.songs.length ? onOpenPlaylist(playlist.id) : onOpenRemotePlaylist(playlist)}>
+            <img src={playlist.cover || "/assets/icon.png"} alt="" />
+            <span><strong>{playlist.name}</strong><small>{playlist.trackCount || playlist.songs.length} 首{playlist.creatorNickname ? ` · ${playlist.creatorNickname}` : ""}</small></span>
+          </button>
+        ))}
+      </div>
+      {loading && <p className="network-line">正在刷新推荐...</p>}
+    </section>
+  );
+}
+
+function CoverSong({ song, songs, onPlay }: { song: Song; songs: Song[]; onPlay: (song: Song, source?: Song[]) => void }) {
+  return (
+    <button className="cover-card haze-card" onClick={() => onPlay(song, songs)}>
+      <img src={song.cover || "/assets/icon.png"} alt="" />
+      <span className="cover-caption"><strong>{song.name}</strong><small>{song.artist}</small></span>
+    </button>
+  );
+}
+
+function SearchScreen(props: {
+  query: string;
+  setQuery: (value: string) => void;
+  source: SearchSource;
+  setSource: (value: SearchSource) => void;
+  playQuality: PlayQuality;
+  setPlayQuality: (value: PlayQuality) => void;
+  results: Song[];
+  history: string[];
+  searching: boolean;
+  searchPage: number;
+  searchPageSize: number;
+  searchTotal: number | null;
+  searchHasMore: boolean;
+  proxyOnline: boolean;
+  playlists: Playlist[];
+  selected: Set<string>;
+  favoriteKeys: Set<string>;
+  onSearch: (value?: string, page?: number) => void;
+  onPage: (page: number) => void;
+  onPlay: (song: Song) => void;
+  onFavorite: (song: Song) => void;
+  onSelect: (song: Song) => void;
+  onSelectAllVisible: () => void;
+  onDeselectAllVisible: () => void;
+  onClearSelection: () => void;
+  onAdd: (playlistId: string) => void;
+  onAddToQueue: () => void;
+  onDownloadSelected: () => void;
+  onCreatePlaylistWithSelected: (name: string) => void;
+  onHistoryClear: () => void;
+  onDownload: (song: Song) => void;
+}) {
+  const [createName, setCreateName] = useState("");
+  const totalPages = props.searchTotal ? Math.max(1, Math.ceil(props.searchTotal / props.searchPageSize)) : null;
+  const firstVisible = props.results.length ? (props.searchPage - 1) * props.searchPageSize + 1 : 0;
+  const lastVisible = props.results.length ? firstVisible + props.results.length - 1 : 0;
+  const canPage = props.source === "flac" && Boolean(props.query.trim()) && (props.results.length > 0 || props.searchPage > 1 || props.searchHasMore);
+  const selectedVisibleCount = props.results.filter((song) => props.selected.has(songKey(song))).length;
+  const allVisibleSelected = props.results.length > 0 && selectedVisibleCount === props.results.length;
+  const paginationBar = (placement: "top" | "bottom") => canPage ? (
+    <div className={`pagination-bar pagination-bar-${placement}`} aria-label={placement === "top" ? "测试源搜索分页" : "测试源搜索分页底部"}>
+      <button type="button" disabled={props.searching || props.searchPage <= 1} onClick={() => props.onPage(props.searchPage - 1)} aria-label={placement === "top" ? "上一页" : "底部上一页"}><ChevronLeft /> 上一页</button>
+      <span>
+        第 {props.searchPage} 页
+        {totalPages ? ` / ${totalPages} 页` : ""}
+        {props.results.length ? ` · ${firstVisible}-${lastVisible}${props.searchTotal ? ` / ${props.searchTotal}` : ""}` : ""}
+      </span>
+      <button type="button" disabled={props.searching || !props.searchHasMore} onClick={() => props.onPage(props.searchPage + 1)} aria-label={placement === "top" ? "下一页" : "底部下一页"}>下一页 <ChevronRight /></button>
+    </div>
+  ) : null;
+  return (
+    <section className={canPage ? "screen search-screen has-pagination" : "screen search-screen"}>
+      <header className="topbar"><div><span className="kicker">Search</span><h1>搜索</h1></div></header>
+      <div className="search-toolbar">
+        <div className="segmented">
+          <button className={props.source === "netease" ? "active" : ""} onClick={() => props.setSource("netease")}>网易云</button>
+          <button className={props.source === "bili" ? "active" : ""} onClick={() => props.setSource("bili")}>Bili</button>
+          <button className={props.source === "flac" ? "active" : ""} onClick={() => props.setSource("flac")}>测试源</button>
+        </div>
+        <label>
+          播放音质
+          <select value={props.playQuality} onChange={(event) => props.setPlayQuality(event.target.value as PlayQuality)} disabled={props.source === "bili" || props.source === "flac"}>
+            {qualityOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+          </select>
+        </label>
+      </div>
+      <form className="search-box" onSubmit={(event) => {
+        event.preventDefault();
+        props.onSearch(String(new FormData(event.currentTarget).get("keyword") ?? props.query));
+      }}>
+        <Search />
+        <input name="keyword" value={props.query} onChange={(event) => props.setQuery(event.target.value)} placeholder="搜索音乐/歌手" />
+        <button className="primary-button" type="submit">{props.searching ? "搜索中" : "搜索"}</button>
+      </form>
+      <p className="network-line">{props.proxyOnline ? `${props.source === "bili" ? "Bili" : props.source === "flac" ? "测试源" : "网易云官方"}接口已连接；当前播放音质：${props.source === "bili" ? "Bili 高音质音频流" : props.source === "flac" ? "FLAC/320k 自动优先" : qualityLabel(props.playQuality)}。` : "代理不可用时仍可搜索本地曲库。"}</p>
+      <div className="chips">
+        {recommendedKeywords.map((item) => <button key={item} onClick={() => { props.setQuery(item); props.onSearch(item); }}>{item}</button>)}
+        {props.history.map((item) => <button key={`h-${item}`} onClick={() => { props.setQuery(item); props.onSearch(item); }}>{item}</button>)}
+        {props.history.length > 0 && <button onClick={props.onHistoryClear}>清空历史</button>}
+      </div>
+      {paginationBar("top")}
+      {props.results.length > 0 && (
+        <div className="result-actions" aria-label="搜索结果批量操作">
+          <span>当前页 {props.results.length} 首{selectedVisibleCount ? ` · 已选 ${selectedVisibleCount} 首` : ""}</span>
+          <div>
+            <button type="button" onClick={allVisibleSelected ? props.onDeselectAllVisible : props.onSelectAllVisible}>
+              {allVisibleSelected ? <Square /> : <SquareCheckBig />}
+              {allVisibleSelected ? "取消全选当前页" : "全选当前页"}
+            </button>
+            <button type="button" disabled={!props.selected.size} onClick={props.onClearSelection}>取消选择</button>
+          </div>
+        </div>
+      )}
+      {props.selected.size > 0 && (
+        <div className="selection-bar">
+          <span>已选择 {props.selected.size} 首</span>
+          <select onChange={(event) => props.onAdd(event.target.value)} defaultValue="">
+            <option value="" disabled>添加到歌单</option>
+            {props.playlists.map((playlist) => <option value={playlist.id} key={playlist.id}>{playlist.name}</option>)}
+          </select>
+          <button onClick={props.onAddToQueue}><ListPlus /> 播放队列</button>
+          <button onClick={props.onDownloadSelected}><Download /> 下载</button>
+          <form className="selection-create" onSubmit={(event) => {
+            event.preventDefault();
+            const name = createName.trim();
+            if (!name) return;
+            props.onCreatePlaylistWithSelected(name);
+            setCreateName("");
+          }}>
+            <input value={createName} onChange={(event) => setCreateName(event.target.value)} placeholder="新歌单名" />
+            <button type="submit" disabled={!createName.trim()}><Plus /> 创建</button>
+          </form>
+        </div>
+      )}
+      <div className="song-list">
+        {props.results.map((song) => (
+          <SongRow key={songKey(song)} song={song} selectable selected={props.selected.has(songKey(song))} favorite={props.favoriteKeys.has(songKey(song))} onPlay={props.onPlay} onFavorite={props.onFavorite} onSelect={props.onSelect} onDownload={props.onDownload} />
+        ))}
+        {props.query && !props.results.length && !props.searching && <p className="empty-text">没有找到结果</p>}
+      </div>
+      {paginationBar("bottom")}
+    </section>
+  );
+}
+
+function MineScreen({ playlists, history, onPlay, onOpenPlaylist, onCreate, onImportLocal, onImportNetease, onAccounts, onBackup, onRestore, onSettings, onDelete }: {
+  playlists: Playlist[];
+  history: Song[];
+  onPlay: (song: Song, source?: Song[]) => void;
+  onOpenPlaylist: (id: string) => void;
+  onCreate: () => void;
+  onImportLocal: () => void;
+  onImportNetease: () => void;
+  onAccounts: () => void;
+  onBackup: () => void;
+  onRestore: () => void;
+  onSettings: () => void;
+  onDelete: (playlist: Playlist) => void;
+}) {
+  const favoritePlaylist = playlists.find((playlist) => playlist.id === FAVORITES_ID);
+  const favoriteSongs = favoritePlaylist?.songs ?? [];
+  const recentSongs = history.slice(0, 10);
+  return (
+    <section className="screen">
+      <header className="topbar"><div><span className="kicker">Library</span><h1>我的音乐</h1></div><button className="icon-button" onClick={onSettings} aria-label="设置"><Settings /></button></header>
+      {recentSongs.length > 0 && (
+        <>
+          <SectionTitle icon={<ClockIcon />} title="最近播放" />
+          <div className="shelf-row">
+            {recentSongs.map((song) => <CoverSong key={songKey(song)} song={song} songs={recentSongs} onPlay={onPlay} />)}
+          </div>
+        </>
+      )}
+      {favoriteSongs.length > 0 && (
+        <>
+          <SectionTitle icon={<Heart />} title="最近最爱" />
+          <div className="shelf-row">
+            {favoriteSongs.slice(0, 10).map((song) => <CoverSong key={songKey(song)} song={song} songs={favoriteSongs} onPlay={onPlay} />)}
+          </div>
+        </>
+      )}
+      <div className="action-grid">
+        <button onClick={onCreate}><Plus /> 创建歌单</button>
+        <button onClick={onImportLocal}><FileAudio /> 导入本地音乐</button>
+        <button onClick={onImportNetease}><Cloud /> 导入网易云歌单</button>
+        <button onClick={onAccounts}><UserRound /> 账号同步</button>
+        <button onClick={onBackup}><Download /> 备份数据</button>
+        <button onClick={onRestore}><ArchiveRestore /> 恢复备份</button>
+        <button onClick={onSettings}><Settings /> 设置</button>
+      </div>
+      <SectionTitle icon={<Library />} title="我的歌单" />
+      <div className="playlist-list">
+        {playlists.map((playlist) => (
+          <div className="playlist-row" key={playlist.id}>
+            <button onClick={() => onOpenPlaylist(playlist.id)}><img src={playlist.cover || "/assets/icon.png"} alt="" /><span><strong>{playlist.name}</strong><small>{playlist.songs.length} 首歌曲</small></span></button>
+            <button className="icon-button danger" onClick={() => onDelete(playlist)} aria-label="删除歌单"><Trash2 /></button>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ClockIcon() {
+  return <Music />;
+}
+
+function PlaylistDetail({ playlist, library, favoriteKeys, selected, onClose, onPlay, onFavorite, onDownload, onDownloadSelected, onAddToQueue, onSelect, onAddSelected, onCreatePlaylistWithSelected, onRemoveSelected, onReverse }: {
+  playlist: Playlist;
+  library: Song[];
+  favoriteKeys: Set<string>;
+  selected: Set<string>;
+  onClose: () => void;
+  onPlay: (song: Song, source?: Song[]) => void;
+  onFavorite: (song: Song) => void;
+  onDownload: (song: Song) => void;
+  onDownloadSelected: (songs: Song[]) => void;
+  onAddToQueue: (songs: Song[]) => void;
+  onSelect: (song: Song) => void;
+  onAddSelected: (songs: Song[]) => void;
+  onCreatePlaylistWithSelected: (name: string, songs: Song[]) => void;
+  onRemoveSelected: () => void;
+  onReverse: () => void;
+}) {
+  const [filter, setFilter] = useState("");
+  const [createName, setCreateName] = useState("");
+  const playlistKeys = new Set(playlist.songs.map(songKey));
+  const addableLibrary = library.filter((song) => !playlistKeys.has(songKey(song)));
+  const normalizedFilter = filter.trim().toLowerCase();
+  const visibleSongs = normalizedFilter
+    ? playlist.songs.filter((song) => [song.name, song.artist].some((value) => value.toLowerCase().includes(normalizedFilter)))
+    : playlist.songs;
+  const selectedSongs = visibleSongs.filter((song) => selected.has(songKey(song)));
+  return (
+    <div className="detail-backdrop">
+      <section className="detail" role="dialog" aria-modal="true" aria-label={playlist.name}>
+        <header className="detail-head">
+          <button className="plain-button" onClick={onClose}>返回</button>
+          <img src={playlist.cover || "/assets/icon.png"} alt="" />
+          <div><h2>{playlist.name}</h2><p>{playlist.songs.length} 首歌曲 · {playlist.source === "netease" ? "网易云公开歌单" : "本地歌单"}</p></div>
+        </header>
+        <form className="search-box compact-search" onSubmit={(event) => event.preventDefault()}>
+          <Search />
+          <input value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="搜索歌曲" />
+          {filter && <button className="icon-button" type="button" onClick={() => setFilter("")} aria-label="清空搜索"><X /></button>}
+        </form>
+        <div className="detail-actions">
+          <button className="primary-button" disabled={!playlist.songs.length} onClick={() => playlist.songs[0] && onPlay(playlist.songs[0], playlist.songs)}><Play /> 播放全部</button>
+          <button disabled={!visibleSongs.length} onClick={() => visibleSongs.forEach(onSelect)}><ListPlus /> 全选可见</button>
+          <button disabled={!selectedSongs.length} onClick={() => onAddToQueue(selectedSongs)}><ListPlus /> 加入队列</button>
+          <button disabled={!selectedSongs.length} onClick={() => onDownloadSelected(selectedSongs)}><Download /> 下载所选</button>
+          <button onClick={onReverse}>反转排序</button>
+          <button onClick={() => onAddSelected(selectedSongs)} disabled={!selectedSongs.length}>加入当前歌单</button>
+          <button onClick={onRemoveSelected} disabled={!selected.size}>移除所选</button>
+        </div>
+        {selectedSongs.length > 0 && (
+          <form className="inline-create" onSubmit={(event) => {
+            event.preventDefault();
+            const name = createName.trim();
+            if (!name) return;
+            onCreatePlaylistWithSelected(name, selectedSongs);
+            setCreateName("");
+          }}>
+            <input value={createName} onChange={(event) => setCreateName(event.target.value)} placeholder="创建新歌单并添加所选" />
+            <button className="primary-button" type="submit"><Plus /> 创建并添加</button>
+          </form>
+        )}
+        <div className="two-column">
+          <div><h3>当前歌单</h3><div className="song-list">{visibleSongs.map((song) => <SongRow key={songKey(song)} song={song} selectable selected={selected.has(songKey(song))} favorite={favoriteKeys.has(songKey(song))} onPlay={(target) => onPlay(target, playlist.songs)} onFavorite={onFavorite} onSelect={onSelect} onDownload={onDownload} />)}{!visibleSongs.length && <p className="empty-text">没有匹配歌曲</p>}</div></div>
+          <div><h3>曲库</h3><div className="song-list">{addableLibrary.slice(0, 20).map((song) => <SongRow key={songKey(song)} song={song} selectable selected={selected.has(songKey(song))} onPlay={(target) => onPlay(target, library)} onSelect={onSelect} />)}{!addableLibrary.length && <p className="empty-text">曲库里没有更多可添加歌曲</p>}</div></div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function NowPlaying({ song, playing, position, duration, onOpen, onToggle, onNext }: { song: Song | null; playing: boolean; position: number; duration: number; onOpen: () => void; onToggle: (event: MouseEvent) => void; onNext: (event: MouseEvent) => void }) {
+  if (!song) return null;
+  return (
+    <div className="now-playing" onClick={onOpen} role="button" tabIndex={0} onKeyDown={(event) => {
+      if (event.key === "Enter" || event.key === " ") onOpen();
+    }}>
+      <img src={song.cover || "/assets/icon.png"} alt="" />
+      <span><strong>{song.name}</strong><small>{song.artist} · {formatTime(position)} / {formatTime(duration)}</small></span>
+      <span className="mini-progress"><i style={{ width: `${duration ? Math.min(100, position / duration * 100) : 0}%` }} /></span>
+      <button className="icon-button" onClick={(event) => { event.stopPropagation(); onToggle(event); }} aria-label={playing ? "暂停" : "播放"} aria-pressed={playing}>{playing ? <Pause /> : <Play />}</button>
+      <button className="icon-button" onClick={(event) => { event.stopPropagation(); onNext(event); }} aria-label="下一首"><SkipForward /></button>
+    </div>
+  );
+}
+
+function FloatingLyric({ song, position, onClose }: { song: Song; position: number; onClose: () => void }) {
+  const lyrics = parseLrc(song.lrc);
+  const active = activeLyricIndex(lyrics, position);
+  const line = lyrics[active]?.text || song.name;
+  return (
+    <div className="floating-lyric" role="dialog" aria-label="桌面歌词">
+      <button className="icon-button" onClick={onClose} aria-label="关闭桌面歌词"><X /></button>
+      <strong>{line}</strong>
+      <span>{song.artist}</span>
+    </div>
+  );
+}
+
+function SectionTitle({ icon, title }: { icon: React.ReactNode; title: string }) {
+  return <div className="section-title">{icon}<h2>{title}</h2></div>;
+}
