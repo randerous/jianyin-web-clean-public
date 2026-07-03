@@ -983,6 +983,12 @@ h3 {
   gap: 16px;
 }
 
+.playlist-only-column {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+}
+
 .player-sheet {
   width: min(1080px, 100%);
   padding: 16px;
@@ -2097,6 +2103,10 @@ h2 {
 }
 
 .two-column {
+  gap: 14px;
+}
+
+.playlist-only-column {
   gap: 14px;
 }
 

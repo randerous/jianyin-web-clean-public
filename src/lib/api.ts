@@ -179,10 +179,11 @@ async function refreshFlacSong(song: Song) {
   ].filter(Boolean)));
   for (const query of queries) {
     const { songs } = await searchFlac(query);
-    const sameId = songs.find((item) => flacSongId(item) === id);
+    const sameId = /^\d+$/.test(id) ? songs.find((item) => flacSongId(item) === id) : null;
     if (sameId) return { ...song, ...sameId };
     const sameTitle = songs.find((item) => item.name === song.name && (!song.artist || item.artist === song.artist));
     if (sameTitle) return { ...song, ...sameTitle };
+    if (!/^\d+$/.test(id) && songs[0]) return { ...song, ...songs[0] };
   }
   return null;
 }
@@ -350,12 +351,14 @@ export async function syncBiliAccountPlaylists() {
   return (data.playlists ?? []).map(normalizeRemotePlaylist).filter((playlist): playlist is Playlist => Boolean(playlist));
 }
 
-export async function fetchNeteaseHome(quality: PlayQuality = "exhigh") {
+export async function fetchNeteaseHome(quality: PlayQuality = "exhigh", refresh = 0) {
+  const params = new URLSearchParams({ quality });
+  if (refresh > 0) params.set("refresh", String(refresh));
   const data = await fetchJson<{
     radarSongs?: RemoteSong[];
     hotSongs?: RemoteSong[];
     recommendedPlaylists?: RemotePlaylist[];
-  }>(`/api/netease/home?quality=${encodeURIComponent(quality)}`);
+  }>(`/api/netease/home?${params.toString()}`);
   return {
     radarSongs: (data.radarSongs ?? []).map(normalizeRemoteSong).filter((song): song is Song => Boolean(song)),
     hotSongs: (data.hotSongs ?? []).map(normalizeRemoteSong).filter((song): song is Song => Boolean(song)),
@@ -363,7 +366,7 @@ export async function fetchNeteaseHome(quality: PlayQuality = "exhigh") {
       id: `netease_playlist_${asString(playlist.id)}`,
       name: asString(playlist.name, "推荐歌单"),
       cover: asString(playlist.cover, asString(playlist.coverPic, asString(playlist.picUrl, cover(index + 1)))),
-      songs: [],
+      songs: (playlist.songs ?? []).map((song, songIndex) => normalizeRemoteSong(song, songIndex)).filter((song): song is Song => Boolean(song)),
       source: "netease",
       trackCount: typeof playlist.trackCount === "number" ? playlist.trackCount : 0,
       creatorNickname: asString(playlist.creatorNickname)

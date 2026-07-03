@@ -1,4 +1,4 @@
-import { FAVORITES_ID, LOCAL_DB_NAME, LOCAL_STORE_NAME, STORAGE_KEY, seedPlaylists, seedSongs } from "../data/seed";
+import { FAVORITES_ID, LOCAL_DB_NAME, LOCAL_STORE_NAME, STORAGE_KEY, cover } from "../data/seed";
 import type { BackupPayload, LocalFileBackup, PersistedState, Playlist, Song } from "../types";
 import { apiUrl } from "./api";
 
@@ -42,12 +42,24 @@ function asSong(value: unknown): Song | null {
   };
 }
 
+function isDemoSong(song: Song) {
+  return song.id.startsWith("demo_") || song.artist.includes("示例曲库") || song.artist.includes("绀轰緥鏇插簱");
+}
+
+function removeDemoSongs(songs: Song[]) {
+  return songs.filter((song) => !isDemoSong(song));
+}
+
+function isDemoPlaylist(playlist: Playlist) {
+  return playlist.id === "daily" || playlist.id === "hot";
+}
+
 function asPlaylist(value: unknown): Playlist | null {
   if (!isRecord(value)) return null;
   const id = asString(value.id);
   const name = asString(value.name);
   if (!id || !name) return null;
-  const songs = Array.isArray(value.songs) ? value.songs.map(asSong).filter((song): song is Song => Boolean(song)) : [];
+  const songs = Array.isArray(value.songs) ? removeDemoSongs(value.songs.map(asSong).filter((song): song is Song => Boolean(song))) : [];
   return {
     id,
     name,
@@ -79,7 +91,7 @@ function persistableSong(song: Song) {
 }
 
 function serializeSongs(songs: Song[]) {
-  return songs.filter(persistableSong).map(serializeSong);
+  return removeDemoSongs(songs).filter(persistableSong).map(serializeSong);
 }
 
 function serializePlaylist(playlist: Playlist): Playlist {
@@ -117,17 +129,27 @@ function clampQueueIndex(queue: Song[], queueIndex: unknown) {
   return Math.min(Math.max(0, Math.trunc(queueIndex)), queue.length - 1);
 }
 
+function emptyFavoritesPlaylist(): Playlist {
+  return {
+    id: FAVORITES_ID,
+    name: "我喜欢的音乐",
+    cover: cover(1),
+    songs: [],
+    source: "local"
+  };
+}
+
 export function normalizeState(value: unknown): PersistedState {
   const raw = isRecord(value) ? value : {};
   const playlists = Array.isArray(raw.playlists)
-    ? raw.playlists.map(asPlaylist).filter((playlist): playlist is Playlist => Boolean(playlist))
-    : seedPlaylists;
-  const withFavorites = playlists.some((playlist) => playlist.id === FAVORITES_ID) ? playlists : [seedPlaylists[0], ...playlists];
+    ? raw.playlists.map(asPlaylist).filter((playlist): playlist is Playlist => Boolean(playlist)).filter((playlist) => !isDemoPlaylist(playlist))
+    : [];
+  const withFavorites = playlists.some((playlist) => playlist.id === FAVORITES_ID) ? playlists : [emptyFavoritesPlaylist(), ...playlists];
   const favorites = Array.isArray(raw.favorites)
-    ? raw.favorites.map(asSong).filter((song): song is Song => Boolean(song))
-    : withFavorites.find((playlist) => playlist.id === FAVORITES_ID)?.songs ?? [seedSongs[0]];
-  const history = Array.isArray(raw.history) ? raw.history.map(asSong).filter((song): song is Song => Boolean(song)).slice(0, 30) : [];
-  const queue = Array.isArray(raw.queue) ? raw.queue.map(asSong).filter((song): song is Song => Boolean(song)) : seedSongs.slice(0, 4);
+    ? removeDemoSongs(raw.favorites.map(asSong).filter((song): song is Song => Boolean(song)))
+    : withFavorites.find((playlist) => playlist.id === FAVORITES_ID)?.songs ?? [];
+  const history = Array.isArray(raw.history) ? removeDemoSongs(raw.history.map(asSong).filter((song): song is Song => Boolean(song))).slice(0, 30) : [];
+  const queue = Array.isArray(raw.queue) ? removeDemoSongs(raw.queue.map(asSong).filter((song): song is Song => Boolean(song))) : [];
   const searchHistory = Array.isArray(raw.searchHistory) ? raw.searchHistory.filter((item): item is string => typeof item === "string").slice(0, 12) : [];
   const theme = raw.theme === "dark" ? "dark" : "light";
   const playQuality = ["jymaster", "sky", "jyeffect", "hires", "lossless", "exhigh", "standard"].includes(String(raw.playQuality)) ? raw.playQuality as PersistedState["playQuality"] : "exhigh";

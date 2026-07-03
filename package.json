@@ -10,7 +10,6 @@
     "android:prepare": "node scripts/prepare-android-embedded-backend.mjs",
     "android:apk": "node scripts/build-android-apk.mjs",
     "android:open": "cap open android",
-    "github:publish": "node scripts/github-publish.mjs",
     "preview": "node server.mjs",
     "test": "npm run test:api && npm run test:e2e",
     "test:api": "node --test tests/server.test.mjs",

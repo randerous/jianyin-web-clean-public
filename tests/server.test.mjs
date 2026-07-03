@@ -847,14 +847,23 @@ test("playlist and home endpoints only return full playable Netease songs", asyn
     trackIds: [{ id: 1 }, { id: 2 }, { id: 3 }]
   };
   const neteaseClient = {
-    async playlist_detail() {
+    async playlist_detail({ id }) {
+      if (String(id) === "88") throw new Error("read ECONNRESET");
       return { body: { playlist } };
     },
     async search({ keywords }) {
       return { body: { result: { songs: keywords === "热歌" ? [song(4), song(5)] : [song(1), song(2), song(3)] } } };
     },
     async personalized() {
-      return { body: { result: [{ id: 77, name: "Playlist", picUrl: "/playlist.png", trackCount: 3 }] } };
+      return { body: { result: [
+        { id: 88, name: "Broken Playlist", picUrl: "/broken.png", trackCount: 3 },
+        { id: 77, name: "Playlist", picUrl: "/playlist.png", trackCount: 3 }
+      ] } };
+    },
+    async top_playlist({ offset }) {
+      return { body: { playlists: [
+        { id: 900 + Number(offset ?? 0), name: `Playlist ${offset}`, coverImgUrl: "/offset.png", trackCount: 10 }
+      ] } };
     },
     async song_url({ id }) {
       return urlResponse(id, {
@@ -866,15 +875,55 @@ test("playlist and home endpoints only return full playable Netease songs", asyn
       });
     }
   };
-  const baseUrl = await startTestServer({ neteaseClient });
+  const fetchImpl = async (url, init = {}) => {
+    const parsed = new URL(url);
+    if (parsed.hostname !== "flac.music.hi.cn") throw new Error(`unexpected fetch ${url}`);
+    if (parsed.pathname === "/" || parsed.pathname === "") {
+      return new Response("ok", { status: 200, headers: { "Content-Type": "text/plain", "set-cookie": "sl-session=test" } });
+    }
+    const action = parsed.searchParams.get("act");
+    const params = new URLSearchParams(String(init.body ?? ""));
+    if (action === "search") {
+      const keyword = String(params.get("keyword") ?? "");
+      const id = keyword.includes("4") ? 400 : keyword.includes("1") ? 100 : 0;
+      return new Response(JSON.stringify({
+        code: 0,
+        data: {
+          list: id ? [{
+            id: String(id),
+            name: id === 400 ? "Song 4" : "Song 1",
+            artist: id === 400 ? "Artist 4" : "Artist 1",
+            duration: 65,
+            pic_url: "/flac.png",
+            time: "t",
+            sign: "s",
+            minfo: [{ format: "mp3", bitrate: "320" }]
+          }] : [],
+          total: id ? 1 : 0
+        }
+      }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    if (action === "getUrl") {
+      return new Response(JSON.stringify({ code: 0, data: { url: "https://audio.test/flac.mp3", duration: 65, bitrate: 320, format: "mp3" } }), { status: 200, headers: { "Content-Type": "application/json" } });
+    }
+    throw new Error(`unexpected flac action ${action}`);
+  };
+  const baseUrl = await startTestServer({ neteaseClient, fetchImpl });
 
   const imported = await getJson(`${baseUrl}/api/netease/playlist/77`);
   const home = await getJson(`${baseUrl}/api/netease/home`);
+  const refreshedHome = await getJson(`${baseUrl}/api/netease/home?refresh=2&playlistLimit=20`);
 
   assert.equal(imported.response.status, 200);
-  assert.deepEqual(imported.body.playlist.songs.map((item) => item.id), ["netease_1"]);
-  assert.deepEqual(home.body.radarSongs.map((item) => item.id), ["netease_1"]);
-  assert.deepEqual(home.body.hotSongs.map((item) => item.id), ["netease_4"]);
+  assert.deepEqual(imported.body.playlist.songs.map((item) => item.id), ["flac_search_playlist_1", "flac_search_playlist_2", "flac_search_playlist_3"]);
+  assert.deepEqual(imported.body.playlist.songs.map((item) => item.source), ["flac", "flac", "flac"]);
+  assert.deepEqual(imported.body.playlist.songs.map((item) => item.url), ["", "", ""]);
+  assert.deepEqual(home.body.radarSongs, []);
+  assert.deepEqual(home.body.hotSongs, []);
+  assert.deepEqual(home.body.recommendedPlaylists.map((item) => item.id), ["88", "77"]);
+  assert.deepEqual(home.body.recommendedPlaylists.map((item) => item.songs ?? []), [[], []]);
+  assert.deepEqual(refreshedHome.body.recommendedPlaylists.map((item) => item.id), ["940"]);
+  assert.equal(refreshedHome.body.offset, 40);
 });
 
 test("netease account login validates cookie and syncs only playable playlists", async () => {

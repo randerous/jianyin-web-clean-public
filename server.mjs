@@ -155,6 +155,12 @@ async function writeSharedState(state) {
 	  return Math.max(1, Math.trunc(parsed));
 	}
 
+	function parseOffset(value, fallback = 0, max = 300) {
+	  const parsed = Number(value);
+	  if (!Number.isFinite(parsed)) return fallback;
+	  return Math.min(Math.max(0, Math.trunc(parsed)), max);
+	}
+
 	function normalizeQuality(value) {
 	  const quality = cleanText(value, DEFAULT_PLAY_QUALITY).toLowerCase();
 	  return quality || DEFAULT_PLAY_QUALITY;
@@ -835,6 +841,24 @@ function playableRejectReason(data) {
 	  return verified;
 	}
 
+	async function mapPlaylistSongsToFlac(tracks, desiredLimit = 60) {
+	  return tracks.filter(Boolean).slice(0, desiredLimit).map((track, index) => {
+	    const id = cleanText(track?.id, `playlist_${index + 1}`);
+	    const album = track?.al ?? track?.album ?? {};
+	    return {
+	      id: `flac_search_${id}`,
+	      name: cleanText(track?.name, "未知歌曲"),
+	      artist: songArtistText(track) || "未知歌手",
+	      url: "",
+	      pic: cleanText(album.picUrl, ""),
+	      cover: cleanText(album.picUrl, ""),
+	      source: "flac",
+	      remotePlayable: true,
+	      verifiedPlayable: false
+	    };
+	  });
+	}
+
 	async function searchSongs(keyword, limit) {
 	  if (typeof netease.cloudsearch === "function") {
 	    const response = await netease.cloudsearch({ keywords: keyword, limit, cookie: neteaseAccountCookie });
@@ -868,7 +892,7 @@ function playableRejectReason(data) {
 
 	async function mapVerifiedPlaylist(playlist, preferredQuality = DEFAULT_PLAY_QUALITY, cookie = neteaseAccountCookie) {
 	  const tracks = await expandPlaylistTracks(playlist);
-	  const songs = await mapVerifiedSongs(tracks, 60, preferredQuality, cookie);
+	  const songs = await mapPlaylistSongsToFlac(tracks, 60);
 	  return {
 	    id: `netease_playlist_${String(playlist.id ?? "")}`,
 	    name: cleanText(playlist.name, "网易云公开歌单"),
@@ -899,16 +923,48 @@ function playableRejectReason(data) {
 	  };
 	}
 
-	async function getRecommendedPlaylists(limit) {
+	async function getRecommendedPlaylists(limit, offset = 0) {
+	  if (offset > 0 && typeof netease.top_playlist === "function") {
+	    const response = await netease.top_playlist({ limit, offset, order: "hot" });
+	    return (response.body?.playlists ?? []).map(mapPlaylistSummary).filter((playlist) => playlist.id);
+	  }
 	  if (typeof netease.personalized === "function") {
 	    const response = await netease.personalized({ limit });
 	    return (response.body?.result ?? []).map(mapPlaylistSummary).filter((playlist) => playlist.id);
 	  }
 	  if (typeof netease.top_playlist === "function") {
-	    const response = await netease.top_playlist({ limit, order: "hot" });
+	    const response = await netease.top_playlist({ limit, offset, order: "hot" });
 	    return (response.body?.playlists ?? []).map(mapPlaylistSummary).filter((playlist) => playlist.id);
 	  }
 	  return [];
+	}
+
+	async function retryNetease(requester, attempts = 3) {
+	  let lastError;
+	  for (let attempt = 0; attempt < attempts; attempt += 1) {
+	    try {
+	      return await requester();
+	    } catch (error) {
+	      lastError = error;
+	      if (attempt < attempts - 1) await new Promise((resolve) => setTimeout(resolve, 350 * (attempt + 1)));
+	    }
+	  }
+	  throw lastError;
+	}
+
+	async function getPlaylistDetailWithFallback(id, cookie = neteaseAccountCookie) {
+	  const detail = await retryNetease(() => netease.playlist_detail({ id, s: 0, cookie }));
+	  const playlist = detail.body?.playlist;
+	  if (!playlist) return null;
+	  if ((!Array.isArray(playlist.tracks) || !playlist.tracks.length) && typeof netease.playlist_track_all === "function") {
+	    try {
+	      const tracks = await retryNetease(() => netease.playlist_track_all({ id, limit: PLAYLIST_CANDIDATE_LIMIT, offset: 0, cookie }), 2);
+	      playlist.tracks = tracks.body?.songs ?? playlist.tracks ?? [];
+	    } catch {
+	      // playlist_detail still contains trackIds; expandPlaylistTracks can try song_detail.
+	    }
+	  }
+	  return playlist;
 	}
 
 	function normalizeLegacyLrcTimestamps(content) {
@@ -1137,8 +1193,8 @@ app.get("/api/netease/search", async (req, res) => {
 	    const playlists = [];
 	    for (const summary of summaries) {
 	      if (playlists.length >= limit) break;
-	      const detail = await netease.playlist_detail({ id: summary.id.replace(/^netease_playlist_/, ""), s: 0, cookie: neteaseAccountCookie });
-	      const mapped = await mapVerifiedPlaylist(detail.body?.playlist ?? {}, quality, neteaseAccountCookie);
+	      const detail = await getPlaylistDetailWithFallback(summary.id.replace(/^netease_playlist_/, ""), neteaseAccountCookie);
+	      const mapped = await mapVerifiedPlaylist(detail ?? {}, quality, neteaseAccountCookie);
 	      if (mapped.songs.length) playlists.push({ ...mapped, coverPic: summary.coverPic || mapped.coverPic, trackCount: summary.trackCount, creatorNickname: summary.creatorNickname });
 	    }
 	    res.json({ loggedIn: true, playlists, quality });
@@ -1274,8 +1330,7 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 
   try {
 	    const quality = normalizeQuality(req.query.quality);
-	    const response = await netease.playlist_detail({ id, s: 0, cookie: neteaseAccountCookie });
-    const playlist = response.body?.playlist;
+	    const playlist = await getPlaylistDetailWithFallback(id, neteaseAccountCookie);
     if (!playlist) {
       res.status(404).json({ error: "playlist_not_found", message: "没有找到这个歌单" });
       return;
@@ -1293,20 +1348,11 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 
 	app.get("/api/netease/home", async (req, res) => {
 	  try {
-	    const quality = normalizeQuality(req.query.quality);
-	    const [radarResult, hotResult, playlistResult] = await Promise.allSettled([
-	      searchSongs("私人雷达", SEARCH_CANDIDATE_LIMIT),
-	      searchSongs("热歌", SEARCH_CANDIDATE_LIMIT),
-	      getRecommendedPlaylists(parseLimit(req.query.playlistLimit, 20, 30))
-	    ]);
-	    const radarSongs = radarResult.status === "fulfilled"
-	      ? await mapVerifiedSongs((radarResult.value ?? []).slice(0, SEARCH_CANDIDATE_LIMIT), 8, quality, neteaseAccountCookie)
-	      : [];
-	    const hotSongs = hotResult.status === "fulfilled"
-	      ? await mapVerifiedSongs((hotResult.value ?? []).slice(0, SEARCH_CANDIDATE_LIMIT), 12, quality, neteaseAccountCookie)
-	      : [];
-	    const recommendedPlaylists = playlistResult.status === "fulfilled" ? playlistResult.value : [];
-	    res.json({ radarSongs, hotSongs, recommendedPlaylists, quality });
+	    const limit = parseLimit(req.query.playlistLimit, 20, 30);
+	    const refresh = parseOffset(req.query.refresh, 0, 99);
+	    const offset = parseOffset(req.query.offset, refresh ? (refresh * limit) % 300 : 0, 300);
+	    const recommendedPlaylists = await getRecommendedPlaylists(limit, offset);
+	    res.json({ radarSongs: [], hotSongs: [], recommendedPlaylists, quality: "flac", refresh, offset });
 	  } catch (error) {
 	    res.status(502).json({ error: "netease_home_failed", message: errorMessage(error) });
 	  }

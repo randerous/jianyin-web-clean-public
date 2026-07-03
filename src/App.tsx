@@ -6,7 +6,6 @@ import {
   Download,
   FileAudio,
   FileText,
-  Flame,
   Heart,
   Home,
   Library,
@@ -21,7 +20,6 @@ import {
   SkipForward,
   Square,
   SquareCheckBig,
-  Star,
   UserRound,
   Trash2,
   X
@@ -68,7 +66,7 @@ import {
   saveState,
   songKey
 } from "./lib/storage";
-import { FAVORITES_ID, cover, recommendedKeywords, seedPlaylists, seedSongs } from "./data/seed";
+import { FAVORITES_ID, cover, recommendedKeywords } from "./data/seed";
 import type { AccountState, LyricSource, PersistedState, PlayQuality, Playlist, ProgressStyle, Song, Theme } from "./types";
 
 type Tab = "home" | "search" | "mine";
@@ -142,7 +140,7 @@ function uniqueSongs(songs: Song[]) {
 }
 
 function allLibrarySongs(playlists: Playlist[], history: Song[]) {
-  return uniqueSongs([...seedSongs, ...playlists.flatMap((playlist) => playlist.songs), ...history]);
+  return uniqueSongs([...playlists.flatMap((playlist) => playlist.songs), ...history]);
 }
 
 export default function App() {
@@ -166,12 +164,14 @@ export default function App() {
   const [keepQueueOnExit, setKeepQueueOnExit] = useState(initial.keepQueueOnExit);
   const [autoPlayOnStart, setAutoPlayOnStart] = useState(initial.autoPlayOnStart);
   const [homeData, setHomeData] = useState<HomeData>({
-    radarSongs: seedSongs.slice(0, 8),
-    hotSongs: seedSongs.slice(2, 8),
-    recommendedPlaylists: seedPlaylists.filter((playlist) => playlist.id !== FAVORITES_ID)
+    radarSongs: [],
+    hotSongs: [],
+    recommendedPlaylists: []
   });
   const [homeLoading, setHomeLoading] = useState(false);
+  const [playlistOpeningId, setPlaylistOpeningId] = useState<string | null>(null);
   const [homeError, setHomeError] = useState("");
+  const [homeRefreshIndex, setHomeRefreshIndex] = useState(0);
   const [query, setQuery] = useState("");
   const [searchSource, setSearchSource] = useState<SearchSource>("flac");
   const [remoteResults, setRemoteResults] = useState<Song[]>([]);
@@ -184,6 +184,7 @@ export default function App() {
   const [duration, setDuration] = useState(0);
   const [playerOpen, setPlayerOpen] = useState(false);
   const [activePlaylistId, setActivePlaylistId] = useState<string | null>(null);
+  const [previewPlaylist, setPreviewPlaylist] = useState<Playlist | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [mode, setMode] = useState<PlayMode>("sequence");
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -223,7 +224,12 @@ export default function App() {
   const currentSong = queue[queueIndex] ?? null;
   const librarySongs = useMemo(() => allLibrarySongs(playlists, history), [history, playlists]);
   const favoriteKeys = useMemo(() => new Set(favorites.map(songKey)), [favorites]);
-  const activePlaylist = playlists.find((playlist) => playlist.id === activePlaylistId) ?? null;
+  const activePlaylist =
+    playlists.find((playlist) => playlist.id === activePlaylistId) ??
+    (previewPlaylist?.id === activePlaylistId ? previewPlaylist : null) ??
+    homeData.recommendedPlaylists.find((playlist) => playlist.id === activePlaylistId) ??
+    null;
+  const activePlaylistSaved = Boolean(activePlaylist && playlists.some((playlist) => playlist.id === activePlaylist.id));
   const searchResults = useMemo(() => {
     const key = query.trim().toLowerCase();
     if (!key) return [];
@@ -333,24 +339,24 @@ export default function App() {
     };
   }, []);
 
-  const refreshHome = useCallback(async () => {
+  const refreshHome = useCallback(async (refresh = 0) => {
     setHomeLoading(true);
     setHomeError("");
     try {
-      const data = await fetchNeteaseHome(playQuality);
+      const data = await fetchNeteaseHome(playQuality, refresh);
       setHomeData({
-        radarSongs: data.radarSongs.length ? data.radarSongs : seedSongs.slice(0, 8),
-        hotSongs: data.hotSongs.length ? data.hotSongs : seedSongs.slice(2, 8),
-        recommendedPlaylists: data.recommendedPlaylists.length ? data.recommendedPlaylists : seedPlaylists.filter((playlist) => playlist.id !== FAVORITES_ID)
+        radarSongs: data.radarSongs,
+        hotSongs: data.hotSongs,
+        recommendedPlaylists: data.recommendedPlaylists
       });
       setProxyOnline(true);
     } catch (error) {
       setHomeError(error instanceof Error ? error.message : "首页推荐加载失败");
       setProxyOnline(false);
       setHomeData({
-        radarSongs: seedSongs.slice(0, 8),
-        hotSongs: seedSongs.slice(2, 8),
-        recommendedPlaylists: seedPlaylists.filter((playlist) => playlist.id !== FAVORITES_ID)
+        radarSongs: [],
+        hotSongs: [],
+        recommendedPlaylists: []
       });
     } finally {
       setHomeLoading(false);
@@ -358,7 +364,7 @@ export default function App() {
   }, [playQuality]);
 
   useEffect(() => {
-    void refreshHome();
+    void refreshHome(0);
   }, [refreshHome]);
 
   useEffect(() => {
@@ -754,17 +760,17 @@ export default function App() {
   }, []);
 
   const importAndOpenNeteasePlaylist = useCallback(async (playlistId: string) => {
-    setHomeLoading(true);
+    setPlaylistOpeningId(playlistId);
     try {
       const playlist = await importNeteasePlaylist(playlistId.replace(/^netease_playlist_/, ""), playQuality);
-      setPlaylists((items) => [playlist, ...items.filter((item) => item.id !== playlist.id)]);
+      setPreviewPlaylist(playlist);
       setActivePlaylistId(playlist.id);
       setProxyOnline(true);
     } catch (error) {
       setToast(error instanceof Error ? error.message : "歌单打开失败");
       setProxyOnline(false);
     } finally {
-      setHomeLoading(false);
+      setPlaylistOpeningId(null);
     }
   }, [playQuality]);
 
@@ -877,7 +883,7 @@ export default function App() {
   const resolveDownloadable = useCallback(async (song: Song) => {
     if (song.localKey) return resolvePlayable(song);
     if (song.source === "netease") return resolveNeteaseSong(song, downloadQuality);
-    if (song.source === "flac") return resolveFlacSong(song);
+    if (song.source === "flac") return resolveFlacSong(song, { refresh: true });
     return resolvePlayable(song);
   }, [downloadQuality, resolvePlayable]);
 
@@ -1044,11 +1050,16 @@ export default function App() {
           <HomeScreen
             data={homeData}
             loading={homeLoading}
+            openingPlaylistId={playlistOpeningId}
             error={homeError}
             onPlay={playSong}
             onOpenPlaylist={setActivePlaylistId}
             onOpenRemotePlaylist={(playlist) => void importAndOpenNeteasePlaylist(playlist.id)}
-            onRefresh={() => void refreshHome()}
+            onRefresh={() => setHomeRefreshIndex((value) => {
+              const next = value + 1;
+              void refreshHome(next);
+              return next;
+            })}
             proxyOnline={proxyOnline}
           />
         )}
@@ -1137,10 +1148,13 @@ export default function App() {
       {activePlaylist && (
         <PlaylistDetail
           playlist={activePlaylist}
-          library={librarySongs}
+          saved={activePlaylistSaved}
           favoriteKeys={favoriteKeys}
           selected={selected}
-          onClose={() => setActivePlaylistId(null)}
+          onClose={() => {
+            setActivePlaylistId(null);
+            if (!activePlaylistSaved) setPreviewPlaylist(null);
+          }}
           onPlay={playSong}
           onFavorite={toggleFavorite}
           onDownload={downloadSong}
@@ -1152,7 +1166,12 @@ export default function App() {
             next.has(key) ? next.delete(key) : next.add(key);
             return next;
           })}
-          onAddSelected={(songs) => addSongsToPlaylist(activePlaylist.id, songs)}
+          onSavePlaylist={() => {
+            setPlaylists((items) => [activePlaylist, ...items.filter((item) => item.id !== activePlaylist.id)]);
+            setPreviewPlaylist((playlist) => playlist?.id === activePlaylist.id ? null : playlist);
+            setToast("已收藏歌单");
+          }}
+          onAddSelected={(songs) => activePlaylistSaved && addSongsToPlaylist(activePlaylist.id, songs)}
           onCreatePlaylistWithSelected={(name, songs) => {
             const playlist: Playlist = { id: `local_${Date.now()}`, name, cover: songs[0]?.cover ?? cover(3), songs, source: "local" };
             setPlaylists((items) => [playlist, ...items]);
@@ -1160,6 +1179,7 @@ export default function App() {
             setToast(`已创建歌单并添加 ${songs.length} 首歌曲`);
           }}
           onRemoveSelected={() => {
+            if (!activePlaylistSaved) return;
             if (activePlaylist.id === FAVORITES_ID) {
               setToast("我喜欢的音乐不能移除歌曲");
               setSelected(new Set());
@@ -1169,7 +1189,7 @@ export default function App() {
             setPlaylists((items) => items.map((playlist) => playlist.id === activePlaylist.id ? { ...playlist, songs: playlist.songs.filter((song) => !keys.has(songKey(song))) } : playlist));
             setSelected(new Set());
           }}
-          onReverse={() => setPlaylists((items) => items.map((playlist) => playlist.id === activePlaylist.id ? { ...playlist, songs: [...playlist.songs].reverse() } : playlist))}
+          onReverse={() => activePlaylistSaved && setPlaylists((items) => items.map((playlist) => playlist.id === activePlaylist.id ? { ...playlist, songs: [...playlist.songs].reverse() } : playlist))}
         />
       )}
 
@@ -1375,9 +1395,10 @@ function MobileNav({ tab, setTab }: { tab: Tab; setTab: (tab: Tab) => void }) {
   return <nav className="mobile-nav"><NavButton active={tab === "home"} icon={<Home />} label="首页" onClick={() => setTab("home")} /><NavButton active={tab === "search"} icon={<Search />} label="搜索" onClick={() => setTab("search")} /><NavButton active={tab === "mine"} icon={<Library />} label="我的" onClick={() => setTab("mine")} /></nav>;
 }
 
-function HomeScreen({ data, loading, error, onPlay, onOpenPlaylist, onOpenRemotePlaylist, onRefresh, proxyOnline }: {
+function HomeScreen({ data, loading, openingPlaylistId, error, onPlay, onOpenPlaylist, onOpenRemotePlaylist, onRefresh, proxyOnline }: {
   data: HomeData;
   loading: boolean;
+  openingPlaylistId: string | null;
   error: string;
   onPlay: (song: Song, source?: Song[]) => void;
   onOpenPlaylist: (id: string) => void;
@@ -1399,18 +1420,19 @@ function HomeScreen({ data, loading, error, onPlay, onOpenPlaylist, onOpenRemote
       <div className="shelf-row today-shelf">
         {data.radarSongs.map((song) => <CoverSong key={songKey(song)} song={song} songs={data.radarSongs} onPlay={onPlay} />)}
       </div>
-      <SectionTitle icon={<Flame />} title="热歌推荐" />
       <div className="shelf-row hot-shelf">
         {data.hotSongs.map((song) => <CoverSong key={songKey(song)} song={song} songs={data.hotSongs} onPlay={onPlay} />)}
       </div>
-      <SectionTitle icon={<Star />} title="个性化推荐" />
       <div className="playlist-grid">
-        {data.recommendedPlaylists.map((playlist) => (
-          <button className="playlist-card cover-playlist" key={playlist.id} onClick={() => playlist.songs.length ? onOpenPlaylist(playlist.id) : onOpenRemotePlaylist(playlist)}>
+        {data.recommendedPlaylists.map((playlist) => {
+          const opening = openingPlaylistId === playlist.id;
+          return (
+          <button className="playlist-card cover-playlist" key={playlist.id} onClick={() => playlist.songs.length ? onOpenPlaylist(playlist.id) : onOpenRemotePlaylist(playlist)} disabled={opening}>
             <img src={playlist.cover || "/assets/icon.png"} alt="" />
-            <span><strong>{playlist.name}</strong><small>{playlist.trackCount || playlist.songs.length} 首{playlist.creatorNickname ? ` · ${playlist.creatorNickname}` : ""}</small></span>
+            <span><strong>{playlist.name}</strong><small>{opening ? "打开中..." : `${playlist.trackCount || playlist.songs.length} 首${playlist.creatorNickname ? ` · ${playlist.creatorNickname}` : ""}`}</small></span>
           </button>
-        ))}
+          );
+        })}
       </div>
       {loading && <p className="network-line">正在刷新推荐...</p>}
     </section>
@@ -1614,9 +1636,9 @@ function ClockIcon() {
   return <Music />;
 }
 
-function PlaylistDetail({ playlist, library, favoriteKeys, selected, onClose, onPlay, onFavorite, onDownload, onDownloadSelected, onAddToQueue, onSelect, onAddSelected, onCreatePlaylistWithSelected, onRemoveSelected, onReverse }: {
+function PlaylistDetail({ playlist, saved, favoriteKeys, selected, onClose, onPlay, onFavorite, onDownload, onDownloadSelected, onAddToQueue, onSelect, onSavePlaylist, onAddSelected, onCreatePlaylistWithSelected, onRemoveSelected, onReverse }: {
   playlist: Playlist;
-  library: Song[];
+  saved: boolean;
   favoriteKeys: Set<string>;
   selected: Set<string>;
   onClose: () => void;
@@ -1626,6 +1648,7 @@ function PlaylistDetail({ playlist, library, favoriteKeys, selected, onClose, on
   onDownloadSelected: (songs: Song[]) => void;
   onAddToQueue: (songs: Song[]) => void;
   onSelect: (song: Song) => void;
+  onSavePlaylist: () => void;
   onAddSelected: (songs: Song[]) => void;
   onCreatePlaylistWithSelected: (name: string, songs: Song[]) => void;
   onRemoveSelected: () => void;
@@ -1633,8 +1656,6 @@ function PlaylistDetail({ playlist, library, favoriteKeys, selected, onClose, on
 }) {
   const [filter, setFilter] = useState("");
   const [createName, setCreateName] = useState("");
-  const playlistKeys = new Set(playlist.songs.map(songKey));
-  const addableLibrary = library.filter((song) => !playlistKeys.has(songKey(song)));
   const normalizedFilter = filter.trim().toLowerCase();
   const visibleSongs = normalizedFilter
     ? playlist.songs.filter((song) => [song.name, song.artist].some((value) => value.toLowerCase().includes(normalizedFilter)))
@@ -1658,9 +1679,10 @@ function PlaylistDetail({ playlist, library, favoriteKeys, selected, onClose, on
           <button disabled={!visibleSongs.length} onClick={() => visibleSongs.forEach(onSelect)}><ListPlus /> 全选可见</button>
           <button disabled={!selectedSongs.length} onClick={() => onAddToQueue(selectedSongs)}><ListPlus /> 加入队列</button>
           <button disabled={!selectedSongs.length} onClick={() => onDownloadSelected(selectedSongs)}><Download /> 下载所选</button>
-          <button onClick={onReverse}>反转排序</button>
-          <button onClick={() => onAddSelected(selectedSongs)} disabled={!selectedSongs.length}>加入当前歌单</button>
-          <button onClick={onRemoveSelected} disabled={!selected.size}>移除所选</button>
+          {!saved && <button className="primary-button" onClick={onSavePlaylist}><Plus /> 收藏歌单</button>}
+          {saved && <button onClick={onReverse}>反转排序</button>}
+          {saved && <button onClick={() => onAddSelected(selectedSongs)} disabled={!selectedSongs.length}>加入当前歌单</button>}
+          {saved && <button onClick={onRemoveSelected} disabled={!selected.size}>移除所选</button>}
         </div>
         {selectedSongs.length > 0 && (
           <form className="inline-create" onSubmit={(event) => {
@@ -1674,9 +1696,8 @@ function PlaylistDetail({ playlist, library, favoriteKeys, selected, onClose, on
             <button className="primary-button" type="submit"><Plus /> 创建并添加</button>
           </form>
         )}
-        <div className="two-column">
+        <div className="playlist-only-column">
           <div><h3>当前歌单</h3><div className="song-list">{visibleSongs.map((song) => <SongRow key={songKey(song)} song={song} selectable selected={selected.has(songKey(song))} favorite={favoriteKeys.has(songKey(song))} onPlay={(target) => onPlay(target, playlist.songs)} onFavorite={onFavorite} onSelect={onSelect} onDownload={onDownload} />)}{!visibleSongs.length && <p className="empty-text">没有匹配歌曲</p>}</div></div>
-          <div><h3>曲库</h3><div className="song-list">{addableLibrary.slice(0, 20).map((song) => <SongRow key={songKey(song)} song={song} selectable selected={selected.has(songKey(song))} onPlay={(target) => onPlay(target, library)} onSelect={onSelect} />)}{!addableLibrary.length && <p className="empty-text">曲库里没有更多可添加歌曲</p>}</div></div>
         </div>
       </section>
     </div>

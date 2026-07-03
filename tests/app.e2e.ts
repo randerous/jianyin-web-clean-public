@@ -90,6 +90,73 @@ test("home shows Android 5 recommendation sections", async ({ page }) => {
   await expect(page.getByRole("button", { name: /Home Playlist/ })).toBeVisible();
 });
 
+test("home recommended playlist opens from homepage state", async ({ page }) => {
+  await page.route("**/api/netease/home**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        radarSongs: [],
+        hotSongs: [],
+        recommendedPlaylists: [{
+          id: "homepage-local",
+          name: "Homepage Filled Playlist",
+          cover: "/assets/icon.png",
+          source: "netease",
+          trackCount: 1,
+          creatorNickname: "Mock Creator",
+          songs: [{
+            id: "homepage-song",
+            name: "Homepage Playlist Song",
+            artist: "Cloud Artist",
+            pic: "/assets/icon.png",
+            url: "/assets/full-song-65s.wav",
+            source: "netease",
+            durationMs: 65000,
+            verifiedPlayable: true
+          }]
+        }]
+      })
+    });
+  });
+  await page.reload();
+
+  await page.getByRole("button", { name: /Homepage Filled Playlist/ }).click();
+  const playlist = page.getByRole("dialog", { name: "Homepage Filled Playlist" });
+  await expect(playlist).toBeVisible();
+  await expect(playlist).toContainText("Homepage Playlist Song");
+});
+
+test("home recommended playlist imports remote detail before opening", async ({ page }) => {
+  await page.route(/\/api\/netease\/playlist\/3778678.*/, async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        playlist: {
+          id: "netease_playlist_3778678",
+          name: "Home Playlist",
+          cover: "/assets/icon.png",
+          source: "netease",
+          songs: [{
+            id: "321",
+            name: "Home Playlist Song",
+            artist: "Cloud Artist",
+            pic: "/assets/icon.png",
+            url: "/assets/full-song-65s.wav",
+            source: "netease",
+            durationMs: 65000,
+            verifiedPlayable: true
+          }]
+        }
+      })
+    });
+  });
+
+  await page.getByRole("button", { name: /Home Playlist/ }).click();
+  const playlist = page.getByRole("dialog", { name: "Home Playlist" });
+  await expect(playlist).toBeVisible();
+  await expect(playlist).toContainText("Home Playlist Song");
+});
+
 test("home song plays and opens player lyrics", async ({ page }) => {
   await playFirstHomeSong(page);
   await expect(page.locator(".now-playing")).toContainText("鍛ㄦ澃浼?鏈湴璇曞惉");
