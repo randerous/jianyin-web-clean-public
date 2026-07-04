@@ -1475,7 +1475,7 @@ function HomeScreen({ data, loading, openingPlaylistId, error, onPlay, onOpenPla
   return (
     <section className="screen">
       <header className="topbar">
-        <div><span className="kicker">Android 5.0.0 Replica</span><h1>拾音</h1></div>
+        <div><span className="kicker">Android 1.0.0</span><h1>拾音</h1></div>
         <div className="top-actions">
           <span className={`status-pill ${proxyOnline ? "online" : ""}`}>{proxyOnline ? "网易云官方接口" : "本地兜底"}</span>
           <button className="icon-button" onClick={onRefresh} aria-label="刷新推荐" disabled={loading}><RefreshCw /></button>
