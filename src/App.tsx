@@ -82,8 +82,10 @@ declare global {
   interface Window {
     JianyinAndroid?: {
       setPlaybackState?: (active: boolean, title?: string, artist?: string) => void;
+      setPlaybackInfo?: (present: boolean, playing: boolean, title?: string, artist?: string) => void;
     };
     JianyinAndroidBack?: () => boolean;
+    JianyinAndroidMedia?: (command: "previous" | "toggle" | "next") => void;
     JianyinRecoverAudio?: () => void;
   }
 }
@@ -262,7 +264,11 @@ export default function App() {
 
   useEffect(() => {
     try {
-      window.JianyinAndroid?.setPlaybackState?.(playing && Boolean(currentSong), currentSong?.name ?? "", currentSong?.artist ?? "");
+      if (window.JianyinAndroid?.setPlaybackInfo) {
+        window.JianyinAndroid.setPlaybackInfo(Boolean(currentSong), playing, currentSong?.name ?? "", currentSong?.artist ?? "");
+      } else {
+        window.JianyinAndroid?.setPlaybackState?.(playing && Boolean(currentSong), currentSong?.name ?? "", currentSong?.artist ?? "");
+      }
     } catch {
       // Android bridge is only available inside the packaged app.
     }
@@ -595,6 +601,23 @@ export default function App() {
     }
     void playSong(currentSong, queue);
   }, [currentSong, playSong, playing, queue]);
+
+  useEffect(() => {
+    window.JianyinAndroidMedia = (command) => {
+      if (command === "previous") {
+        previousSong();
+        return;
+      }
+      if (command === "next") {
+        nextSong();
+        return;
+      }
+      togglePlayback();
+    };
+    return () => {
+      delete window.JianyinAndroidMedia;
+    };
+  }, [nextSong, previousSong, togglePlayback]);
 
   const toggleFavorite = useCallback((song: Song) => {
     const favoriteSong = isRemoteSong(song) ? { ...song, remotePlayable: true, needsImport: false } : song;

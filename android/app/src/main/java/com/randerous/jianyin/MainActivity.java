@@ -1,8 +1,12 @@
 package com.randerous.jianyin;
 
 import android.app.DownloadManager;
+import android.Manifest;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.BroadcastReceiver;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.net.Uri;
 import android.os.Build;
@@ -15,19 +19,48 @@ import android.view.View;
 import android.view.Window;
 import android.window.OnBackInvokedDispatcher;
 import android.widget.Toast;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.activity.EdgeToEdge;
 import androidx.activity.OnBackPressedCallback;
+import androidx.core.content.ContextCompat;
 import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
+    private ActivityResultLauncher<String> notificationPermissionLauncher;
+    private final BroadcastReceiver mediaActionReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (intent == null || !PlaybackKeepAliveService.ACTION_MEDIA_CONTROL.equals(intent.getAction())) {
+                return;
+            }
+            String command = intent.getStringExtra(PlaybackKeepAliveService.EXTRA_MEDIA_COMMAND);
+            dispatchMediaCommand(command);
+        }
+    };
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         EdgeToEdge.enable(this);
+        notificationPermissionLauncher = registerForActivityResult(
+                new ActivityResultContracts.RequestPermission(),
+                granted -> {});
         super.onCreate(savedInstanceState);
         configureSystemBars();
         configureDownloads();
         configurePlaybackBridge();
         configureBackGesture();
+        requestNotificationPermission();
+        registerMediaActionReceiver();
+    }
+
+    @Override
+    public void onDestroy() {
+        try {
+            unregisterReceiver(mediaActionReceiver);
+        } catch (IllegalArgumentException ignored) {
+        }
+        super.onDestroy();
     }
 
     private void configureSystemBars() {
@@ -87,6 +120,37 @@ public class MainActivity extends BridgeActivity {
                 });
     }
 
+    private void requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return;
+        }
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS);
+    }
+
+    private void registerMediaActionReceiver() {
+        IntentFilter filter = new IntentFilter(PlaybackKeepAliveService.ACTION_MEDIA_CONTROL);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(mediaActionReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(mediaActionReceiver, filter);
+        }
+    }
+
+    private void dispatchMediaCommand(String command) {
+        if (command == null || getBridge() == null || getBridge().getWebView() == null) {
+            return;
+        }
+        String script = "window.JianyinAndroidMedia && window.JianyinAndroidMedia(" + quoteJs(command) + ")";
+        getBridge().getWebView().post(() -> getBridge().getWebView().evaluateJavascript(script, null));
+    }
+
+    private static String quoteJs(String value) {
+        return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"") + "\"";
+    }
+
     private void configurePlaybackBridge() {
         if (getBridge() == null || getBridge().getWebView() == null) {
             return;
@@ -135,11 +199,17 @@ public class MainActivity extends BridgeActivity {
 
         @JavascriptInterface
         public void setPlaybackState(boolean active, String title, String artist) {
+            setPlaybackInfo(active, active, title, artist);
+        }
+
+        @JavascriptInterface
+        public void setPlaybackInfo(boolean present, boolean playing, String title, String artist) {
             Intent intent = new Intent(context, PlaybackKeepAliveService.class);
-            intent.setAction(active ? PlaybackKeepAliveService.ACTION_START : PlaybackKeepAliveService.ACTION_STOP);
+            intent.setAction(present ? PlaybackKeepAliveService.ACTION_START : PlaybackKeepAliveService.ACTION_STOP);
+            intent.putExtra(PlaybackKeepAliveService.EXTRA_PLAYING, playing);
             intent.putExtra(PlaybackKeepAliveService.EXTRA_TITLE, title == null ? "" : title);
             intent.putExtra(PlaybackKeepAliveService.EXTRA_ARTIST, artist == null ? "" : artist);
-            if (active) {
+            if (present) {
                 context.startForegroundService(intent);
             } else {
                 context.startService(intent);
