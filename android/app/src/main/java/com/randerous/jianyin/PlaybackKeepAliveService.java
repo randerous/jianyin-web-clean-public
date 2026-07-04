@@ -9,6 +9,7 @@ import android.content.Intent;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
+import android.support.v4.media.MediaMetadataCompat;
 import android.support.v4.media.session.MediaSessionCompat;
 import android.support.v4.media.session.PlaybackStateCompat;
 import androidx.annotation.Nullable;
@@ -27,7 +28,7 @@ public class PlaybackKeepAliveService extends Service {
     public static final String EXTRA_MEDIA_COMMAND = "command";
     public static final String EXTRA_PLAYING = "playing";
 
-    private static final String CHANNEL_ID = "jianyin_playback";
+    private static final String CHANNEL_ID = "shiyin_media_playback_v3";
     private static final int NOTIFICATION_ID = 1001;
     private PowerManager.WakeLock wakeLock;
     private MediaSessionCompat mediaSession;
@@ -37,6 +38,28 @@ public class PlaybackKeepAliveService extends Service {
         super.onCreate();
         createChannel();
         mediaSession = new MediaSessionCompat(this, "ShiyinPlayback");
+        mediaSession.setFlags(MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS | MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS);
+        mediaSession.setCallback(new MediaSessionCompat.Callback() {
+            @Override
+            public void onPlay() {
+                sendMediaCommand(COMMAND_TOGGLE);
+            }
+
+            @Override
+            public void onPause() {
+                sendMediaCommand(COMMAND_TOGGLE);
+            }
+
+            @Override
+            public void onSkipToPrevious() {
+                sendMediaCommand(COMMAND_PREVIOUS);
+            }
+
+            @Override
+            public void onSkipToNext() {
+                sendMediaCommand(COMMAND_NEXT);
+            }
+        });
         mediaSession.setActive(true);
     }
 
@@ -118,9 +141,12 @@ public class PlaybackKeepAliveService extends Service {
             launchIntent,
             PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE
         );
+        if (mediaSession != null) {
+            mediaSession.setSessionActivity(pendingIntent);
+        }
         String safeTitle = title == null || title.isEmpty() ? "拾音" : title;
         String safeArtist = artist == null || artist.isEmpty() ? "Playing music" : artist;
-        updatePlaybackState(playing);
+        updateMediaSession(safeTitle, safeArtist, playing);
         int toggleIcon = playing ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play;
         String toggleTitle = playing ? "暂停" : "播放";
         return new NotificationCompat.Builder(this, CHANNEL_ID)
@@ -134,11 +160,12 @@ public class PlaybackKeepAliveService extends Service {
             .setStyle(new MediaStyle()
                 .setMediaSession(mediaSession == null ? null : mediaSession.getSessionToken())
                 .setShowActionsInCompactView(0, 1, 2))
-            .setOngoing(playing)
+            .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build();
     }
 
@@ -164,10 +191,14 @@ public class PlaybackKeepAliveService extends Service {
         sendBroadcast(broadcast);
     }
 
-    private void updatePlaybackState(boolean playing) {
+    private void updateMediaSession(String title, String artist, boolean playing) {
         if (mediaSession == null) {
             return;
         }
+        mediaSession.setMetadata(new MediaMetadataCompat.Builder()
+            .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
+            .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
+            .build());
         long actions = PlaybackStateCompat.ACTION_PLAY_PAUSE
             | PlaybackStateCompat.ACTION_PAUSE
             | PlaybackStateCompat.ACTION_PLAY
@@ -190,9 +221,12 @@ public class PlaybackKeepAliveService extends Service {
         }
         NotificationChannel channel = new NotificationChannel(
             CHANNEL_ID,
-            "拾音 playback",
-            NotificationManager.IMPORTANCE_DEFAULT
+            "播放控制",
+            NotificationManager.IMPORTANCE_HIGH
         );
+        channel.setDescription("显示当前播放歌曲和上一首、播放暂停、下一首控制");
+        channel.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
+        channel.setSound(null, null);
         channel.setShowBadge(false);
         manager.createNotificationChannel(channel);
     }
