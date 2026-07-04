@@ -83,6 +83,7 @@ declare global {
     JianyinAndroid?: {
       setPlaybackState?: (active: boolean, title?: string, artist?: string) => void;
     };
+    JianyinAndroidBack?: () => boolean;
     JianyinRecoverAudio?: () => void;
   }
 }
@@ -1010,6 +1011,48 @@ export default function App() {
     void checkProxy().then(setProxyOnline);
     setToast(saved ? "API backend saved" : "API backend reset");
   }, [apiBaseInput]);
+
+  useEffect(() => {
+    window.JianyinAndroidBack = () => {
+      if (playerOpen) {
+        setPlayerOpen(false);
+        return true;
+      }
+      if (floatingLyric) {
+        setFloatingLyric(false);
+        return true;
+      }
+      if (activePlaylist) {
+        setActivePlaylistId(null);
+        if (!activePlaylistSaved) setPreviewPlaylist(null);
+        return true;
+      }
+      if (settingsOpen) {
+        setSettingsOpen(false);
+        return true;
+      }
+      if (createOpen) {
+        setCreateOpen(false);
+        return true;
+      }
+      if (neteaseOpen) {
+        setNeteaseOpen(false);
+        return true;
+      }
+      if (accountOpen) {
+        setAccountOpen(false);
+        return true;
+      }
+      if (tab !== "home") {
+        setTab("home");
+        return true;
+      }
+      return false;
+    };
+    return () => {
+      delete window.JianyinAndroidBack;
+    };
+  }, [accountOpen, activePlaylist, activePlaylistSaved, createOpen, floatingLyric, neteaseOpen, playerOpen, settingsOpen, tab]);
 
   return (
     <div className="app-shell">
