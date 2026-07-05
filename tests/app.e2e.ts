@@ -973,6 +973,7 @@ test("bili explicit search resolves and plays through bili stream endpoint", asy
 test("flac test source searches, filters, resolves, and plays full songs", async ({ page }) => {
   const searchRequests: URLSearchParams[] = [];
   const songRequests: string[] = [];
+  const streamRequests: string[] = [];
   await page.route("**/api/flac/search**", async (route) => {
     const url = new URL(route.request().url());
     const searchPage = url.searchParams.get("page") ?? "1";
@@ -1028,11 +1029,12 @@ test("flac test source searches, filters, resolves, and plays full songs", async
   });
   await page.route(/\/api\/flac\/song\/(15368606|20000000).*/, async (route) => {
     const url = new URL(route.request().url());
+    const id = url.pathname.split("/").pop();
     songRequests.push(url.searchParams.toString());
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
-        url: "/assets/full-song-65s.wav",
+        url: `/api/flac/stream/${id}?format=flac&bitrate=2000&time=${url.searchParams.get("time")}&sign=${url.searchParams.get("sign")}`,
         durationMs: 65000,
         verifiedPlayable: true,
         br: 2000000,
@@ -1041,6 +1043,17 @@ test("flac test source searches, filters, resolves, and plays full songs", async
         audioType: "flac",
         quality: "flac"
       })
+    });
+  });
+  await page.route(/\/api\/flac\/stream\/(15368606|20000000).*/, async (route) => {
+    const url = new URL(route.request().url());
+    streamRequests.push(url.searchParams.toString());
+    await route.fulfill({
+      path: fullSongFile,
+      headers: {
+        "content-type": "audio/wav",
+        "accept-ranges": "bytes"
+      }
     });
   });
   await page.route("**/api/lyrics**", async (route) => {
@@ -1053,7 +1066,6 @@ test("flac test source searches, filters, resolves, and plays full songs", async
   });
 
   await page.locator("nav button").nth(1).click();
-  await page.locator(".search-toolbar .segmented button").nth(2).click();
   await expect(page.locator(".network-line")).toContainText("FLAC/320k");
   await page.locator('.search-box input[name="keyword"]').fill("September Earth Wind Fire");
   await page.keyboard.press("Enter");
@@ -1077,18 +1089,21 @@ test("flac test source searches, filters, resolves, and plays full songs", async
   expect(searchRequests.map((params) => params.get("keyword"))).toEqual(["September Earth Wind Fire", "September Earth Wind Fire"]);
   expect(searchRequests.map((params) => params.get("limit"))).toEqual(["30", "30"]);
   expect(searchRequests.map((params) => params.get("page"))).toEqual(["1", "2"]);
+  await page.getByRole("button", { name: "取消全选当前页" }).click();
+  await expect(page.locator(".selection-bar")).toHaveCount(0);
 
   await page.locator(".song-row", { hasText: "Boogie Wonderland" }).locator(".song-hit").click();
   await expect(page.locator(".now-playing")).toContainText("Boogie Wonderland");
   await expectAudioPlaying(page);
   await expectAudioLongerThan(page, 60);
   expect(songRequests).toEqual(["format=flac&bitrate=2000&time=23456&sign=signed2"]);
-  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.src)).toContain("full-song-65s.wav");
+  expect(streamRequests.some((query) => query.includes("sign=signed2"))).toBe(true);
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.src)).toContain("/api/flac/stream/20000000");
   await page.locator(".now-playing").click();
   await expect(page.locator(".player-sheet")).toContainText("dance with me");
 });
 
-test("flac playback refreshes expired search signature before playing", async ({ page }) => {
+test("flac playback refreshes expired search signature after fast-path stream fails", async ({ page }) => {
   const searchRequests: URLSearchParams[] = [];
   const songRequests: string[] = [];
   const streamRequests: string[] = [];
@@ -1130,6 +1145,10 @@ test("flac playback refreshes expired search signature before playing", async ({
     const url = new URL(route.request().url());
     songRequests.push(url.searchParams.toString());
     const sign = url.searchParams.get("sign");
+    if (sign === "old-sign") {
+      await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "flac_song_unavailable", message: "请求已过期" }) });
+      return;
+    }
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
@@ -1147,10 +1166,6 @@ test("flac playback refreshes expired search signature before playing", async ({
   await page.route("**/api/flac/stream/15368606**", async (route) => {
     const url = new URL(route.request().url());
     streamRequests.push(url.searchParams.toString());
-    if (url.searchParams.get("sign") === "old-sign") {
-      await route.fulfill({ status: 410, contentType: "text/plain", body: "expired" });
-      return;
-    }
     await route.fulfill({
       path: fullSongFile,
       headers: {
@@ -1161,7 +1176,6 @@ test("flac playback refreshes expired search signature before playing", async ({
   });
 
   await page.locator("nav button").nth(1).click();
-  await page.locator(".search-toolbar .segmented button").nth(2).click();
   await page.locator('.search-box input[name="keyword"]').fill("September Earth Wind Fire");
   await page.keyboard.press("Enter");
   await expect(page.locator(".song-row", { hasText: "September" })).toBeVisible();
@@ -1170,7 +1184,8 @@ test("flac playback refreshes expired search signature before playing", async ({
   await expect(page.locator(".now-playing")).toContainText("September");
   await expectAudioPlaying(page);
   expect(searchRequests.length).toBeGreaterThanOrEqual(2);
-  expect(songRequests.some((query) => query.includes("sign=old-sign"))).toBe(false);
+  expect(searchRequests.map((params) => params.get("limit"))).toEqual(expect.arrayContaining(["30", "1"]));
+  expect(songRequests.some((query) => query.includes("sign=old-sign"))).toBe(true);
   expect(songRequests.some((query) => query.includes("sign=fresh-sign"))).toBe(true);
   expect(streamRequests.some((query) => query.includes("sign=old-sign"))).toBe(false);
   expect(streamRequests.some((query) => query.includes("sign=fresh-sign"))).toBe(true);
@@ -1242,13 +1257,12 @@ test("flac playback resumes from current time after mid-song signature refresh",
   });
 
   await page.locator("nav button").nth(1).click();
-  await page.locator(".search-toolbar .segmented button").nth(2).click();
   await page.locator('.search-box input[name="keyword"]').fill("September Earth Wind Fire");
   await page.keyboard.press("Enter");
   await expect(page.locator(".song-row", { hasText: "September" })).toBeVisible();
   await page.locator(".song-row", { hasText: "September" }).locator(".song-hit").click();
   await expectAudioPlaying(page);
-  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.src)).toContain("fresh-2-sign");
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.src)).toContain("fresh-1-sign");
   await expect.poll(() => page.evaluate(() => typeof window.JianyinRecoverAudio)).toBe("function");
 
   await page.locator("audio").evaluate((audio: HTMLAudioElement) => {
@@ -1257,10 +1271,10 @@ test("flac playback resumes from current time after mid-song signature refresh",
   });
   await page.evaluate(() => window.JianyinRecoverAudio?.());
 
-  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.src)).toContain("fresh-3-sign");
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.src)).toContain("fresh-2-sign");
   await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.currentTime)).toBeGreaterThan(36);
-  expect(searchRequests.length).toBeGreaterThanOrEqual(3);
-  expect(songRequests.some((query) => query.includes("sign=fresh-3-sign"))).toBe(true);
+  expect(searchRequests.length).toBeGreaterThanOrEqual(2);
+  expect(songRequests.some((query) => query.includes("sign=fresh-2-sign"))).toBe(true);
 });
 
 test("flac search queue refreshes expired signatures when advancing", async ({ page }) => {
@@ -1332,6 +1346,10 @@ test("flac search queue refreshes expired signatures when advancing", async ({ p
   await page.route(/\/api\/flac\/song\/(111|222).*/, async (route) => {
     const url = new URL(route.request().url());
     songRequests.push(`${url.pathname}?${url.searchParams.toString()}`);
+    if (url.searchParams.get("sign")?.startsWith("old-sign")) {
+      await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ error: "flac_song_unavailable", message: "请求已过期" }) });
+      return;
+    }
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
@@ -1349,10 +1367,6 @@ test("flac search queue refreshes expired signatures when advancing", async ({ p
   await page.route(/\/api\/flac\/stream\/(111|222).*/, async (route) => {
     const url = new URL(route.request().url());
     streamRequests.push(`${url.pathname}?${url.searchParams.toString()}`);
-    if (url.searchParams.get("sign")?.startsWith("old-sign")) {
-      await route.fulfill({ status: 410, contentType: "text/plain", body: "expired" });
-      return;
-    }
     await route.fulfill({
       path: fullSongFile,
       headers: {
@@ -1363,7 +1377,6 @@ test("flac search queue refreshes expired signatures when advancing", async ({ p
   });
 
   await page.locator("nav button").nth(1).click();
-  await page.locator(".search-toolbar .segmented button").nth(2).click();
   await page.locator('.search-box input[name="keyword"]').fill("Queue Artist");
   await page.keyboard.press("Enter");
   await expect(page.locator(".song-row", { hasText: "First Track" })).toBeVisible();
@@ -1371,13 +1384,13 @@ test("flac search queue refreshes expired signatures when advancing", async ({ p
   await expect(page.locator(".now-playing")).toContainText("First Track");
   await expectAudioPlaying(page);
 
-  await page.locator('button[aria-label="下一首"]').click();
+  await page.locator(".now-playing .icon-button").last().click();
   await expect(page.locator(".now-playing")).toContainText("Second Track");
   await expectAudioPlaying(page);
 
   expect(searchRequests).toContain("First Track Queue Artist");
   expect(searchRequests).toContain("Second Track Queue Artist");
-  expect(songRequests.some((query) => query.includes("old-sign"))).toBe(false);
+  expect(songRequests.some((query) => query.includes("old-sign"))).toBe(true);
   expect(songRequests.some((query) => query.includes("fresh-sign-flac_111"))).toBe(true);
   expect(songRequests.some((query) => query.includes("fresh-sign-flac_222"))).toBe(true);
   expect(streamRequests.some((query) => query.includes("old-sign"))).toBe(false);

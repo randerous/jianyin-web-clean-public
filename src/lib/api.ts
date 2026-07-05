@@ -139,16 +139,20 @@ export type SearchPageResult = {
 
 export const FLAC_SEARCH_PAGE_SIZE = 30;
 
-export async function searchFlac(keyword: string, page = 1): Promise<SearchPageResult> {
-  const data = await fetchJson<{ songs?: RemoteSong[]; page?: number; limit?: number; total?: number | string | null; hasMore?: boolean }>(`/api/flac/search?keyword=${encodeURIComponent(keyword)}&limit=${FLAC_SEARCH_PAGE_SIZE}&page=${page}`);
+async function searchFlacPage(keyword: string, page = 1, limit = FLAC_SEARCH_PAGE_SIZE): Promise<SearchPageResult> {
+  const data = await fetchJson<{ songs?: RemoteSong[]; page?: number; limit?: number; total?: number | string | null; hasMore?: boolean }>(`/api/flac/search?keyword=${encodeURIComponent(keyword)}&limit=${limit}&page=${page}`);
   const totalValue = Number(data.total);
   return {
     songs: (data.songs ?? []).map(normalizeRemoteSong).filter((song): song is Song => Boolean(song)),
     page: typeof data.page === "number" ? data.page : page,
-    pageSize: typeof data.limit === "number" ? data.limit : FLAC_SEARCH_PAGE_SIZE,
+    pageSize: typeof data.limit === "number" ? data.limit : limit,
     total: Number.isFinite(totalValue) && totalValue > 0 ? totalValue : null,
     hasMore: Boolean(data.hasMore)
   };
+}
+
+export async function searchFlac(keyword: string, page = 1): Promise<SearchPageResult> {
+  return searchFlacPage(keyword, page, FLAC_SEARCH_PAGE_SIZE);
 }
 
 function flacSongId(song: Song) {
@@ -173,17 +177,20 @@ function flacParams(song: Song) {
 
 async function refreshFlacSong(song: Song) {
   const id = flacSongId(song);
+  const hasRealFlacId = /^\d+$/.test(id);
+  const refreshLimit = hasRealFlacId ? 1 : 5;
   const queries = Array.from(new Set([
     `${song.name} ${song.artist}`.trim(),
     song.name.trim()
   ].filter(Boolean)));
   for (const query of queries) {
-    const { songs } = await searchFlac(query);
-    const sameId = /^\d+$/.test(id) ? songs.find((item) => flacSongId(item) === id) : null;
+    const { songs } = await searchFlacPage(query, 1, refreshLimit);
+    const sameId = hasRealFlacId ? songs.find((item) => flacSongId(item) === id) : null;
     if (sameId) return { ...song, ...sameId };
+    if (hasRealFlacId) continue;
     const sameTitle = songs.find((item) => item.name === song.name && (!song.artist || item.artist === song.artist));
     if (sameTitle) return { ...song, ...sameTitle };
-    if (!/^\d+$/.test(id) && songs[0]) return { ...song, ...songs[0] };
+    if (songs[0]) return { ...song, ...songs[0] };
   }
   return null;
 }
@@ -257,6 +264,11 @@ export async function resolveFlacSong(song: Song, options: { refresh?: boolean }
   if (options.refresh) {
     const refreshed = await refreshFlacSong(song);
     if (refreshed) return fetchResolvedFlacSong(refreshed);
+  }
+  if (!/^\d+$/.test(flacSongId(song))) {
+    const refreshed = await refreshFlacSong(song);
+    if (refreshed) return fetchResolvedFlacSong(refreshed);
+    throw new Error("测试源歌曲缺少真实 ID");
   }
   try {
     return await fetchResolvedFlacSong(song);

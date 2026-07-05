@@ -224,7 +224,6 @@ export default function App() {
   const audioRetryRef = useRef<{ key: string; at: number } | null>(null);
 
   const currentSong = queue[queueIndex] ?? null;
-  const librarySongs = useMemo(() => allLibrarySongs(playlists, history), [history, playlists]);
   const favoriteKeys = useMemo(() => new Set(favorites.map(songKey)), [favorites]);
   const activePlaylist =
     playlists.find((playlist) => playlist.id === activePlaylistId) ??
@@ -233,13 +232,9 @@ export default function App() {
     null;
   const activePlaylistSaved = Boolean(activePlaylist && playlists.some((playlist) => playlist.id === activePlaylist.id));
   const searchResults = useMemo(() => {
-    const key = query.trim().toLowerCase();
-    if (!key) return [];
-    return uniqueSongs([
-      ...remoteResults,
-      ...librarySongs.filter((song) => [song.name, song.artist, song.source].some((value) => value.toLowerCase().includes(key)))
-    ]);
-  }, [librarySongs, query, remoteResults]);
+    if (!query.trim()) return [];
+    return remoteResults;
+  }, [query, remoteResults]);
 
   useEffect(() => {
     queueRef.current = queue;
@@ -443,7 +438,9 @@ export default function App() {
       setDuration(0);
     }
     if (playing && currentSong.url) {
+      const expectedSrc = targetSrc;
       audio.play().catch(() => {
+        if (expectedSrc && audio.src !== expectedSrc) return;
         setPlaying(false);
         setToast("浏览器阻止了自动播放，请再次点击播放");
       });
@@ -461,7 +458,7 @@ export default function App() {
     if (!options.refresh && verifiedUrlMatchesQuality(song, playQuality)) return song;
     if (song.source === "netease") return resolveNeteaseSong(song, playQuality);
     if (song.source === "bili") return resolveBiliSong(song);
-    if (song.source === "flac") return resolveFlacSong(song, { refresh: options.refresh ?? true });
+    if (song.source === "flac") return resolveFlacSong(song, { refresh: options.refresh ?? false });
     if (song.url && !song.url.startsWith("local-file:")) return song;
     throw new Error("当前歌曲没有可播放链接");
   }, [playQuality]);
@@ -469,11 +466,36 @@ export default function App() {
   const playSong = useCallback(async (song: Song, source?: Song[], options: { quiet?: boolean; startAt?: number; refresh?: boolean } = {}) => {
     try {
       const playable = await resolvePlayable(song, { refresh: options.refresh });
+      const originalKey = songKey(song);
+      const playableKey = songKey(playable);
+      const replaceResolved = (item: Song) => songKey(item) === originalKey ? playable : item;
       const nextQueue = playableSongs((source?.length ? source : [playable]).map((item) => songKey(item) === songKey(song) ? playable : item));
       const nextIndex = Math.max(0, nextQueue.findIndex((item) => songKey(item) === songKey(playable)));
+      setRemoteResults((items) => items.map(replaceResolved));
+      setFavorites((items) => items.map(replaceResolved));
+      setPlaylists((items) => items.map((playlist) => {
+        const songs = playlist.songs.map(replaceResolved);
+        return { ...playlist, songs, cover: songKey(playlist.songs[0] ?? song) === originalKey ? playable.cover ?? playlist.cover : playlist.cover };
+      }));
+      setPreviewPlaylist((playlist) => playlist ? {
+        ...playlist,
+        songs: playlist.songs.map(replaceResolved),
+        cover: songKey(playlist.songs[0] ?? song) === originalKey ? playable.cover ?? playlist.cover : playlist.cover
+      } : playlist);
+      setHomeData((data) => ({
+        ...data,
+        recommendedPlaylists: data.recommendedPlaylists.map((playlist) => ({
+          ...playlist,
+          songs: playlist.songs.map(replaceResolved),
+          cover: songKey(playlist.songs[0] ?? song) === originalKey ? playable.cover ?? playlist.cover : playlist.cover
+        }))
+      }));
       setQueue(nextQueue);
       setQueueIndex(nextIndex);
-      setHistory((items) => [playable, ...items.filter((item) => songKey(item) !== songKey(playable))].slice(0, 30));
+      setHistory((items) => [playable, ...items.filter((item) => {
+        const key = songKey(item);
+        return key !== originalKey && key !== playableKey;
+      })].slice(0, 30));
       setPlaying(true);
       audioAttemptRef.current = { song: playable, source: nextQueue };
       if (audioRef.current) {
@@ -903,7 +925,7 @@ export default function App() {
   const resolveDownloadable = useCallback(async (song: Song) => {
     if (song.localKey) return resolvePlayable(song);
     if (song.source === "netease") return resolveNeteaseSong(song, downloadQuality);
-    if (song.source === "flac") return resolveFlacSong(song, { refresh: true });
+    if (song.source === "flac") return resolveFlacSong(song);
     return resolvePlayable(song);
   }, [downloadQuality, resolvePlayable]);
 
