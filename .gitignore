@@ -10,12 +10,17 @@ tests/*.broken-*
 .DS_Store
 .env
 .env.*
+.github-token
+.gh-token
+github-token.txt
+gh-token.txt
 screenshots/
 screenshot-playlist-backup.json
 logs/
 *.log
 .dev-server.*.log
 scripts/publish-github.ps1
+scripts/publish-github.cmd
 android/.gradle/
 android/build/
 android/app/build/
