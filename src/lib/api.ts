@@ -159,6 +159,10 @@ function flacSongId(song: Song) {
   return song.id.replace(/^flac_/, "");
 }
 
+const FLAC_PREWARM_TTL_MS = 7 * 60 * 1000;
+const flacPrewarmInFlight = new Map<string, Promise<Song | null>>();
+const flacPrewarmCache = new Map<string, number>();
+
 function flacParams(song: Song) {
   const params = new URLSearchParams();
   if (song.url) {
@@ -216,6 +220,42 @@ async function fetchResolvedFlacSong(song: Song) {
   };
 }
 
+function flacPrewarmKey(song: Song) {
+  const id = flacSongId(song);
+  const params = flacParams(song);
+  return `${id}?${params.toString()}`;
+}
+
+export async function prewarmFlacSongs(songs: Song[], limit = 4) {
+  const targets: Song[] = [];
+  const seen = new Set<string>();
+  for (const song of songs) {
+    const id = flacSongId(song);
+    if (song.source !== "flac" || song.localKey || !/^\d+$/.test(id)) continue;
+    const key = flacPrewarmKey(song);
+    const cachedAt = flacPrewarmCache.get(key) ?? 0;
+    if (seen.has(key) || flacPrewarmInFlight.has(key) || Date.now() - cachedAt < FLAC_PREWARM_TTL_MS) continue;
+    seen.add(key);
+    targets.push(song);
+    if (targets.length >= limit) break;
+  }
+
+  await Promise.all(targets.map((song) => {
+    const key = flacPrewarmKey(song);
+    const job = fetchResolvedFlacSong(song)
+      .then((resolved) => {
+        flacPrewarmCache.set(key, Date.now());
+        return resolved;
+      })
+      .catch(() => null)
+      .finally(() => {
+        flacPrewarmInFlight.delete(key);
+      });
+    flacPrewarmInFlight.set(key, job);
+    return job;
+  }));
+}
+
 export async function resolveNeteaseSong(song: Song, quality: PlayQuality = "exhigh") {
   const id = song.id.replace(/^netease_/, "");
   const data = await fetchJson<{ url: string; lrc?: string; durationMs?: number; verifiedPlayable?: boolean; br?: number | null; level?: string | null; audioType?: string | null; type?: string | null; quality?: string }>(`/api/netease/song/${encodeURIComponent(id)}?quality=${encodeURIComponent(quality)}`);
@@ -271,6 +311,8 @@ export async function resolveFlacSong(song: Song, options: { refresh?: boolean }
     throw new Error("测试源歌曲缺少真实 ID");
   }
   try {
+    const prewarmed = await (flacPrewarmInFlight.get(flacPrewarmKey(song)) ?? Promise.resolve(null));
+    if (prewarmed) return prewarmed;
     return await fetchResolvedFlacSong(song);
   } catch (error) {
     const refreshed = await refreshFlacSong(song).catch(() => null);

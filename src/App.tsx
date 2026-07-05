@@ -42,6 +42,7 @@ import {
   logoutBiliCookie,
   logoutNeteaseCookie,
   FLAC_SEARCH_PAGE_SIZE,
+  prewarmFlacSongs,
   resolveBiliSong,
   resolveFlacSong,
   resolveNeteaseSong,
@@ -236,6 +237,13 @@ export default function App() {
     return remoteResults;
   }, [query, remoteResults]);
 
+  const prewarmRemoteSongs = useCallback((songs: Song[], limit = 4) => {
+    const currentKey = currentSong ? songKey(currentSong) : "";
+    const targets = songs.filter((song) => songKey(song) !== currentKey);
+    if (!targets.length) return;
+    void prewarmFlacSongs(targets, limit);
+  }, [currentSong]);
+
   useEffect(() => {
     queueRef.current = queue;
   }, [queue]);
@@ -255,6 +263,22 @@ export default function App() {
   useEffect(() => {
     positionRef.current = position;
   }, [position]);
+
+  useEffect(() => {
+    if (!searchResults.length) return;
+    prewarmRemoteSongs(searchResults, 4);
+  }, [prewarmRemoteSongs, searchResults]);
+
+  useEffect(() => {
+    if (!activePlaylist?.songs.length) return;
+    prewarmRemoteSongs(activePlaylist.songs, 4);
+  }, [activePlaylist, prewarmRemoteSongs]);
+
+  useEffect(() => {
+    if (!queue.length) return;
+    const start = queueIndex >= 0 ? queueIndex + 1 : 0;
+    prewarmRemoteSongs([...queue.slice(start), ...queue.slice(0, start)], 3);
+  }, [prewarmRemoteSongs, queue, queueIndex]);
 
   useEffect(() => {
     try {
