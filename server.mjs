@@ -30,6 +30,7 @@ app.use(express.json({ limit: "512kb" }));
 	const QUALITY_FALLBACK_ORDER = ["jymaster", "sky", "jyeffect", "hires", "lossless", "exhigh", "standard"];
 const RESOLVED_URL_TTL_MS = 8 * 60 * 1000;
 const SEARCH_CACHE_TTL_MS = 90 * 1000;
+const PLAYLIST_DETAIL_CACHE_TTL_MS = 10 * 60 * 1000;
 const NETEASE_REFERER = "https://music.163.com/";
 const NETEASE_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36";
 const BILI_REFERER = "https://www.bilibili.com";
@@ -45,6 +46,8 @@ const FLAC_BASE_URL = "https://flac.music.hi.cn";
 const FLAC_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 	const resolvedUrlCache = new Map();
 	const searchCache = new Map();
+	const playlistDetailCache = new Map();
+	const playlistDetailInFlight = new Map();
 	const biliStreamCache = new Map();
 	const flacStreamCache = new Map();
 	let flacCookie = "";
@@ -935,6 +938,14 @@ function playableRejectReason(data) {
 	  };
 	}
 
+	function prefetchRecommendedPlaylistDetails(playlists, cookie = neteaseAccountCookie) {
+	  for (const playlist of playlists.slice(0, 8)) {
+	    const id = cleanText(playlist?.id);
+	    if (!/^\d+$/.test(id)) continue;
+	    void getPlaylistDetailWithFallback(id, cookie).catch(() => {});
+	  }
+	}
+
 	async function getRecommendedPlaylists(limit, offset = 0) {
 	  if (offset > 0 && typeof netease.top_playlist === "function") {
 	    const response = await netease.top_playlist({ limit, offset, order: "hot" });
@@ -965,6 +976,12 @@ function playableRejectReason(data) {
 	}
 
 	async function getPlaylistDetailWithFallback(id, cookie = neteaseAccountCookie) {
+	  const cacheKey = `${cookieHash(cookie)}:${id}`;
+	  const cached = playlistDetailCache.get(cacheKey);
+	  if (cached && cached.expiresAt > Date.now()) return cached.playlist;
+	  const pending = playlistDetailInFlight.get(cacheKey);
+	  if (pending) return pending;
+	  const request = (async () => {
 	  const detail = await retryNetease(() => netease.playlist_detail({ id, s: 0, cookie }));
 	  const playlist = detail.body?.playlist;
 	  if (!playlist) return null;
@@ -976,7 +993,13 @@ function playableRejectReason(data) {
 	      // playlist_detail still contains trackIds; expandPlaylistTracks can try song_detail.
 	    }
 	  }
+	    playlistDetailCache.set(cacheKey, { playlist, expiresAt: Date.now() + PLAYLIST_DETAIL_CACHE_TTL_MS });
 	  return playlist;
+	  })().finally(() => {
+	    playlistDetailInFlight.delete(cacheKey);
+	  });
+	  playlistDetailInFlight.set(cacheKey, request);
+	  return request;
 	}
 
 	function normalizeLegacyLrcTimestamps(content) {
@@ -1364,6 +1387,7 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 	    const refresh = parseOffset(req.query.refresh, 0, 99);
 	    const offset = parseOffset(req.query.offset, refresh ? (refresh * limit) % 300 : 0, 300);
 	    const recommendedPlaylists = await getRecommendedPlaylists(limit, offset);
+	    prefetchRecommendedPlaylistDetails(recommendedPlaylists);
 	    res.json({ radarSongs: [], hotSongs: [], recommendedPlaylists, quality: "flac", refresh, offset });
 	  } catch (error) {
 	    res.status(502).json({ error: "netease_home_failed", message: errorMessage(error) });

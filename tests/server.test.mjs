@@ -950,6 +950,36 @@ test("netease playlist detail returns more than sixty songs", async () => {
   assert.equal(imported.body.playlist.songs[74].id, "flac_search_playlist_75");
 });
 
+test("home recommendation prefetch warms playlist detail cache", async () => {
+  let detailCalls = 0;
+  const playlist = {
+    id: 77,
+    name: "Prefetched Playlist",
+    coverImgUrl: "/playlist.png",
+    tracks: [song(1), song(2)],
+    trackIds: [{ id: 1 }, { id: 2 }]
+  };
+  const neteaseClient = {
+    async personalized() {
+      return { body: { result: [{ id: 77, name: "Prefetched Playlist", picUrl: "/playlist.png", trackCount: 2 }] } };
+    },
+    async playlist_detail() {
+      detailCalls += 1;
+      return { body: { playlist } };
+    }
+  };
+  const baseUrl = await startTestServer({ neteaseClient });
+
+  const home = await getJson(`${baseUrl}/api/netease/home?playlistLimit=1`);
+  assert.equal(home.response.status, 200);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  const imported = await getJson(`${baseUrl}/api/netease/playlist/77`);
+
+  assert.equal(imported.response.status, 200);
+  assert.equal(detailCalls, 1);
+  assert.deepEqual(imported.body.playlist.songs.map((item) => item.source), ["flac", "flac"]);
+});
+
 test("netease account login validates cookie and syncs only playable playlists", async () => {
   const requested = [];
   const neteaseClient = {

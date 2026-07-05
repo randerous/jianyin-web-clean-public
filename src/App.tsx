@@ -251,7 +251,24 @@ export default function App() {
     const currentKey = currentSong ? songKey(currentSong) : "";
     const targets = songs.filter((song) => songKey(song) !== currentKey);
     if (!targets.length) return;
-    void prewarmFlacSongs(targets, limit);
+    void prewarmFlacSongs(targets, limit, (original, resolved) => {
+      const originalKey = songKey(original);
+      const replaceResolved = (item: Song) => songKey(item) === originalKey ? resolved : item;
+      setRemoteResults((items) => items.map(replaceResolved));
+      setQueue((items) => items.map(replaceResolved));
+      setHistory((items) => items.map(replaceResolved));
+      setDownloadHistory((items) => items.map(replaceResolved));
+      setFavorites((items) => items.map(replaceResolved));
+      setPlaylists((items) => items.map((playlist) => ({ ...playlist, songs: playlist.songs.map(replaceResolved) })));
+      setPreviewPlaylist((playlist) => playlist ? { ...playlist, songs: playlist.songs.map(replaceResolved) } : playlist);
+      setHomeData((data) => ({
+        ...data,
+        recommendedPlaylists: data.recommendedPlaylists.map((playlist) => ({
+          ...playlist,
+          songs: playlist.songs.map(replaceResolved)
+        }))
+      }));
+    });
   }, [currentSong]);
 
   useEffect(() => {
@@ -891,6 +908,7 @@ export default function App() {
       const playlist = await importNeteasePlaylist(playlistId.replace(/^netease_playlist_/, ""), playQuality);
       setPreviewPlaylist(playlist);
       setActivePlaylistId(playlist.id);
+      prewarmRemoteSongs(playlist.songs, 4);
       setProxyOnline(true);
     } catch (error) {
       setToast(error instanceof Error ? error.message : "歌单打开失败");
@@ -898,7 +916,7 @@ export default function App() {
     } finally {
       setPlaylistOpeningId(null);
     }
-  }, [playQuality]);
+  }, [playQuality, prewarmRemoteSongs]);
 
   const submitSearch = useCallback(async (value = query, page = 1) => {
     const text = value.trim();

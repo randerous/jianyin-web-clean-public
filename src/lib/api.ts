@@ -138,6 +138,9 @@ export type SearchPageResult = {
 };
 
 export const FLAC_SEARCH_PAGE_SIZE = 30;
+const PLAYLIST_IMPORT_CACHE_TTL_MS = 10 * 60 * 1000;
+const playlistImportCache = new Map<string, { playlist: Playlist; at: number }>();
+const playlistImportInFlight = new Map<string, Promise<Playlist>>();
 
 async function searchFlacPage(keyword: string, page = 1, limit = FLAC_SEARCH_PAGE_SIZE): Promise<SearchPageResult> {
   const data = await fetchJson<{ songs?: RemoteSong[]; page?: number; limit?: number; total?: number | string | null; hasMore?: boolean }>(`/api/flac/search?keyword=${encodeURIComponent(keyword)}&limit=${limit}&page=${page}`);
@@ -161,7 +164,7 @@ function flacSongId(song: Song) {
 
 const FLAC_PREWARM_TTL_MS = 7 * 60 * 1000;
 const flacPrewarmInFlight = new Map<string, Promise<Song | null>>();
-const flacPrewarmCache = new Map<string, number>();
+const flacPrewarmCache = new Map<string, { song: Song; at: number }>();
 
 function flacParams(song: Song) {
   const params = new URLSearchParams();
@@ -222,19 +225,24 @@ async function fetchResolvedFlacSong(song: Song) {
 
 function flacPrewarmKey(song: Song) {
   const id = flacSongId(song);
-  const params = flacParams(song);
-  return `${id}?${params.toString()}`;
+  if (/^\d+$/.test(id)) return `${id}?${flacParams(song).toString()}`;
+  return `${song.name.trim().toLowerCase()}::${song.artist.trim().toLowerCase()}`;
 }
 
-export async function prewarmFlacSongs(songs: Song[], limit = 4) {
+function freshPrewarmedSong(song: Song) {
+  const cached = flacPrewarmCache.get(flacPrewarmKey(song));
+  if (!cached || Date.now() - cached.at >= FLAC_PREWARM_TTL_MS) return null;
+  return cached.song;
+}
+
+export async function prewarmFlacSongs(songs: Song[], limit = 4, onResolved?: (original: Song, resolved: Song) => void) {
   const targets: Song[] = [];
   const seen = new Set<string>();
   for (const song of songs) {
-    const id = flacSongId(song);
-    if (song.source !== "flac" || song.localKey || !/^\d+$/.test(id)) continue;
+    if (song.source !== "flac" || song.localKey) continue;
     const key = flacPrewarmKey(song);
-    const cachedAt = flacPrewarmCache.get(key) ?? 0;
-    if (seen.has(key) || flacPrewarmInFlight.has(key) || Date.now() - cachedAt < FLAC_PREWARM_TTL_MS) continue;
+    const cached = flacPrewarmCache.get(key);
+    if (seen.has(key) || flacPrewarmInFlight.has(key) || (cached && Date.now() - cached.at < FLAC_PREWARM_TTL_MS)) continue;
     seen.add(key);
     targets.push(song);
     if (targets.length >= limit) break;
@@ -242,9 +250,10 @@ export async function prewarmFlacSongs(songs: Song[], limit = 4) {
 
   await Promise.all(targets.map((song) => {
     const key = flacPrewarmKey(song);
-    const job = fetchResolvedFlacSong(song)
+    const job = prewarmResolvedFlacSong(song)
       .then((resolved) => {
-        flacPrewarmCache.set(key, Date.now());
+        flacPrewarmCache.set(key, { song: resolved, at: Date.now() });
+        onResolved?.(song, resolved);
         return resolved;
       })
       .catch(() => null)
@@ -254,6 +263,13 @@ export async function prewarmFlacSongs(songs: Song[], limit = 4) {
     flacPrewarmInFlight.set(key, job);
     return job;
   }));
+}
+
+async function prewarmResolvedFlacSong(song: Song) {
+  if (/^\d+$/.test(flacSongId(song))) return fetchResolvedFlacSong(song);
+  const refreshed = await refreshFlacSong(song);
+  if (!refreshed) throw new Error("测试源歌曲预热失败");
+  return fetchResolvedFlacSong(refreshed);
 }
 
 export async function resolveNeteaseSong(song: Song, quality: PlayQuality = "exhigh") {
@@ -301,6 +317,15 @@ export async function resolveBiliSong(song: Song) {
 }
 
 export async function resolveFlacSong(song: Song, options: { refresh?: boolean } = {}) {
+  if (!options.refresh) {
+    const prewarmed = freshPrewarmedSong(song);
+    if (prewarmed) return prewarmed;
+    const inFlight = flacPrewarmInFlight.get(flacPrewarmKey(song));
+    if (inFlight) {
+      const resolved = await inFlight;
+      if (resolved) return resolved;
+    }
+  }
   if (options.refresh) {
     const refreshed = await refreshFlacSong(song);
     if (refreshed) return fetchResolvedFlacSong(refreshed);
@@ -329,19 +354,30 @@ export function extractNeteasePlaylistId(value: string) {
 export async function importNeteasePlaylist(raw: string, quality: PlayQuality = "exhigh") {
   const id = extractNeteasePlaylistId(raw);
   if (!id) throw new Error("请输入网易云歌单 ID 或分享链接");
-  const data = await fetchJson<{ playlist?: RemotePlaylist }>(`/api/netease/playlist/${encodeURIComponent(id)}?quality=${encodeURIComponent(quality)}`);
-  if (!data.playlist) throw new Error("没有找到这个歌单");
-  return {
-    id: asString(data.playlist.id),
-    name: asString(data.playlist.name, "网易云歌单"),
-    cover: asString(data.playlist.cover, asString(data.playlist.coverPic, data.playlist.songs?.[0]?.cover || cover(9))),
-    songs: (data.playlist.songs ?? []).map((song, index) => normalizeRemoteSong(song, index)).filter((song): song is Song => Boolean(song)),
-    source: "netease",
-    trackCount: typeof data.playlist.trackCount === "number" ? data.playlist.trackCount : data.playlist.songs?.length ?? 0,
-    creatorNickname: asString(data.playlist.creatorNickname)
-  } satisfies Playlist;
+  const key = `${id}:${quality}`;
+  const cached = playlistImportCache.get(key);
+  if (cached && Date.now() - cached.at < PLAYLIST_IMPORT_CACHE_TTL_MS) return cached.playlist;
+  const inFlight = playlistImportInFlight.get(key);
+  if (inFlight) return inFlight;
+  const promise = fetchJson<{ playlist?: RemotePlaylist }>(`/api/netease/playlist/${encodeURIComponent(id)}?quality=${encodeURIComponent(quality)}`)
+    .then((data) => {
+      if (!data.playlist) throw new Error("没有找到这个歌单");
+      const playlist = {
+        id: asString(data.playlist.id),
+        name: asString(data.playlist.name, "网易云歌单"),
+        cover: asString(data.playlist.cover, asString(data.playlist.coverPic, data.playlist.songs?.[0]?.cover || cover(9))),
+        songs: (data.playlist.songs ?? []).map((song, index) => normalizeRemoteSong(song, index)).filter((song): song is Song => Boolean(song)),
+        source: "netease",
+        trackCount: typeof data.playlist.trackCount === "number" ? data.playlist.trackCount : data.playlist.songs?.length ?? 0,
+        creatorNickname: asString(data.playlist.creatorNickname)
+      } satisfies Playlist;
+      playlistImportCache.set(key, { playlist, at: Date.now() });
+      return playlist;
+    })
+    .finally(() => playlistImportInFlight.delete(key));
+  playlistImportInFlight.set(key, promise);
+  return promise;
 }
-
 function normalizeRemotePlaylist(playlist: RemotePlaylist, index = 0): Playlist | null {
   const id = asString(playlist.id);
   const source = id.startsWith("bili") ? "bili" : id.startsWith("netease") ? "netease" : "local";

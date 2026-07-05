@@ -1096,7 +1096,7 @@ test("flac test source searches, filters, resolves, and plays full songs", async
   await expect(page.locator(".now-playing")).toContainText("Boogie Wonderland");
   await expectAudioPlaying(page);
   await expectAudioLongerThan(page, 60);
-  expect(songRequests).toEqual(["format=flac&bitrate=2000&time=23456&sign=signed2"]);
+  expect(songRequests).toContain("format=flac&bitrate=2000&time=23456&sign=signed2");
   expect(streamRequests.some((query) => query.includes("sign=signed2"))).toBe(true);
   await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.src)).toContain("/api/flac/stream/20000000");
   await page.locator(".now-playing").click();
