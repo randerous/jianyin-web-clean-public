@@ -285,12 +285,35 @@ h3 {
 .section-title {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 10px;
   margin: 26px 0 12px;
 }
 
-.section-title svg {
+.section-title-main {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.section-title svg,
+.section-action svg {
   color: var(--blue);
+}
+
+.section-action {
+  min-height: 34px;
+  padding: 6px 9px 6px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  white-space: nowrap;
+  background: var(--panel);
+}
+
+.section-action svg {
+  width: 16px;
+  height: 16px;
 }
 
 .cover-grid,

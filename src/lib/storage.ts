@@ -1,4 +1,4 @@
-import { FAVORITES_ID, LOCAL_DB_NAME, LOCAL_STORE_NAME, STORAGE_KEY, cover } from "../data/seed";
+import { FAVORITES_ID, LOCAL_DB_NAME, LOCAL_STORE_NAME, RECENT_HISTORY_LIMIT, STORAGE_KEY, cover } from "../data/seed";
 import type { BackupPayload, LocalFileBackup, PersistedState, Playlist, Song } from "../types";
 import { apiUrl } from "./api";
 
@@ -148,7 +148,7 @@ export function normalizeState(value: unknown): PersistedState {
   const favorites = Array.isArray(raw.favorites)
     ? removeDemoSongs(raw.favorites.map(asSong).filter((song): song is Song => Boolean(song)))
     : withFavorites.find((playlist) => playlist.id === FAVORITES_ID)?.songs ?? [];
-  const history = Array.isArray(raw.history) ? removeDemoSongs(raw.history.map(asSong).filter((song): song is Song => Boolean(song))).slice(0, 30) : [];
+  const history = Array.isArray(raw.history) ? removeDemoSongs(raw.history.map(asSong).filter((song): song is Song => Boolean(song))).slice(0, RECENT_HISTORY_LIMIT) : [];
   const queue = Array.isArray(raw.queue) ? removeDemoSongs(raw.queue.map(asSong).filter((song): song is Song => Boolean(song))) : [];
   const searchHistory = Array.isArray(raw.searchHistory) ? raw.searchHistory.filter((item): item is string => typeof item === "string").slice(0, 12) : [];
   const theme = raw.theme === "dark" ? "dark" : "light";
@@ -236,7 +236,7 @@ export function mergeStates(local: PersistedState, remote: PersistedState): Pers
     ...local,
     playlists,
     favorites,
-    history: mergeSongs(local.history, remote.history).slice(0, 30),
+    history: mergeSongs(local.history, remote.history).slice(0, RECENT_HISTORY_LIMIT),
     queue: local.queue.length ? local.queue : remote.queue,
     queueIndex: local.queue.length ? local.queueIndex : remote.queueIndex,
     searchHistory: uniqueByKey([...local.searchHistory, ...remote.searchHistory], (item) => item).slice(0, 12)

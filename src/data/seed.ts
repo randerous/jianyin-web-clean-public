@@ -1,6 +1,7 @@
 import type { Playlist, Song } from "../types";
 
 export const FAVORITES_ID = "favorites";
+export const RECENT_HISTORY_LIMIT = 200;
 export const STORAGE_KEY = "jianyin-web-clean-state-v1";
 export const LOCAL_DB_NAME = "jianyin-web-clean-audio";
 export const LOCAL_STORE_NAME = "files";

@@ -65,7 +65,7 @@ import {
   saveState,
   songKey
 } from "./lib/storage";
-import { FAVORITES_ID, cover, recommendedKeywords } from "./data/seed";
+import { FAVORITES_ID, RECENT_HISTORY_LIMIT, cover, recommendedKeywords } from "./data/seed";
 import type { AccountState, LyricSource, PersistedState, PlayQuality, Playlist, ProgressStyle, Song, Theme } from "./types";
 
 type Tab = "home" | "search" | "mine";
@@ -495,7 +495,7 @@ export default function App() {
       setHistory((items) => [playable, ...items.filter((item) => {
         const key = songKey(item);
         return key !== originalKey && key !== playableKey;
-      })].slice(0, 30));
+      })].slice(0, RECENT_HISTORY_LIMIT));
       setPlaying(true);
       audioAttemptRef.current = { song: playable, source: nextQueue };
       if (audioRef.current) {
@@ -1203,6 +1203,12 @@ export default function App() {
             history={history}
             onPlay={playSong}
             onOpenPlaylist={setActivePlaylistId}
+            onOpenHistory={() => {
+              if (!history.length) return;
+              const playlist: Playlist = { id: "recent_history_preview", name: "最近播放", cover: history[0]?.cover ?? cover(8), songs: history, source: "local", trackCount: history.length };
+              setPreviewPlaylist(playlist);
+              setActivePlaylistId(playlist.id);
+            }}
             onCreate={() => setCreateOpen(true)}
             onImportLocal={() => fileInputRef.current?.click()}
             onImportNetease={() => setNeteaseOpen(true)}
@@ -1637,11 +1643,12 @@ function SearchScreen(props: {
   );
 }
 
-function MineScreen({ playlists, history, onPlay, onOpenPlaylist, onCreate, onImportLocal, onImportNetease, onAccounts, onBackup, onRestore, onSettings, onDelete }: {
+function MineScreen({ playlists, history, onPlay, onOpenPlaylist, onOpenHistory, onCreate, onImportLocal, onImportNetease, onAccounts, onBackup, onRestore, onSettings, onDelete }: {
   playlists: Playlist[];
   history: Song[];
   onPlay: (song: Song, source?: Song[]) => void;
   onOpenPlaylist: (id: string) => void;
+  onOpenHistory: () => void;
   onCreate: () => void;
   onImportLocal: () => void;
   onImportNetease: () => void;
@@ -1659,7 +1666,7 @@ function MineScreen({ playlists, history, onPlay, onOpenPlaylist, onCreate, onIm
       <header className="topbar"><div><span className="kicker">Library</span><h1>我的音乐</h1></div><button className="icon-button" onClick={onSettings} aria-label="设置"><Settings /></button></header>
       {recentSongs.length > 0 && (
         <>
-          <SectionTitle icon={<ClockIcon />} title="最近播放" />
+          <SectionTitle icon={<ClockIcon />} title="最近播放" actionLabel={`全部 ${history.length}`} onAction={onOpenHistory} />
           <div className="shelf-row">
             {recentSongs.map((song) => <CoverSong key={songKey(song)} song={song} songs={recentSongs} onPlay={onPlay} />)}
           </div>
@@ -1667,7 +1674,7 @@ function MineScreen({ playlists, history, onPlay, onOpenPlaylist, onCreate, onIm
       )}
       {favoriteSongs.length > 0 && (
         <>
-          <SectionTitle icon={<Heart />} title="最近最爱" />
+          <SectionTitle icon={<Heart />} title="最近最爱" actionLabel={`全部 ${favoriteSongs.length}`} onAction={() => onOpenPlaylist(FAVORITES_ID)} />
           <div className="shelf-row">
             {favoriteSongs.slice(0, 10).map((song) => <CoverSong key={songKey(song)} song={song} songs={favoriteSongs} onPlay={onPlay} />)}
           </div>
@@ -1815,6 +1822,11 @@ function FloatingLyric({ song, position, onClose }: { song: Song; position: numb
   );
 }
 
-function SectionTitle({ icon, title }: { icon: React.ReactNode; title: string }) {
-  return <div className="section-title">{icon}<h2>{title}</h2></div>;
+function SectionTitle({ icon, title, actionLabel, onAction }: { icon: React.ReactNode; title: string; actionLabel?: string; onAction?: () => void }) {
+  return (
+    <div className="section-title">
+      <span className="section-title-main">{icon}<h2>{title}</h2></span>
+      {actionLabel && onAction && <button type="button" className="section-action" onClick={onAction}>{actionLabel}<ChevronRight /></button>}
+    </div>
+  );
 }
