@@ -143,6 +143,10 @@ function uniqueSongs(songs: Song[]) {
   });
 }
 
+function recentSongsWith(song: Song, songs: Song[]) {
+  return uniqueSongs([song, ...songs]).slice(0, RECENT_HISTORY_LIMIT);
+}
+
 function allLibrarySongs(playlists: Playlist[], history: Song[]) {
   return uniqueSongs([...playlists.flatMap((playlist) => playlist.songs), ...history]);
 }
@@ -153,6 +157,7 @@ export default function App() {
   const [playlists, setPlaylists] = useState(initial.playlists);
   const [favorites, setFavorites] = useState(initial.favorites);
   const [history, setHistory] = useState(initial.history);
+  const [downloadHistory, setDownloadHistory] = useState(initial.downloadHistory);
   const [queue, setQueue] = useState(initial.queue);
   const [queueIndex, setQueueIndex] = useState(initial.queueIndex);
   const [searchHistory, setSearchHistory] = useState(initial.searchHistory);
@@ -320,6 +325,7 @@ export default function App() {
       playlists,
       favorites,
       history,
+      downloadHistory,
       queue: keepQueueOnExit ? queue : [],
       queueIndex: keepQueueOnExit ? queueIndex : -1,
       searchHistory,
@@ -342,11 +348,11 @@ export default function App() {
     } catch {
       setToast("浏览器存储空间不足，本次修改可能不会保存");
     }
-  }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
+  }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
 
   useEffect(() => {
     let live = true;
-    const localState: PersistedState = { playlists, favorites, history, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart, androidStatusNotificationEnabled };
+    const localState: PersistedState = { playlists, favorites, history, downloadHistory, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart, androidStatusNotificationEnabled };
     void loadSharedState()
       .then(async (shared) => hydrateLocalSongs(shared ? mergeStates(localState, shared) : localState))
       .then((result) => {
@@ -354,6 +360,7 @@ export default function App() {
         setPlaylists(result.state.playlists);
         setFavorites(result.state.favorites);
         setHistory(result.state.history);
+        setDownloadHistory(result.state.downloadHistory);
         setQueue(result.state.queue);
         setQueueIndex(result.state.queueIndex);
         setSearchHistory(result.state.searchHistory);
@@ -724,6 +731,7 @@ export default function App() {
     const update = (song: Song) => songKey(song) === key ? updater(song) : song;
     setQueue((items) => items.map(update));
     setHistory((items) => items.map(update));
+    setDownloadHistory((items) => items.map(update));
     setFavorites((items) => items.map(update));
     setPlaylists((items) => items.map((playlist) => {
       const songs = playlist.songs.map(update);
@@ -913,11 +921,11 @@ export default function App() {
   }, []);
 
   const backup = useCallback(async () => {
-    const state: PersistedState = { playlists, favorites, history, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart, androidStatusNotificationEnabled };
+    const state: PersistedState = { playlists, favorites, history, downloadHistory, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart, androidStatusNotificationEnabled };
     const payload = await makeBackup(state);
     downloadJson(`jianyin_web_clean_${new Date().toISOString().replace(/[:.]/g, "-")}.json`, payload);
     setToast(payload.localFiles?.length ? `已导出备份，包含 ${payload.localFiles.length} 个本地音频` : "已导出备份");
-  }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
+  }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
 
   const restore = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -930,6 +938,7 @@ export default function App() {
         setPlaylists(hydrated.state.playlists);
         setFavorites(hydrated.state.favorites);
         setHistory(hydrated.state.history);
+        setDownloadHistory(hydrated.state.downloadHistory);
         setQueue(hydrated.state.queue);
         setQueueIndex(hydrated.state.queueIndex);
         setSearchHistory(hydrated.state.searchHistory);
@@ -964,7 +973,8 @@ export default function App() {
   const downloadSong = useCallback(async (song: Song) => {
     try {
       const target = await resolveDownloadable(song);
-      await cacheDownloadedSong(song, target);
+      const cached = await cacheDownloadedSong(song, target);
+      setDownloadHistory((items) => recentSongsWith(cached, items));
       const anchor = document.createElement("a");
       anchor.href = target.url;
       anchor.download = `${target.name}-${target.artist}`.replace(/[\\/:*?"<>|]/g, "_");
@@ -1233,11 +1243,18 @@ export default function App() {
           <MineScreen
             playlists={playlists}
             history={history}
+            downloadHistory={downloadHistory}
             onPlay={playSong}
             onOpenPlaylist={setActivePlaylistId}
             onOpenHistory={() => {
               if (!history.length) return;
               const playlist: Playlist = { id: "recent_history_preview", name: "最近播放", cover: history[0]?.cover ?? cover(8), songs: history, source: "local", trackCount: history.length };
+              setPreviewPlaylist(playlist);
+              setActivePlaylistId(playlist.id);
+            }}
+            onOpenDownloads={() => {
+              if (!downloadHistory.length) return;
+              const playlist: Playlist = { id: "download_history_preview", name: "下载管理", cover: downloadHistory[0]?.cover ?? cover(6), songs: downloadHistory, source: "local", trackCount: downloadHistory.length };
               setPreviewPlaylist(playlist);
               setActivePlaylistId(playlist.id);
             }}
@@ -1676,12 +1693,14 @@ function SearchScreen(props: {
   );
 }
 
-function MineScreen({ playlists, history, onPlay, onOpenPlaylist, onOpenHistory, onCreate, onImportLocal, onImportNetease, onAccounts, onBackup, onRestore, onSettings, onDelete }: {
+function MineScreen({ playlists, history, downloadHistory, onPlay, onOpenPlaylist, onOpenHistory, onOpenDownloads, onCreate, onImportLocal, onImportNetease, onAccounts, onBackup, onRestore, onSettings, onDelete }: {
   playlists: Playlist[];
   history: Song[];
+  downloadHistory: Song[];
   onPlay: (song: Song, source?: Song[]) => void;
   onOpenPlaylist: (id: string) => void;
   onOpenHistory: () => void;
+  onOpenDownloads: () => void;
   onCreate: () => void;
   onImportLocal: () => void;
   onImportNetease: () => void;
@@ -1694,6 +1713,7 @@ function MineScreen({ playlists, history, onPlay, onOpenPlaylist, onOpenHistory,
   const favoritePlaylist = playlists.find((playlist) => playlist.id === FAVORITES_ID);
   const favoriteSongs = favoritePlaylist?.songs ?? [];
   const recentSongs = history.slice(0, 10);
+  const downloadedSongs = downloadHistory.slice(0, 10);
   return (
     <section className="screen">
       <header className="topbar"><div><span className="kicker">Library</span><h1>我的音乐</h1></div><button className="icon-button" onClick={onSettings} aria-label="设置"><Settings /></button></header>
@@ -1705,6 +1725,16 @@ function MineScreen({ playlists, history, onPlay, onOpenPlaylist, onOpenHistory,
           </div>
         </>
       )}
+      <>
+        <SectionTitle icon={<Download />} title="下载管理" actionLabel={downloadHistory.length ? `全部 ${downloadHistory.length}` : undefined} onAction={downloadHistory.length ? onOpenDownloads : undefined} />
+        {downloadedSongs.length > 0 ? (
+          <div className="shelf-row">
+            {downloadedSongs.map((song) => <CoverSong key={songKey(song)} song={song} songs={downloadHistory} onPlay={onPlay} />)}
+          </div>
+        ) : (
+          <p className="empty-text">暂无下载记录</p>
+        )}
+      </>
       {favoriteSongs.length > 0 && (
         <>
           <SectionTitle icon={<Heart />} title="最近最爱" actionLabel={`全部 ${favoriteSongs.length}`} onAction={() => onOpenPlaylist(FAVORITES_ID)} />

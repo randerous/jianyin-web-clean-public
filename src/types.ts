@@ -43,6 +43,7 @@ export type PersistedState = {
   playlists: Playlist[];
   favorites: Song[];
   history: Song[];
+  downloadHistory: Song[];
   queue: Song[];
   queueIndex: number;
   searchHistory: string[];

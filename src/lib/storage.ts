@@ -50,6 +50,10 @@ function removeDemoSongs(songs: Song[]) {
   return songs.filter((song) => !isDemoSong(song));
 }
 
+function isDownloadedSong(song: Song) {
+  return Boolean(song.localKey?.startsWith("download_") || song.url.startsWith("local-file:download_"));
+}
+
 function isDemoPlaylist(playlist: Playlist) {
   return playlist.id === "daily" || playlist.id === "hot";
 }
@@ -106,6 +110,7 @@ function serializeState(state: PersistedState): PersistedState {
     playlists: state.playlists.map(serializePlaylist),
     favorites: serializeSongs(state.favorites),
     history: serializeSongs(state.history),
+    downloadHistory: serializeSongs(state.downloadHistory),
     queue,
     queueIndex: queueIndex >= 0 ? queueIndex : clampQueueIndex(queue, state.queueIndex),
     searchHistory: state.searchHistory,
@@ -151,6 +156,9 @@ export function normalizeState(value: unknown): PersistedState {
     : withFavorites.find((playlist) => playlist.id === FAVORITES_ID)?.songs ?? [];
   const history = Array.isArray(raw.history) ? removeDemoSongs(raw.history.map(asSong).filter((song): song is Song => Boolean(song))).slice(0, RECENT_HISTORY_LIMIT) : [];
   const queue = Array.isArray(raw.queue) ? removeDemoSongs(raw.queue.map(asSong).filter((song): song is Song => Boolean(song))) : [];
+  const explicitDownloadHistory = Array.isArray(raw.downloadHistory) ? removeDemoSongs(raw.downloadHistory.map(asSong).filter((song): song is Song => Boolean(song))) : [];
+  const inferredDownloadHistory = removeDemoSongs([...withFavorites.flatMap((playlist) => playlist.songs), ...favorites, ...history, ...queue].filter(isDownloadedSong));
+  const downloadHistory = uniqueByKey([...explicitDownloadHistory, ...inferredDownloadHistory], songKey).slice(0, RECENT_HISTORY_LIMIT);
   const searchHistory = Array.isArray(raw.searchHistory) ? raw.searchHistory.filter((item): item is string => typeof item === "string").slice(0, 12) : [];
   const theme = raw.theme === "dark" ? "dark" : "light";
   const playQuality = ["jymaster", "sky", "jyeffect", "hires", "lossless", "exhigh", "standard"].includes(String(raw.playQuality)) ? raw.playQuality as PersistedState["playQuality"] : "exhigh";
@@ -163,6 +171,7 @@ export function normalizeState(value: unknown): PersistedState {
     playlists: withFavorites.map((playlist) => playlist.id === FAVORITES_ID ? { ...playlist, songs: favorites } : playlist),
     favorites,
     history,
+    downloadHistory,
     queue,
     queueIndex: clampQueueIndex(queue, raw.queueIndex),
     searchHistory,
@@ -239,6 +248,7 @@ export function mergeStates(local: PersistedState, remote: PersistedState): Pers
     playlists,
     favorites,
     history: mergeSongs(local.history, remote.history).slice(0, RECENT_HISTORY_LIMIT),
+    downloadHistory: mergeSongs(local.downloadHistory, remote.downloadHistory).slice(0, RECENT_HISTORY_LIMIT),
     queue: local.queue.length ? local.queue : remote.queue,
     queueIndex: local.queue.length ? local.queueIndex : remote.queueIndex,
     searchHistory: uniqueByKey([...local.searchHistory, ...remote.searchHistory], (item) => item).slice(0, 12)
@@ -331,8 +341,9 @@ export async function hydrateLocalSongs(state: PersistedState) {
   const playlists = await Promise.all(state.playlists.map(async (playlist) => ({ ...playlist, songs: await Promise.all(playlist.songs.map(hydrate)) })));
   const favorites = await Promise.all(state.favorites.map(hydrate));
   const history = await Promise.all(state.history.map(hydrate));
+  const downloadHistory = await Promise.all(state.downloadHistory.map(hydrate));
   const queue = await Promise.all(state.queue.map(hydrate));
-  return { state: { ...state, playlists, favorites, history, queue }, urls };
+  return { state: { ...state, playlists, favorites, history, downloadHistory, queue }, urls };
 }
 
 function blobToDataUrl(blob: Blob) {
@@ -366,7 +377,7 @@ async function collectLocalFileBackups(songs: Song[]): Promise<LocalFileBackup[]
 export async function makeBackup(state: PersistedState): Promise<BackupPayload> {
   return {
     ...serializeState(state),
-    localFiles: await collectLocalFileBackups([...state.playlists.flatMap((playlist) => playlist.songs), ...state.history, ...state.queue]),
+    localFiles: await collectLocalFileBackups([...state.playlists.flatMap((playlist) => playlist.songs), ...state.history, ...state.downloadHistory, ...state.queue]),
     exportedAt: new Date().toISOString(),
     app: "jianyin-web-clean"
   };
