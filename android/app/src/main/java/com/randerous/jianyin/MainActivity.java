@@ -209,6 +209,15 @@ public class MainActivity extends BridgeActivity {
 
         @JavascriptInterface
         public void setPlaybackDetails(boolean present, boolean playing, String title, String artist, double position, double duration) {
+            updatePlaybackDetails(present, playing, title, artist, position, duration, false);
+        }
+
+        @JavascriptInterface
+        public void setPlaybackDetailsV2(boolean present, boolean playing, String title, String artist, double position, double duration, boolean statusNotificationEnabled) {
+            updatePlaybackDetails(present, playing, title, artist, position, duration, statusNotificationEnabled);
+        }
+
+        private void updatePlaybackDetails(boolean present, boolean playing, String title, String artist, double position, double duration, boolean statusNotificationEnabled) {
             Intent intent = new Intent(context, PlaybackKeepAliveService.class);
             intent.setAction(present ? PlaybackKeepAliveService.ACTION_START : PlaybackKeepAliveService.ACTION_STOP);
             intent.putExtra(PlaybackKeepAliveService.EXTRA_PLAYING, playing);
@@ -216,6 +225,7 @@ public class MainActivity extends BridgeActivity {
             intent.putExtra(PlaybackKeepAliveService.EXTRA_ARTIST, artist == null ? "" : artist);
             intent.putExtra(PlaybackKeepAliveService.EXTRA_POSITION_MS, Math.max(0, (long) (position * 1000)));
             intent.putExtra(PlaybackKeepAliveService.EXTRA_DURATION_MS, Math.max(0, (long) (duration * 1000)));
+            intent.putExtra(PlaybackKeepAliveService.EXTRA_STATUS_NOTIFICATION_ENABLED, statusNotificationEnabled);
             if (present) {
                 context.startForegroundService(intent);
             } else {

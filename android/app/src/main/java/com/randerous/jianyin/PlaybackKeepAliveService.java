@@ -30,6 +30,7 @@ public class PlaybackKeepAliveService extends Service {
     public static final String EXTRA_PLAYING = "playing";
     public static final String EXTRA_POSITION_MS = "positionMs";
     public static final String EXTRA_DURATION_MS = "durationMs";
+    public static final String EXTRA_STATUS_NOTIFICATION_ENABLED = "statusNotificationEnabled";
 
     private static final String MEDIA_CHANNEL_ID = "shiyin_media_playback_v3";
     private static final String STATUS_CHANNEL_ID = "jijian_playback_visible_v1";
@@ -87,13 +88,18 @@ public class PlaybackKeepAliveService extends Service {
         boolean playing = intent == null || intent.getBooleanExtra(EXTRA_PLAYING, true);
         long positionMs = intent == null ? 0 : intent.getLongExtra(EXTRA_POSITION_MS, 0);
         long durationMs = intent == null ? 0 : intent.getLongExtra(EXTRA_DURATION_MS, 0);
+        boolean statusNotificationEnabled = intent != null && intent.getBooleanExtra(EXTRA_STATUS_NOTIFICATION_ENABLED, false);
         String safeTitle = title == null || title.isEmpty() ? "既见" : title;
         String safeArtist = artist == null || artist.isEmpty() ? "正在播放" : artist;
         PendingIntent launchIntent = buildLaunchIntent();
 
         updateMediaSession(safeTitle, safeArtist, playing, positionMs, durationMs, launchIntent);
         startForeground(MEDIA_NOTIFICATION_ID, buildMediaNotification(safeTitle, safeArtist, playing, positionMs, durationMs, launchIntent));
-        showStatusNotification(safeTitle, safeArtist, playing, positionMs, durationMs, launchIntent);
+        if (statusNotificationEnabled) {
+            showStatusNotification(safeTitle, safeArtist, playing, positionMs, durationMs, launchIntent);
+        } else {
+            cancelStatusNotification();
+        }
 
         if (playing) {
             acquireWakeLock();

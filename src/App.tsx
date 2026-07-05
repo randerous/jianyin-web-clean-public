@@ -83,6 +83,7 @@ declare global {
       setPlaybackState?: (active: boolean, title?: string, artist?: string) => void;
       setPlaybackInfo?: (present: boolean, playing: boolean, title?: string, artist?: string) => void;
       setPlaybackDetails?: (present: boolean, playing: boolean, title?: string, artist?: string, position?: number, duration?: number) => void;
+      setPlaybackDetailsV2?: (present: boolean, playing: boolean, title?: string, artist?: string, position?: number, duration?: number, statusNotificationEnabled?: boolean) => void;
     };
     JianyinAndroidBack?: () => boolean;
     JianyinAndroidMedia?: (command: "previous" | "toggle" | "next") => void;
@@ -166,6 +167,7 @@ export default function App() {
   const [autoCacheEnabled, setAutoCacheEnabled] = useState(initial.autoCacheEnabled);
   const [keepQueueOnExit, setKeepQueueOnExit] = useState(initial.keepQueueOnExit);
   const [autoPlayOnStart, setAutoPlayOnStart] = useState(initial.autoPlayOnStart);
+  const [androidStatusNotificationEnabled, setAndroidStatusNotificationEnabled] = useState(initial.androidStatusNotificationEnabled);
   const [homeData, setHomeData] = useState<HomeData>({
     radarSongs: [],
     hotSongs: [],
@@ -220,7 +222,7 @@ export default function App() {
   const modeRef = useRef(mode);
   const playingRef = useRef(playing);
   const positionRef = useRef(position);
-  const androidPlaybackPushRef = useRef({ key: "", playing: false, duration: 0, lastPosition: -1, lastPushAt: 0 });
+  const androidPlaybackPushRef = useRef({ key: "", playing: false, duration: 0, statusNotificationEnabled: false, lastPosition: -1, lastPushAt: 0 });
   const audioAttemptRef = useRef<{ song: Song; source: Song[] } | null>(null);
   const audioRetryRef = useRef<{ key: string; at: number } | null>(null);
 
@@ -288,13 +290,16 @@ export default function App() {
       const songChanged = key !== last.key;
       const stateChanged = playing !== last.playing;
       const durationChanged = Math.abs(duration - last.duration) >= 1;
+      const statusNotificationChanged = androidStatusNotificationEnabled !== last.statusNotificationEnabled;
       const positionChangedEnough = Math.abs(position - last.lastPosition) >= 15;
       const enoughTimeElapsed = now - last.lastPushAt >= 15000;
-      if (!songChanged && !stateChanged && !durationChanged && (!positionChangedEnough || !enoughTimeElapsed)) {
+      if (!songChanged && !stateChanged && !durationChanged && !statusNotificationChanged && (!positionChangedEnough || !enoughTimeElapsed)) {
         return;
       }
-      androidPlaybackPushRef.current = { key, playing, duration, lastPosition: position, lastPushAt: now };
-      if (window.JianyinAndroid?.setPlaybackDetails) {
+      androidPlaybackPushRef.current = { key, playing, duration, statusNotificationEnabled: androidStatusNotificationEnabled, lastPosition: position, lastPushAt: now };
+      if (window.JianyinAndroid?.setPlaybackDetailsV2) {
+        window.JianyinAndroid.setPlaybackDetailsV2(Boolean(currentSong), playing, currentSong?.name ?? "", currentSong?.artist ?? "", position, duration, androidStatusNotificationEnabled);
+      } else if (window.JianyinAndroid?.setPlaybackDetails) {
         window.JianyinAndroid.setPlaybackDetails(Boolean(currentSong), playing, currentSong?.name ?? "", currentSong?.artist ?? "", position, duration);
       } else if (window.JianyinAndroid?.setPlaybackInfo) {
         window.JianyinAndroid.setPlaybackInfo(Boolean(currentSong), playing, currentSong?.name ?? "", currentSong?.artist ?? "");
@@ -304,7 +309,7 @@ export default function App() {
     } catch {
       // Android bridge is only available inside the packaged app.
     }
-  }, [currentSong, duration, playing, position]);
+  }, [androidStatusNotificationEnabled, currentSong, duration, playing, position]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -328,7 +333,8 @@ export default function App() {
       fadeEnabled,
       autoCacheEnabled,
       keepQueueOnExit,
-      autoPlayOnStart
+      autoPlayOnStart,
+      androidStatusNotificationEnabled
     };
     try {
       saveState(state);
@@ -336,11 +342,11 @@ export default function App() {
     } catch {
       setToast("浏览器存储空间不足，本次修改可能不会保存");
     }
-  }, [autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
+  }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
 
   useEffect(() => {
     let live = true;
-    const localState: PersistedState = { playlists, favorites, history, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart };
+    const localState: PersistedState = { playlists, favorites, history, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart, androidStatusNotificationEnabled };
     void loadSharedState()
       .then(async (shared) => hydrateLocalSongs(shared ? mergeStates(localState, shared) : localState))
       .then((result) => {
@@ -362,6 +368,7 @@ export default function App() {
         setAutoCacheEnabled(result.state.autoCacheEnabled);
         setKeepQueueOnExit(result.state.keepQueueOnExit);
         setAutoPlayOnStart(result.state.autoPlayOnStart);
+        setAndroidStatusNotificationEnabled(result.state.androidStatusNotificationEnabled);
         setObjectUrls((items) => {
           items.forEach(URL.revokeObjectURL);
           return result.urls;
@@ -906,11 +913,11 @@ export default function App() {
   }, []);
 
   const backup = useCallback(async () => {
-    const state: PersistedState = { playlists, favorites, history, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart };
+    const state: PersistedState = { playlists, favorites, history, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart, androidStatusNotificationEnabled };
     const payload = await makeBackup(state);
     downloadJson(`jianyin_web_clean_${new Date().toISOString().replace(/[:.]/g, "-")}.json`, payload);
     setToast(payload.localFiles?.length ? `已导出备份，包含 ${payload.localFiles.length} 个本地音频` : "已导出备份");
-  }, [autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
+  }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
 
   const restore = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -937,6 +944,7 @@ export default function App() {
         setAutoCacheEnabled(hydrated.state.autoCacheEnabled);
         setKeepQueueOnExit(hydrated.state.keepQueueOnExit);
         setAutoPlayOnStart(hydrated.state.autoPlayOnStart);
+        setAndroidStatusNotificationEnabled(hydrated.state.androidStatusNotificationEnabled);
         setToast("备份已恢复");
       } catch {
         setToast("备份文件无法解析");
@@ -1418,6 +1426,7 @@ export default function App() {
             <label className="switch-line"><span>自动缓存</span><input type="checkbox" checked={autoCacheEnabled} onChange={(event) => setAutoCacheEnabled(event.target.checked)} /></label>
             <label className="switch-line"><span>离开后保留列表</span><input type="checkbox" checked={keepQueueOnExit} onChange={(event) => setKeepQueueOnExit(event.target.checked)} /></label>
             <label className="switch-line"><span>启动时播放</span><input type="checkbox" checked={autoPlayOnStart} disabled={!keepQueueOnExit} onChange={(event) => setAutoPlayOnStart(event.target.checked)} /></label>
+            <label className="switch-line"><span>显示既见状态栏通知</span><input type="checkbox" checked={androidStatusNotificationEnabled} onChange={(event) => setAndroidStatusNotificationEnabled(event.target.checked)} /></label>
             <button className="wide-action" onClick={() => setAccountOpen(true)}><UserRound /> 账号管理</button>
             <button className="wide-action" onClick={backup}><Download /> 备份数据</button>
             <button className="wide-action" onClick={() => restoreInputRef.current?.click()}><ArchiveRestore /> 恢复备份</button>

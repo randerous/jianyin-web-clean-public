@@ -119,7 +119,8 @@ function serializeState(state: PersistedState): PersistedState {
     fadeEnabled: state.fadeEnabled,
     autoCacheEnabled: state.autoCacheEnabled,
     keepQueueOnExit: state.keepQueueOnExit,
-    autoPlayOnStart: state.autoPlayOnStart
+    autoPlayOnStart: state.autoPlayOnStart,
+    androidStatusNotificationEnabled: state.androidStatusNotificationEnabled
   };
 }
 
@@ -175,7 +176,8 @@ export function normalizeState(value: unknown): PersistedState {
     fadeEnabled: Boolean(raw.fadeEnabled),
     autoCacheEnabled: Boolean(raw.autoCacheEnabled),
     keepQueueOnExit: raw.keepQueueOnExit !== false,
-    autoPlayOnStart: Boolean(raw.autoPlayOnStart)
+    autoPlayOnStart: Boolean(raw.autoPlayOnStart),
+    androidStatusNotificationEnabled: Boolean(raw.androidStatusNotificationEnabled)
   };
 }
 
