@@ -77,6 +77,8 @@ type HomeData = {
   recommendedPlaylists: Playlist[];
 };
 
+const FLAC_PAUSED_REFRESH_MS = 6 * 60 * 1000;
+
 declare global {
   interface Window {
     JianyinAndroid?: {
@@ -230,6 +232,7 @@ export default function App() {
   const androidPlaybackPushRef = useRef({ key: "", playing: false, duration: 0, statusNotificationEnabled: false, lastPosition: -1, lastPushAt: 0 });
   const audioAttemptRef = useRef<{ song: Song; source: Song[] } | null>(null);
   const audioRetryRef = useRef<{ key: string; at: number } | null>(null);
+  const pausedPlaybackRef = useRef<{ key: string; at: number } | null>(null);
 
   const currentSong = queue[queueIndex] ?? null;
   const favoriteKeys = useMemo(() => new Set(favorites.map(songKey)), [favorites]);
@@ -572,6 +575,30 @@ export default function App() {
     }
   }, [playSong]);
 
+  const shouldRefreshAfterLongPause = useCallback((song: Song) => {
+    const paused = pausedPlaybackRef.current;
+    return Boolean(
+      song.source === "flac" &&
+      !song.localKey &&
+      paused &&
+      paused.key === songKey(song) &&
+      Date.now() - paused.at >= FLAC_PAUSED_REFRESH_MS
+    );
+  }, []);
+
+  const markPausedPlayback = useCallback(() => {
+    const song = queueRef.current[queueIndexRef.current];
+    pausedPlaybackRef.current = song?.source === "flac" && !song.localKey ? { key: songKey(song), at: Date.now() } : null;
+  }, []);
+
+  const resumeCurrentSong = useCallback(() => {
+    if (!currentSong) return;
+    const startAt = Math.max(audioRef.current?.currentTime || 0, positionRef.current);
+    const refresh = shouldRefreshAfterLongPause(currentSong);
+    pausedPlaybackRef.current = null;
+    void playSong(currentSong, queue, refresh ? { refresh: true, startAt } : {});
+  }, [currentSong, playSong, queue, shouldRefreshAfterLongPause]);
+
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio) return;
@@ -648,7 +675,7 @@ export default function App() {
       }
     };
     setHandler("play", () => {
-      if (currentSong) void playSong(currentSong, queue);
+      resumeCurrentSong();
     });
     setHandler("pause", () => {
       audioRef.current?.pause();
@@ -663,17 +690,18 @@ export default function App() {
         setPosition(details.seekTime);
       }
     });
-  }, [currentSong, nextSong, playQueueIndex, playSong, queue, queueIndex]);
+  }, [nextSong, playQueueIndex, queueIndex, resumeCurrentSong]);
 
   const togglePlayback = useCallback(() => {
     if (!currentSong) return;
-    if (playing) {
+    const audioPlaying = audioRef.current ? !audioRef.current.paused : false;
+    if (playing || audioPlaying) {
       audioRef.current?.pause();
       setPlaying(false);
       return;
     }
-    void playSong(currentSong, queue);
-  }, [currentSong, playSong, playing, queue]);
+    resumeCurrentSong();
+  }, [currentSong, playing, resumeCurrentSong]);
 
   useEffect(() => {
     window.JianyinAndroidMedia = (command) => {
@@ -1148,6 +1176,7 @@ export default function App() {
         }}
         onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
         onEnded={handleAudioEnded}
+        onPause={markPausedPlayback}
         onError={() => void retryCurrentSongAfterAudioError()}
       />
       <input ref={fileInputRef} hidden type="file" accept="audio/*" multiple onChange={importFiles} />

@@ -1277,6 +1277,103 @@ test("flac playback resumes from current time after mid-song signature refresh",
   expect(songRequests.some((query) => query.includes("sign=fresh-2-sign"))).toBe(true);
 });
 
+test("flac playback refreshes stale signature after a long pause before resuming", async ({ page }) => {
+  const searchRequests: URLSearchParams[] = [];
+  const songRequests: string[] = [];
+  await page.evaluate(() => {
+    const realNow = Date.now();
+    (window as typeof window & { __mockNow?: number }).__mockNow = realNow;
+    Date.now = () => (window as typeof window & { __mockNow?: number }).__mockNow ?? realNow;
+  });
+
+  await page.route("**/api/flac/search**", async (route) => {
+    const url = new URL(route.request().url());
+    searchRequests.push(url.searchParams);
+    const isRefresh = searchRequests.length > 1;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        songs: [{
+          id: "flac_15368606",
+          name: "September",
+          artist: "Earth, Wind & Fire",
+          pic: "/assets/icon.png",
+          cover: "/assets/icon.png",
+          url: `/api/flac/stream/15368606?format=flac&bitrate=2000&time=${isRefresh ? "fresh-time" : "old-time"}&sign=${isRefresh ? "fresh-sign" : "old-sign"}`,
+          source: "flac",
+          remotePlayable: true,
+          verifiedPlayable: true,
+          durationMs: 213000,
+          br: 2000000,
+          level: "flac",
+          type: "flac",
+          audioType: "flac",
+          quality: "flac",
+          time: isRefresh ? "fresh-time" : "old-time",
+          sign: isRefresh ? "fresh-sign" : "old-sign"
+        }],
+        filtered: 0,
+        page: 1,
+        limit: 30,
+        total: 1,
+        hasMore: false
+      })
+    });
+  });
+  await page.route(/\/api\/flac\/song\/15368606.*/, async (route) => {
+    const url = new URL(route.request().url());
+    songRequests.push(url.searchParams.toString());
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        url: `/api/flac/stream/15368606?format=flac&bitrate=2000&time=${url.searchParams.get("time")}&sign=${url.searchParams.get("sign")}`,
+        durationMs: 65000,
+        verifiedPlayable: true,
+        br: 2000000,
+        level: "flac",
+        type: "flac",
+        audioType: "flac",
+        quality: "flac"
+      })
+    });
+  });
+  await page.route("**/api/flac/stream/15368606**", async (route) => {
+    await route.fulfill({
+      path: fullSongFile,
+      headers: {
+        "content-type": "audio/wav",
+        "accept-ranges": "bytes"
+      }
+    });
+  });
+
+  await page.locator("nav button").nth(1).click();
+  await page.locator('.search-box input[name="keyword"]').fill("September Earth Wind Fire");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".song-row", { hasText: "September" })).toBeVisible();
+  await page.locator(".song-row", { hasText: "September" }).locator(".song-hit").click();
+  await expectAudioPlaying(page);
+  await page.locator("audio").evaluate((audio: HTMLAudioElement) => {
+    audio.currentTime = 22;
+    audio.dispatchEvent(new Event("timeupdate"));
+  });
+
+  await page.evaluate(() => (window as typeof window & { JianyinAndroidMedia?: (command: "toggle") => void }).JianyinAndroidMedia?.("toggle"));
+  await expectAudioPaused(page);
+  await page.evaluate(() => {
+    const typed = window as typeof window & { __mockNow?: number };
+    typed.__mockNow = (typed.__mockNow ?? Date.now()) + 10 * 60 * 1000;
+  });
+  await page.evaluate(() => (window as typeof window & { JianyinAndroidMedia?: (command: "toggle") => void }).JianyinAndroidMedia?.("toggle"));
+
+  await expectAudioPlaying(page);
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.src)).toContain("fresh-sign");
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.currentTime)).toBeGreaterThan(21);
+  expect(searchRequests.map((params) => params.get("limit"))).toEqual(expect.arrayContaining(["30", "1"]));
+  expect(songRequests.some((query) => query.includes("sign=old-sign"))).toBe(true);
+  expect(songRequests.some((query) => query.includes("sign=fresh-sign"))).toBe(true);
+});
+
 test("flac search queue refreshes expired signatures when advancing", async ({ page }) => {
   const searchRequests: string[] = [];
   const songRequests: string[] = [];
