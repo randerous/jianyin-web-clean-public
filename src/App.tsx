@@ -17,6 +17,7 @@ import {
   RefreshCw,
   Search,
   Settings,
+  SkipBack,
   SkipForward,
   Square,
   SquareCheckBig,
@@ -44,9 +45,7 @@ import {
   resolveBiliSong,
   resolveFlacSong,
   resolveNeteaseSong,
-  searchBili,
   searchFlac,
-  searchNetease,
   setApiBaseUrl,
   syncBiliAccountPlaylists,
   syncNeteaseAccountPlaylists
@@ -71,7 +70,6 @@ import type { AccountState, LyricSource, PersistedState, PlayQuality, Playlist, 
 
 type Tab = "home" | "search" | "mine";
 type PlayMode = "sequence" | "repeat" | "shuffle";
-type SearchSource = "netease" | "bili" | "flac";
 type HomeData = {
   radarSongs: Song[];
   hotSongs: Song[];
@@ -83,6 +81,7 @@ declare global {
     JianyinAndroid?: {
       setPlaybackState?: (active: boolean, title?: string, artist?: string) => void;
       setPlaybackInfo?: (present: boolean, playing: boolean, title?: string, artist?: string) => void;
+      setPlaybackDetails?: (present: boolean, playing: boolean, title?: string, artist?: string, position?: number, duration?: number) => void;
     };
     JianyinAndroidBack?: () => boolean;
     JianyinAndroidMedia?: (command: "previous" | "toggle" | "next") => void;
@@ -176,7 +175,6 @@ export default function App() {
   const [homeError, setHomeError] = useState("");
   const [homeRefreshIndex, setHomeRefreshIndex] = useState(0);
   const [query, setQuery] = useState("");
-  const [searchSource, setSearchSource] = useState<SearchSource>("flac");
   const [remoteResults, setRemoteResults] = useState<Song[]>([]);
   const [searchPageInfo, setSearchPageInfo] = useState({ page: 1, pageSize: FLAC_SEARCH_PAGE_SIZE, total: null as number | null, hasMore: false });
   const [searching, setSearching] = useState(false);
@@ -221,6 +219,7 @@ export default function App() {
   const modeRef = useRef(mode);
   const playingRef = useRef(playing);
   const positionRef = useRef(position);
+  const androidPlaybackPushRef = useRef({ key: "", playing: false, duration: 0, lastPosition: -1, lastPushAt: 0 });
   const audioAttemptRef = useRef<{ song: Song; source: Song[] } | null>(null);
   const audioRetryRef = useRef<{ key: string; at: number } | null>(null);
 
@@ -264,7 +263,21 @@ export default function App() {
 
   useEffect(() => {
     try {
-      if (window.JianyinAndroid?.setPlaybackInfo) {
+      const key = currentSong ? songKey(currentSong) : "";
+      const now = Date.now();
+      const last = androidPlaybackPushRef.current;
+      const songChanged = key !== last.key;
+      const stateChanged = playing !== last.playing;
+      const durationChanged = Math.abs(duration - last.duration) >= 1;
+      const positionChangedEnough = Math.abs(position - last.lastPosition) >= 15;
+      const enoughTimeElapsed = now - last.lastPushAt >= 15000;
+      if (!songChanged && !stateChanged && !durationChanged && (!positionChangedEnough || !enoughTimeElapsed)) {
+        return;
+      }
+      androidPlaybackPushRef.current = { key, playing, duration, lastPosition: position, lastPushAt: now };
+      if (window.JianyinAndroid?.setPlaybackDetails) {
+        window.JianyinAndroid.setPlaybackDetails(Boolean(currentSong), playing, currentSong?.name ?? "", currentSong?.artist ?? "", position, duration);
+      } else if (window.JianyinAndroid?.setPlaybackInfo) {
         window.JianyinAndroid.setPlaybackInfo(Boolean(currentSong), playing, currentSong?.name ?? "", currentSong?.artist ?? "");
       } else {
         window.JianyinAndroid?.setPlaybackState?.(playing && Boolean(currentSong), currentSong?.name ?? "", currentSong?.artist ?? "");
@@ -272,7 +285,7 @@ export default function App() {
     } catch {
       // Android bridge is only available inside the packaged app.
     }
-  }, [currentSong, playing]);
+  }, [currentSong, duration, playing, position]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -808,18 +821,10 @@ export default function App() {
     setSelected(new Set());
     setSearching(true);
     try {
-      if (searchSource === "flac") {
-        const result = await searchFlac(text, page);
-        if (searchRunRef.current !== runId) return;
-        setRemoteResults(result.songs);
-        setSearchPageInfo({ page: result.page, pageSize: result.pageSize, total: result.total, hasMore: result.hasMore });
-        setProxyOnline(true);
-        return;
-      }
-      const songs = searchSource === "bili" ? await searchBili(text) : await searchNetease(text, playQuality);
+      const result = await searchFlac(text, page);
       if (searchRunRef.current !== runId) return;
-      setRemoteResults(songs);
-      setSearchPageInfo({ page: 1, pageSize: FLAC_SEARCH_PAGE_SIZE, total: null, hasMore: false });
+      setRemoteResults(result.songs);
+      setSearchPageInfo({ page: result.page, pageSize: result.pageSize, total: result.total, hasMore: result.hasMore });
       setProxyOnline(true);
     } catch (error) {
       if (searchRunRef.current !== runId) return;
@@ -830,16 +835,7 @@ export default function App() {
     } finally {
       if (searchRunRef.current === runId) setSearching(false);
     }
-  }, [playQuality, query, searchSource]);
-
-  const changeSearchSource = useCallback((source: SearchSource) => {
-    searchRunRef.current += 1;
-    setSearchSource(source);
-    setRemoteResults([]);
-    setSearchPageInfo({ page: 1, pageSize: FLAC_SEARCH_PAGE_SIZE, total: null, hasMore: false });
-    setSelected(new Set());
-    setSearching(false);
-  }, []);
+  }, [query]);
 
   const importFiles = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []).filter((file) => file.type.startsWith("audio/"));
@@ -1098,7 +1094,7 @@ export default function App() {
       <aside className="rail">
         <button className="brand" onClick={() => setTab("home")} aria-label="打开首页">
           <img src="/assets/icon.png" alt="" />
-          <span>拾音</span>
+          <span>既见</span>
         </button>
         <nav>
           <NavButton active={tab === "home"} icon={<Home />} label="首页" onClick={() => setTab("home")} />
@@ -1133,10 +1129,6 @@ export default function App() {
           <SearchScreen
             query={query}
             setQuery={setQuery}
-            source={searchSource}
-            setSource={changeSearchSource}
-            playQuality={playQuality}
-            setPlayQuality={setPlayQuality}
             results={searchResults}
             history={searchHistory}
             searching={searching}
@@ -1475,7 +1467,7 @@ function HomeScreen({ data, loading, openingPlaylistId, error, onPlay, onOpenPla
   return (
     <section className="screen">
       <header className="topbar">
-        <div><span className="kicker">Android 1.0.0</span><h1>拾音</h1></div>
+        <div><span className="kicker">既见君子，云胡不喜</span><h1>既见</h1></div>
         <div className="top-actions">
           <span className={`status-pill ${proxyOnline ? "online" : ""}`}>{proxyOnline ? "网易云官方接口" : "本地兜底"}</span>
           <button className="icon-button" onClick={onRefresh} aria-label="刷新推荐" disabled={loading}><RefreshCw /></button>
@@ -1517,10 +1509,6 @@ function CoverSong({ song, songs, onPlay }: { song: Song; songs: Song[]; onPlay:
 function SearchScreen(props: {
   query: string;
   setQuery: (value: string) => void;
-  source: SearchSource;
-  setSource: (value: SearchSource) => void;
-  playQuality: PlayQuality;
-  setPlayQuality: (value: PlayQuality) => void;
   results: Song[];
   history: string[];
   searching: boolean;
@@ -1551,7 +1539,7 @@ function SearchScreen(props: {
   const totalPages = props.searchTotal ? Math.max(1, Math.ceil(props.searchTotal / props.searchPageSize)) : null;
   const firstVisible = props.results.length ? (props.searchPage - 1) * props.searchPageSize + 1 : 0;
   const lastVisible = props.results.length ? firstVisible + props.results.length - 1 : 0;
-  const canPage = props.source === "flac" && Boolean(props.query.trim()) && (props.results.length > 0 || props.searchPage > 1 || props.searchHasMore);
+  const canPage = Boolean(props.query.trim()) && (props.results.length > 0 || props.searchPage > 1 || props.searchHasMore);
   const selectedVisibleCount = props.results.filter((song) => props.selected.has(songKey(song))).length;
   const allVisibleSelected = props.results.length > 0 && selectedVisibleCount === props.results.length;
   const paginationBar = (placement: "top" | "bottom") => canPage ? (
@@ -1568,19 +1556,6 @@ function SearchScreen(props: {
   return (
     <section className={canPage ? "screen search-screen has-pagination" : "screen search-screen"}>
       <header className="topbar"><div><span className="kicker">Search</span><h1>搜索</h1></div></header>
-      <div className="search-toolbar">
-        <div className="segmented">
-          <button className={props.source === "netease" ? "active" : ""} onClick={() => props.setSource("netease")}>网易云</button>
-          <button className={props.source === "bili" ? "active" : ""} onClick={() => props.setSource("bili")}>Bili</button>
-          <button className={props.source === "flac" ? "active" : ""} onClick={() => props.setSource("flac")}>测试源</button>
-        </div>
-        <label>
-          播放音质
-          <select value={props.playQuality} onChange={(event) => props.setPlayQuality(event.target.value as PlayQuality)} disabled={props.source === "bili" || props.source === "flac"}>
-            {qualityOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-          </select>
-        </label>
-      </div>
       <form className="search-box" onSubmit={(event) => {
         event.preventDefault();
         props.onSearch(String(new FormData(event.currentTarget).get("keyword") ?? props.query));
@@ -1589,7 +1564,7 @@ function SearchScreen(props: {
         <input name="keyword" value={props.query} onChange={(event) => props.setQuery(event.target.value)} placeholder="搜索音乐/歌手" />
         <button className="primary-button" type="submit">{props.searching ? "搜索中" : "搜索"}</button>
       </form>
-      <p className="network-line">{props.proxyOnline ? `${props.source === "bili" ? "Bili" : props.source === "flac" ? "测试源" : "网易云官方"}接口已连接；当前播放音质：${props.source === "bili" ? "Bili 高音质音频流" : props.source === "flac" ? "FLAC/320k 自动优先" : qualityLabel(props.playQuality)}。` : "代理不可用时仍可搜索本地曲库。"}</p>
+      <p className="network-line">{props.proxyOnline ? "测试源接口已连接；FLAC/320k 自动优先。" : "测试源暂不可用，请稍后再试。"}</p>
       <div className="chips">
         {recommendedKeywords.map((item) => <button key={item} onClick={() => { props.setQuery(item); props.onSearch(item); }}>{item}</button>)}
         {props.history.map((item) => <button key={`h-${item}`} onClick={() => { props.setQuery(item); props.onSearch(item); }}>{item}</button>)}
@@ -1781,6 +1756,26 @@ function NowPlaying({ song, playing, position, duration, onOpen, onToggle, onNex
       <span className="mini-progress"><i style={{ width: `${duration ? Math.min(100, position / duration * 100) : 0}%` }} /></span>
       <button className="icon-button" onClick={(event) => { event.stopPropagation(); onToggle(event); }} aria-label={playing ? "暂停" : "播放"} aria-pressed={playing}>{playing ? <Pause /> : <Play />}</button>
       <button className="icon-button" onClick={(event) => { event.stopPropagation(); onNext(event); }} aria-label="下一首"><SkipForward /></button>
+    </div>
+  );
+}
+
+function LiveNowPlaying({ song, playing, position, duration, onOpen, onToggle, onPrevious, onNext }: { song: Song | null; playing: boolean; position: number; duration: number; onOpen: () => void; onToggle: (event: MouseEvent) => void; onPrevious: (event: MouseEvent) => void; onNext: (event: MouseEvent) => void }) {
+  if (!song) return null;
+  const progressPercent = duration ? Math.min(100, Math.max(0, position / duration * 100)) : 0;
+  return (
+    <div className="now-playing live-now-playing" onClick={onOpen} role="button" tabIndex={0} onKeyDown={(event) => {
+      if (event.key === "Enter" || event.key === " ") onOpen();
+    }}>
+      <img src={song.cover || "/assets/icon.png"} alt="" />
+      <span className="now-playing-title"><strong>{song.name}</strong><small>{song.artist}</small></span>
+      <span className="now-playing-wave" aria-hidden="true"><i /><i /><i /><i /><i /></span>
+      <span className="now-playing-time"><b>{formatTime(position)}</b><span className="mini-progress"><i style={{ width: `${progressPercent}%` }} /></span><b>{formatTime(duration)}</b></span>
+      <span className="now-playing-controls">
+        <button className="icon-button" onClick={(event) => { event.stopPropagation(); onPrevious(event); }} aria-label="上一首"><SkipBack /></button>
+        <button className="icon-button play-toggle" onClick={(event) => { event.stopPropagation(); onToggle(event); }} aria-label={playing ? "暂停" : "播放"} aria-pressed={playing}>{playing ? <Pause /> : <Play />}</button>
+        <button className="icon-button" onClick={(event) => { event.stopPropagation(); onNext(event); }} aria-label="下一首"><SkipForward /></button>
+      </span>
     </div>
   );
 }

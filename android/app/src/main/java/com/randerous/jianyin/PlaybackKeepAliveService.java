@@ -28,11 +28,14 @@ public class PlaybackKeepAliveService extends Service {
     public static final String EXTRA_ARTIST = "artist";
     public static final String EXTRA_MEDIA_COMMAND = "command";
     public static final String EXTRA_PLAYING = "playing";
+    public static final String EXTRA_POSITION_MS = "positionMs";
+    public static final String EXTRA_DURATION_MS = "durationMs";
 
     private static final String MEDIA_CHANNEL_ID = "shiyin_media_playback_v3";
-    private static final String STATUS_CHANNEL_ID = "shiyin_playback_status_v1";
+    private static final String STATUS_CHANNEL_ID = "jijian_playback_visible_v1";
     private static final int MEDIA_NOTIFICATION_ID = 1001;
-    private static final int STATUS_NOTIFICATION_ID = 1002;
+    private static final int LEGACY_STATUS_NOTIFICATION_ID = 1002;
+    private static final int STATUS_NOTIFICATION_ID = 1099;
 
     private PowerManager.WakeLock wakeLock;
     private MediaSessionCompat mediaSession;
@@ -41,7 +44,7 @@ public class PlaybackKeepAliveService extends Service {
     public void onCreate() {
         super.onCreate();
         createChannels();
-        mediaSession = new MediaSessionCompat(this, "ShiyinPlayback");
+        mediaSession = new MediaSessionCompat(this, "JijianPlayback");
         mediaSession.setFlags(MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS | MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS);
         mediaSession.setCallback(new MediaSessionCompat.Callback() {
             @Override
@@ -82,13 +85,15 @@ public class PlaybackKeepAliveService extends Service {
         String title = intent == null ? "" : intent.getStringExtra(EXTRA_TITLE);
         String artist = intent == null ? "" : intent.getStringExtra(EXTRA_ARTIST);
         boolean playing = intent == null || intent.getBooleanExtra(EXTRA_PLAYING, true);
-        String safeTitle = title == null || title.isEmpty() ? "Shiyin" : title;
-        String safeArtist = artist == null || artist.isEmpty() ? "Playing music" : artist;
+        long positionMs = intent == null ? 0 : intent.getLongExtra(EXTRA_POSITION_MS, 0);
+        long durationMs = intent == null ? 0 : intent.getLongExtra(EXTRA_DURATION_MS, 0);
+        String safeTitle = title == null || title.isEmpty() ? "既见" : title;
+        String safeArtist = artist == null || artist.isEmpty() ? "正在播放" : artist;
         PendingIntent launchIntent = buildLaunchIntent();
 
-        updateMediaSession(safeTitle, safeArtist, playing, launchIntent);
-        startForeground(MEDIA_NOTIFICATION_ID, buildMediaNotification(safeTitle, safeArtist, playing, launchIntent));
-        showStatusNotification(safeTitle, safeArtist, playing, launchIntent);
+        updateMediaSession(safeTitle, safeArtist, playing, positionMs, durationMs, launchIntent);
+        startForeground(MEDIA_NOTIFICATION_ID, buildMediaNotification(safeTitle, safeArtist, playing, positionMs, durationMs, launchIntent));
+        showStatusNotification(safeTitle, safeArtist, playing, positionMs, durationMs, launchIntent);
 
         if (playing) {
             acquireWakeLock();
@@ -101,6 +106,7 @@ public class PlaybackKeepAliveService extends Service {
     @Override
     public void onDestroy() {
         releaseWakeLock();
+        cancelMediaNotification();
         cancelStatusNotification();
         if (mediaSession != null) {
             mediaSession.setActive(false);
@@ -118,6 +124,7 @@ public class PlaybackKeepAliveService extends Service {
 
     private void stopPlaybackKeepAlive() {
         releaseWakeLock();
+        cancelMediaNotification();
         cancelStatusNotification();
         if (mediaSession != null) {
             mediaSession.setActive(false);
@@ -134,7 +141,7 @@ public class PlaybackKeepAliveService extends Service {
         if (powerManager == null) {
             return;
         }
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Shiyin:Playback");
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "Jijian:Playback");
         wakeLock.setReferenceCounted(false);
         wakeLock.acquire();
     }
@@ -156,7 +163,7 @@ public class PlaybackKeepAliveService extends Service {
         );
     }
 
-    private Notification buildMediaNotification(String title, String artist, boolean playing, PendingIntent launchIntent) {
+    private Notification buildMediaNotification(String title, String artist, boolean playing, long positionMs, long durationMs, PendingIntent launchIntent) {
         NotificationCompat.Builder builder = basePlaybackNotification(MEDIA_CHANNEL_ID, title, artist, playing, launchIntent, true)
             .setStyle(new MediaStyle()
                 .setMediaSession(mediaSession == null ? null : mediaSession.getSessionToken())
@@ -166,20 +173,32 @@ public class PlaybackKeepAliveService extends Service {
         return builder.build();
     }
 
-    private Notification buildStatusNotification(String title, String artist, boolean playing, PendingIntent launchIntent) {
-        RemoteViews contentView = buildStatusContentView(title, artist, playing);
-        return basePlaybackNotification(STATUS_CHANNEL_ID, title, artist, playing, launchIntent, false)
-            .setCategory(NotificationCompat.CATEGORY_STATUS)
+    private void showMediaNotification(String title, String artist, boolean playing, long positionMs, long durationMs, PendingIntent launchIntent) {
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager != null) {
+            manager.notify(MEDIA_NOTIFICATION_ID, buildMediaNotification(title, artist, playing, positionMs, durationMs, launchIntent));
+        }
+    }
+
+    private Notification buildStatusNotification(String title, String artist, boolean playing, long positionMs, long durationMs, PendingIntent launchIntent) {
+        RemoteViews contentView = buildStatusContentView(title, artist, playing, positionMs, durationMs, R.layout.notification_playback);
+        return basePlaybackNotification(STATUS_CHANNEL_ID, title, artist, playing, launchIntent, false, false)
             .setCustomContentView(contentView)
             .setCustomBigContentView(contentView)
             .setStyle(new NotificationCompat.DecoratedCustomViewStyle())
+            .setSilent(true)
             .build();
     }
 
-    private RemoteViews buildStatusContentView(String title, String artist, boolean playing) {
-        RemoteViews views = new RemoteViews(getPackageName(), R.layout.notification_playback);
+    private RemoteViews buildStatusContentView(String title, String artist, boolean playing, long positionMs, long durationMs, int layoutId) {
+        RemoteViews views = new RemoteViews(getPackageName(), layoutId);
         views.setTextViewText(R.id.notification_title, title);
         views.setTextViewText(R.id.notification_artist, artist);
+        if (layoutId == R.layout.notification_playback_big) {
+            views.setProgressBar(R.id.notification_progress, (int) Math.min(Integer.MAX_VALUE, Math.max(1, durationMs)), (int) Math.min(Integer.MAX_VALUE, Math.max(0, positionMs)), durationMs <= 0);
+            views.setTextViewText(R.id.notification_position, formatDuration(positionMs));
+            views.setTextViewText(R.id.notification_duration, durationMs > 0 ? formatDuration(durationMs) : "--:--");
+        }
         views.setImageViewResource(R.id.notification_toggle, playing ? R.drawable.ic_notify_pause : R.drawable.ic_notify_play);
         views.setOnClickPendingIntent(R.id.notification_previous, mediaIntent(COMMAND_PREVIOUS, 11));
         views.setOnClickPendingIntent(R.id.notification_toggle, mediaIntent(COMMAND_TOGGLE, 12));
@@ -187,7 +206,15 @@ public class PlaybackKeepAliveService extends Service {
         return views;
     }
 
+    private NotificationCompat.Builder basePlaybackNotification(String channelId, String title, String artist, boolean playing, PendingIntent launchIntent) {
+        return basePlaybackNotification(channelId, title, artist, playing, launchIntent, true, true);
+    }
+
     private NotificationCompat.Builder basePlaybackNotification(String channelId, String title, String artist, boolean playing, PendingIntent launchIntent, boolean includeActions) {
+        return basePlaybackNotification(channelId, title, artist, playing, launchIntent, includeActions, true);
+    }
+
+    private NotificationCompat.Builder basePlaybackNotification(String channelId, String title, String artist, boolean playing, PendingIntent launchIntent, boolean includeActions, boolean ongoing) {
         int toggleIcon = playing ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play;
         String toggleTitle = playing ? "Pause" : "Play";
         NotificationCompat.Builder builder = new NotificationCompat.Builder(this, channelId)
@@ -195,7 +222,7 @@ public class PlaybackKeepAliveService extends Service {
             .setContentTitle(title)
             .setContentText(artist)
             .setContentIntent(launchIntent)
-            .setOngoing(true)
+            .setOngoing(ongoing)
             .setOnlyAlertOnce(true)
             .setShowWhen(false)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
@@ -209,17 +236,33 @@ public class PlaybackKeepAliveService extends Service {
         return builder;
     }
 
-    private void showStatusNotification(String title, String artist, boolean playing, PendingIntent launchIntent) {
+    private void showStatusNotification(String title, String artist, boolean playing, long positionMs, long durationMs, PendingIntent launchIntent) {
         NotificationManager manager = getSystemService(NotificationManager.class);
         if (manager != null) {
-            manager.notify(STATUS_NOTIFICATION_ID, buildStatusNotification(title, artist, playing, launchIntent));
+            manager.cancel(LEGACY_STATUS_NOTIFICATION_ID);
+            manager.notify(STATUS_NOTIFICATION_ID, buildStatusNotification(title, artist, playing, positionMs, durationMs, launchIntent));
         }
+    }
+
+    private String formatDuration(long millis) {
+        long totalSeconds = Math.max(0, millis / 1000);
+        long minutes = totalSeconds / 60;
+        long seconds = totalSeconds % 60;
+        return String.format("%02d:%02d", minutes, seconds);
     }
 
     private void cancelStatusNotification() {
         NotificationManager manager = getSystemService(NotificationManager.class);
         if (manager != null) {
             manager.cancel(STATUS_NOTIFICATION_ID);
+            manager.cancel(LEGACY_STATUS_NOTIFICATION_ID);
+        }
+    }
+
+    private void cancelMediaNotification() {
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager != null) {
+            manager.cancel(MEDIA_NOTIFICATION_ID);
         }
     }
 
@@ -245,7 +288,7 @@ public class PlaybackKeepAliveService extends Service {
         sendBroadcast(broadcast);
     }
 
-    private void updateMediaSession(String title, String artist, boolean playing, PendingIntent launchIntent) {
+    private void updateMediaSession(String title, String artist, boolean playing, long positionMs, long durationMs, PendingIntent launchIntent) {
         if (mediaSession == null) {
             return;
         }

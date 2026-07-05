@@ -926,6 +926,30 @@ test("playlist and home endpoints only return full playable Netease songs", asyn
   assert.equal(refreshedHome.body.offset, 40);
 });
 
+test("netease playlist detail returns more than sixty songs", async () => {
+  const songs = Array.from({ length: 75 }, (_item, index) => song(index + 1));
+  const playlist = {
+    id: 990,
+    name: "Large Playlist",
+    coverImgUrl: "/large.png",
+    tracks: songs,
+    trackIds: songs.map((item) => ({ id: item.id }))
+  };
+  const neteaseClient = {
+    async playlist_detail() {
+      return { body: { playlist } };
+    }
+  };
+  const baseUrl = await startTestServer({ neteaseClient });
+
+  const imported = await getJson(`${baseUrl}/api/netease/playlist/990`);
+
+  assert.equal(imported.response.status, 200);
+  assert.equal(imported.body.playlist.songs.length, 75);
+  assert.equal(imported.body.playlist.songs[0].id, "flac_search_playlist_1");
+  assert.equal(imported.body.playlist.songs[74].id, "flac_search_playlist_75");
+});
+
 test("netease account login validates cookie and syncs only playable playlists", async () => {
   const requested = [];
   const neteaseClient = {

@@ -168,7 +168,7 @@ public class MainActivity extends BridgeActivity {
                 DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
                 request.setMimeType(mimeType);
                 request.setTitle(fileName);
-                request.setDescription("拾音");
+                request.setDescription("既见");
                 request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
                 request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName);
                 if (userAgent != null) {
@@ -204,11 +204,18 @@ public class MainActivity extends BridgeActivity {
 
         @JavascriptInterface
         public void setPlaybackInfo(boolean present, boolean playing, String title, String artist) {
+            setPlaybackDetails(present, playing, title, artist, 0, 0);
+        }
+
+        @JavascriptInterface
+        public void setPlaybackDetails(boolean present, boolean playing, String title, String artist, double position, double duration) {
             Intent intent = new Intent(context, PlaybackKeepAliveService.class);
             intent.setAction(present ? PlaybackKeepAliveService.ACTION_START : PlaybackKeepAliveService.ACTION_STOP);
             intent.putExtra(PlaybackKeepAliveService.EXTRA_PLAYING, playing);
             intent.putExtra(PlaybackKeepAliveService.EXTRA_TITLE, title == null ? "" : title);
             intent.putExtra(PlaybackKeepAliveService.EXTRA_ARTIST, artist == null ? "" : artist);
+            intent.putExtra(PlaybackKeepAliveService.EXTRA_POSITION_MS, Math.max(0, (long) (position * 1000)));
+            intent.putExtra(PlaybackKeepAliveService.EXTRA_DURATION_MS, Math.max(0, (long) (duration * 1000)));
             if (present) {
                 context.startForegroundService(intent);
             } else {

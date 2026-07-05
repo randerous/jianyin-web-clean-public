@@ -25,7 +25,7 @@ app.use(express.json({ limit: "512kb" }));
 	const MIN_FULL_SONG_MS = 60_000;
 	const SEARCH_CANDIDATE_LIMIT = 180;
 	const SEARCH_VERIFY_BATCH_SIZE = 10;
-	const PLAYLIST_CANDIDATE_LIMIT = 120;
+	const PLAYLIST_CANDIDATE_LIMIT = 1000;
 	const DEFAULT_PLAY_QUALITY = "exhigh";
 	const QUALITY_FALLBACK_ORDER = ["jymaster", "sky", "jyeffect", "hires", "lossless", "exhigh", "standard"];
 const RESOLVED_URL_TTL_MS = 8 * 60 * 1000;
@@ -841,7 +841,7 @@ function playableRejectReason(data) {
 	  return verified;
 	}
 
-	async function mapPlaylistSongsToFlac(tracks, desiredLimit = 60) {
+	async function mapPlaylistSongsToFlac(tracks, desiredLimit = PLAYLIST_CANDIDATE_LIMIT) {
 	  return tracks.filter(Boolean).slice(0, desiredLimit).map((track, index) => {
 	    const id = cleanText(track?.id, `playlist_${index + 1}`);
 	    const album = track?.al ?? track?.album ?? {};
@@ -892,13 +892,25 @@ function playableRejectReason(data) {
 
 	async function mapVerifiedPlaylist(playlist, preferredQuality = DEFAULT_PLAY_QUALITY, cookie = neteaseAccountCookie) {
 	  const tracks = await expandPlaylistTracks(playlist);
-	  const songs = await mapPlaylistSongsToFlac(tracks, 60);
+	  const songs = await mapPlaylistSongsToFlac(tracks);
 	  return {
 	    id: `netease_playlist_${String(playlist.id ?? "")}`,
 	    name: cleanText(playlist.name, "网易云公开歌单"),
 	    coverPic: cleanText(playlist.coverImgUrl, songs[0]?.pic ?? ""),
     songs,
     source: "netease"
+	  };
+	}
+
+	async function mapPlayableNeteasePlaylist(playlist, preferredQuality = DEFAULT_PLAY_QUALITY, cookie = neteaseAccountCookie) {
+	  const tracks = await expandPlaylistTracks(playlist);
+	  const songs = await mapVerifiedSongs(tracks, PLAYLIST_CANDIDATE_LIMIT, preferredQuality, cookie);
+	  return {
+	    id: `netease_playlist_${String(playlist.id ?? "")}`,
+	    name: cleanText(playlist.name, "网易云公开歌单"),
+	    coverPic: cleanText(playlist.coverImgUrl, songs[0]?.pic ?? ""),
+	    songs,
+	    source: "netease"
 	  };
 	}
 
@@ -1194,7 +1206,7 @@ app.get("/api/netease/search", async (req, res) => {
 	    for (const summary of summaries) {
 	      if (playlists.length >= limit) break;
 	      const detail = await getPlaylistDetailWithFallback(summary.id.replace(/^netease_playlist_/, ""), neteaseAccountCookie);
-	      const mapped = await mapVerifiedPlaylist(detail ?? {}, quality, neteaseAccountCookie);
+	      const mapped = await mapPlayableNeteasePlaylist(detail ?? {}, quality, neteaseAccountCookie);
 	      if (mapped.songs.length) playlists.push({ ...mapped, coverPic: summary.coverPic || mapped.coverPic, trackCount: summary.trackCount, creatorNickname: summary.creatorNickname });
 	    }
 	    res.json({ loggedIn: true, playlists, quality });
