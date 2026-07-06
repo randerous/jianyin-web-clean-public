@@ -317,6 +317,7 @@ export async function resolveBiliSong(song: Song) {
 }
 
 export async function resolveFlacSong(song: Song, options: { refresh?: boolean } = {}) {
+  if (!options.refresh && song.verifiedPlayable && song.url && !song.url.startsWith("local-file:") && song.url.includes("/api/flac/stream/")) return song;
   if (!options.refresh) {
     const prewarmed = freshPrewarmedSong(song);
     if (prewarmed) return prewarmed;
