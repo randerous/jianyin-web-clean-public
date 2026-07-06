@@ -50,6 +50,22 @@ async function getJson(url, init) {
   return { response, body };
 }
 
+async function assertEventually(assertion, timeoutMs = 500, intervalMs = 10) {
+  const startedAt = Date.now();
+  let lastError;
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      assertion();
+      return;
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, intervalMs));
+    }
+  }
+  assertion();
+  if (lastError) throw lastError;
+}
+
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise((resolve, reject) => {
     server.close((error) => error ? reject(error) : resolve());
@@ -457,6 +473,48 @@ test("flac test source searches full songs and proxies ranged streams", async ()
   assert.equal(upstreamRange, "bytes=0-9");
   assert.equal(stream.headers.get("content-type"), "audio/x-flac");
   assert.equal(await stream.text(), "0123456789");
+});
+
+test("flac test source prefers Android-decodable 320k over flac when both exist", async () => {
+  const fetchImpl = async (url, init = {}) => {
+    const textUrl = String(url);
+    if (textUrl === "https://flac.music.hi.cn/") {
+      return new Response("", {
+        status: 200,
+        headers: { "set-cookie": "sl-session=mock; Path=/; sl_jwt_session=mockjwt; Path=/" }
+      });
+    }
+    if (textUrl.includes("/ajax.php?act=search")) {
+      return Response.json({
+        code: 0,
+        data: {
+          list: [{
+            id: "101",
+            name: "Android Friendly",
+            artist: "Artist",
+            duration: "213",
+            time: "t101",
+            sign: "s101",
+            minfo: [
+              { format: "flac", bitrate: "2000", level: "ff" },
+              { format: "mp3", bitrate: "320", level: "p" }
+            ]
+          }],
+          total: "1"
+        }
+      });
+    }
+    throw new Error(`unexpected fetch ${textUrl}`);
+  };
+  const baseUrl = await startTestServer({ fetchImpl });
+
+  const search = await getJson(`${baseUrl}/api/flac/search?keyword=android&limit=1`);
+
+  assert.equal(search.response.status, 200);
+  assert.equal(search.body.songs[0].audioType, "mp3");
+  assert.equal(search.body.songs[0].quality, "320k");
+  assert.match(search.body.songs[0].url, /format=mp3/);
+  assert.match(search.body.songs[0].url, /bitrate=320/);
 });
 
 test("flac test source builds app pages from upstream 20-song pages", async () => {
@@ -978,6 +1036,57 @@ test("home recommendation prefetch warms playlist detail cache", async () => {
   assert.equal(imported.response.status, 200);
   assert.equal(detailCalls, 1);
   assert.deepEqual(imported.body.playlist.songs.map((item) => item.source), ["flac", "flac"]);
+});
+
+test("netease playlist detail falls back to track_all when detail is slow", async () => {
+  const oldTimeout = process.env.JIANYIN_PLAYLIST_TIMEOUT_MS;
+  process.env.JIANYIN_PLAYLIST_TIMEOUT_MS = "20";
+  try {
+    const neteaseClient = {
+      async playlist_detail() {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        return { body: { playlist: { id: 77, name: "Slow Detail", tracks: [song(99)], trackIds: [{ id: 99 }] } } };
+      },
+      async playlist_track_all() {
+        return { body: { songs: [song(1), song(2)] } };
+      }
+    };
+    const baseUrl = await startTestServer({ neteaseClient });
+
+    const imported = await getJson(`${baseUrl}/api/netease/playlist/77`);
+
+    assert.equal(imported.response.status, 200);
+    assert.deepEqual(imported.body.playlist.songs.map((item) => item.id), ["flac_search_playlist_1", "flac_search_playlist_2"]);
+  } finally {
+    if (oldTimeout === undefined) delete process.env.JIANYIN_PLAYLIST_TIMEOUT_MS;
+    else process.env.JIANYIN_PLAYLIST_TIMEOUT_MS = oldTimeout;
+  }
+});
+
+test("home recommendation prefetch covers all returned playlists with low concurrency", async () => {
+  const requested = [];
+  const playlists = Array.from({ length: 12 }, (_item, index) => ({
+    id: index + 1,
+    name: `Playlist ${index + 1}`,
+    picUrl: `/playlist-${index + 1}.png`,
+    trackCount: 1
+  }));
+  const neteaseClient = {
+    async personalized() {
+      return { body: { result: playlists } };
+    },
+    async playlist_detail({ id }) {
+      requested.push(String(id));
+      return { body: { playlist: { id, name: `Playlist ${id}`, tracks: [song(id)], trackIds: [{ id }] } } };
+    }
+  };
+  const baseUrl = await startTestServer({ neteaseClient });
+
+  const home = await getJson(`${baseUrl}/api/netease/home?playlistLimit=12`);
+  assert.equal(home.response.status, 200);
+  await assertEventually(() => {
+    assert.deepEqual(requested.sort((a, b) => Number(a) - Number(b)), playlists.map((item) => String(item.id)));
+  });
 });
 
 test("netease account login validates cookie and syncs only playable playlists", async () => {

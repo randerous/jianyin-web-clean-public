@@ -157,6 +157,70 @@ test("home recommended playlist imports remote detail before opening", async ({ 
   await expect(playlist).toContainText("Home Playlist Song");
 });
 
+test("playing an imported homepage playlist song keeps other recommendation covers", async ({ page }) => {
+  await page.route("**/api/netease/home**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        radarSongs: [],
+        hotSongs: [],
+        recommendedPlaylists: [
+          { id: "3778678", name: "Home Playlist", cover: "/assets/miku_1.png", trackCount: 1, creatorNickname: "Mock Creator" },
+          { id: "999", name: "Other Playlist", cover: "/assets/miku_2.png", trackCount: 1, creatorNickname: "Mock Creator" }
+        ]
+      })
+    });
+  });
+  await page.route(/\/api\/netease\/playlist\/3778678.*/, async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        playlist: {
+          id: "netease_playlist_3778678",
+          name: "Home Playlist",
+          cover: "/assets/miku_1.png",
+          source: "netease",
+          songs: [{
+            id: "321",
+            name: "Home Playlist Song",
+            artist: "Cloud Artist",
+            pic: "/assets/miku_9.png",
+            url: "/assets/full-song-65s.wav",
+            source: "netease",
+            durationMs: 65000,
+            verifiedPlayable: true
+          }]
+        }
+      })
+    });
+  });
+  await page.route("**/api/netease/song/321**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        url: "/assets/full-song-65s.wav",
+        durationMs: 65000,
+        verifiedPlayable: true,
+        br: 320000,
+        level: "exhigh",
+        audioType: "mp3",
+        quality: "exhigh"
+      })
+    });
+  });
+  await page.reload();
+
+  await expect(page.getByRole("button", { name: /Home Playlist/ }).locator("img")).toHaveAttribute("src", "/assets/miku_1.png");
+  await expect(page.getByRole("button", { name: /Other Playlist/ }).locator("img")).toHaveAttribute("src", "/assets/miku_2.png");
+  await page.getByRole("button", { name: /Home Playlist/ }).click();
+  await page.locator(".detail .song-row .song-hit").first().click();
+  await expect(page.locator(".now-playing")).toContainText("Home Playlist Song");
+  await expectAudioPlaying(page);
+
+  await expect(page.locator(".playlist-grid .playlist-card").nth(0).locator("img")).toHaveAttribute("src", "/assets/miku_1.png");
+  await expect(page.locator(".playlist-grid .playlist-card").nth(1).locator("img")).toHaveAttribute("src", "/assets/miku_2.png");
+});
+
 test("home song plays and opens player lyrics", async ({ page }) => {
   await playFirstHomeSong(page);
   await expect(page.locator(".now-playing")).toContainText("鍛ㄦ澃浼?鏈湴璇曞惉");

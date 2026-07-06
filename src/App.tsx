@@ -153,6 +153,12 @@ function allLibrarySongs(playlists: Playlist[], history: Song[]) {
   return uniqueSongs([...playlists.flatMap((playlist) => playlist.songs), ...history]);
 }
 
+function coverAfterSongResolved(playlist: Playlist, originalKey: string, resolvedCover?: string) {
+  const firstSong = playlist.songs[0];
+  if (!firstSong || songKey(firstSong) !== originalKey) return playlist.cover;
+  return resolvedCover || playlist.cover;
+}
+
 export default function App() {
   const initial = useMemo(loadState, []);
   const [tab, setTab] = useState<Tab>("home");
@@ -533,19 +539,19 @@ export default function App() {
       setFavorites((items) => items.map(replaceResolved));
       setPlaylists((items) => items.map((playlist) => {
         const songs = playlist.songs.map(replaceResolved);
-        return { ...playlist, songs, cover: songKey(playlist.songs[0] ?? song) === originalKey ? playable.cover ?? playlist.cover : playlist.cover };
+        return { ...playlist, songs, cover: coverAfterSongResolved(playlist, originalKey, playable.cover) };
       }));
       setPreviewPlaylist((playlist) => playlist ? {
         ...playlist,
         songs: playlist.songs.map(replaceResolved),
-        cover: songKey(playlist.songs[0] ?? song) === originalKey ? playable.cover ?? playlist.cover : playlist.cover
+        cover: coverAfterSongResolved(playlist, originalKey, playable.cover)
       } : playlist);
       setHomeData((data) => ({
         ...data,
         recommendedPlaylists: data.recommendedPlaylists.map((playlist) => ({
           ...playlist,
           songs: playlist.songs.map(replaceResolved),
-          cover: songKey(playlist.songs[0] ?? song) === originalKey ? playable.cover ?? playlist.cover : playlist.cover
+          cover: coverAfterSongResolved(playlist, originalKey, playable.cover)
         }))
       }));
       setQueue(nextQueue);

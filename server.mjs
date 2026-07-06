@@ -31,6 +31,11 @@ app.use(express.json({ limit: "512kb" }));
 const RESOLVED_URL_TTL_MS = 8 * 60 * 1000;
 const SEARCH_CACHE_TTL_MS = 90 * 1000;
 const PLAYLIST_DETAIL_CACHE_TTL_MS = 10 * 60 * 1000;
+const playlistTimeoutFromEnv = Number(process.env.JIANYIN_PLAYLIST_TIMEOUT_MS);
+const PLAYLIST_UPSTREAM_TIMEOUT_MS = Number.isFinite(playlistTimeoutFromEnv) && playlistTimeoutFromEnv > 0
+  ? Math.min(Math.trunc(playlistTimeoutFromEnv), 10_000)
+  : 3_500;
+const RECOMMENDED_PLAYLIST_PREFETCH_CONCURRENCY = 2;
 const NETEASE_REFERER = "https://music.163.com/";
 const NETEASE_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36";
 const BILI_REFERER = "https://www.bilibili.com";
@@ -432,8 +437,10 @@ async function writeSharedState(state) {
 
 	function chooseFlacQuality(item) {
 	  const formats = Array.isArray(item?.minfo) ? item.minfo : [];
-	  return formats.find((format) => cleanText(format.format).toLowerCase() === "flac")
+	  return formats.find((format) => cleanText(format.bitrate) === "320" && cleanText(format.format).toLowerCase() !== "flac")
 	    ?? formats.find((format) => cleanText(format.bitrate) === "320")
+	    ?? formats.find((format) => cleanText(format.format).toLowerCase() === "mp3")
+	    ?? formats.find((format) => cleanText(format.format).toLowerCase() === "flac")
 	    ?? formats[0]
 	    ?? { format: "mp3", bitrate: "320", level: "p" };
 	}
@@ -939,10 +946,18 @@ function playableRejectReason(data) {
 	}
 
 	function prefetchRecommendedPlaylistDetails(playlists, cookie = neteaseAccountCookie) {
-	  for (const playlist of playlists.slice(0, 8)) {
-	    const id = cleanText(playlist?.id);
-	    if (!/^\d+$/.test(id)) continue;
-	    void getPlaylistDetailWithFallback(id, cookie).catch(() => {});
+	  const ids = playlists.map((playlist) => cleanText(playlist?.id)).filter((id) => /^\d+$/.test(id));
+	  if (!ids.length) return;
+	  let cursor = 0;
+	  const worker = async () => {
+	    while (cursor < ids.length) {
+	      const id = ids[cursor];
+	      cursor += 1;
+	      await getPlaylistDetailWithFallback(id, cookie).catch(() => {});
+	    }
+	  };
+	  for (let i = 0; i < Math.min(RECOMMENDED_PLAYLIST_PREFETCH_CONCURRENCY, ids.length); i += 1) {
+	    void worker();
 	  }
 	}
 
@@ -975,6 +990,36 @@ function playableRejectReason(data) {
 	  throw lastError;
 	}
 
+	function withTimeout(promise, ms, label) {
+	  let timer;
+	  const timeout = new Promise((_resolve, reject) => {
+	    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+	  });
+	  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+	}
+
+	function playlistFromTracks(id, tracks) {
+	  return {
+	    id,
+	    name: "网易云推荐歌单",
+	    coverImgUrl: cleanText(tracks?.[0]?.al?.picUrl, ""),
+	    tracks: Array.isArray(tracks) ? tracks : [],
+	    trackIds: Array.isArray(tracks) ? tracks.map((track) => ({ id: track?.id })).filter((item) => /^\d+$/.test(String(item.id ?? ""))) : []
+	  };
+	}
+
+	async function getPlaylistTracksFallback(id, cookie = neteaseAccountCookie) {
+	  if (typeof netease.playlist_track_all !== "function") return null;
+	  const tracks = await withTimeout(
+	    retryNetease(() => netease.playlist_track_all({ id, limit: PLAYLIST_CANDIDATE_LIMIT, offset: 0, cookie }), 1),
+	    PLAYLIST_UPSTREAM_TIMEOUT_MS,
+	    "netease playlist_track_all"
+	  );
+	  const songs = tracks.body?.songs ?? [];
+	  if (!Array.isArray(songs) || !songs.length) return null;
+	  return playlistFromTracks(id, songs);
+	}
+
 	async function getPlaylistDetailWithFallback(id, cookie = neteaseAccountCookie) {
 	  const cacheKey = `${cookieHash(cookie)}:${id}`;
 	  const cached = playlistDetailCache.get(cacheKey);
@@ -982,12 +1027,25 @@ function playableRejectReason(data) {
 	  const pending = playlistDetailInFlight.get(cacheKey);
 	  if (pending) return pending;
 	  const request = (async () => {
-	  const detail = await retryNetease(() => netease.playlist_detail({ id, s: 0, cookie }));
-	  const playlist = detail.body?.playlist;
+	  let playlist = null;
+	  try {
+	    const detail = await withTimeout(
+	      retryNetease(() => netease.playlist_detail({ id, s: 0, cookie }), 1),
+	      PLAYLIST_UPSTREAM_TIMEOUT_MS,
+	      "netease playlist_detail"
+	    );
+	    playlist = detail.body?.playlist ?? null;
+	  } catch (error) {
+	    playlist = await getPlaylistTracksFallback(id, cookie).catch(() => null);
+	  }
 	  if (!playlist) return null;
 	  if ((!Array.isArray(playlist.tracks) || !playlist.tracks.length) && typeof netease.playlist_track_all === "function") {
 	    try {
-	      const tracks = await retryNetease(() => netease.playlist_track_all({ id, limit: PLAYLIST_CANDIDATE_LIMIT, offset: 0, cookie }), 2);
+	      const tracks = await withTimeout(
+	        retryNetease(() => netease.playlist_track_all({ id, limit: PLAYLIST_CANDIDATE_LIMIT, offset: 0, cookie }), 1),
+	        PLAYLIST_UPSTREAM_TIMEOUT_MS,
+	        "netease playlist_track_all"
+	      );
 	      playlist.tracks = tracks.body?.songs ?? playlist.tracks ?? [];
 	    } catch {
 	      // playlist_detail still contains trackIds; expandPlaylistTracks can try song_detail.
