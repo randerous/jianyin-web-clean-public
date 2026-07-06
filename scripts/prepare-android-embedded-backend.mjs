@@ -17,10 +17,7 @@ const runtimeRoot = resolve(root, "build", "android-node-runtime");
 const nodeProject = resolve(cordovaAssets, "www", "nodejs-project");
 const pluginAssets = resolve(root, "node_modules", "@red-mobile", "nodejs-mobile-cordova", "install", "nodejs-mobile-cordova-assets");
 const builtinAssets = resolve(cordovaAssets, "nodejs-mobile-cordova-assets");
-const androidAbis = (process.env.JIANYIN_ANDROID_ABIS || "arm64-v8a")
-  .split(",")
-  .map((abi) => abi.trim())
-  .filter(Boolean);
+const androidAbis = ["arm64-v8a"];
 const androidExpressVersion = "4.21.2";
 
 function assertInside(parent, child) {
@@ -341,7 +338,7 @@ function patchGeneratedGradle() {
     current = current
       .replace(/\r?\nandroid \{\r?\n\s+ndkVersion "28\.2\.13676358"\r?\n\}/g, "")
       .replace(/\r?\n\s+ndkVersion "28\.2\.13676358"/g, "")
-      .replace(/\r?\n\s+ndk \{\r?\n\s+abiFilters project\.findProperty\("jianyinAbi"\) \?: "arm64-v8a"\r?\n\s+\}/g, "")
+      .replace(/\r?\n\s+ndk \{\r?\n\s+abiFilters (?:project\.findProperty\("jianyinAbi"\) \?: )?"arm64-v8a"\r?\n\s+\}/g, "")
       .replace(/\r?\nandroid \{\r?\n\}/g, "");
     current = current.replace(
       /android \{\r?\n\s+namespace = "capacitor\.cordova\.android\.plugins"/,
@@ -349,7 +346,7 @@ function patchGeneratedGradle() {
     );
     current = current.replace(
       /(defaultConfig \{\r?\n\s+minSdkVersion[^\r\n]*\r?\n\s+targetSdkVersion[^\r\n]*\r?\n\s+versionCode 1\r?\n\s+versionName "1\.0")/,
-      '$1\n        ndk {\n            abiFilters project.findProperty("jianyinAbi") ?: "arm64-v8a"\n        }'
+      '$1\n        ndk {\n            abiFilters "arm64-v8a"\n        }'
     );
     current = current.replace(
       /apply from: "\.\.\/\.\.\/node_modules\/@red-mobile\/nodejs-mobile-cordova\/src\/android\/build\.gradle"\r?\n/,
