@@ -134,6 +134,64 @@ async function expectAudioLongerThan(page: Page, seconds: number) {
   await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.duration)).toBeGreaterThan(seconds);
 }
 
+async function expectReadableToast(page: Page, expectedText: string) {
+  const toast = page.locator(".toast");
+  await expect(toast).toContainText(expectedText);
+  const metrics = await toast.evaluate((element) => {
+    const parseColor = (value: string) => {
+      const rgbMatch = value.match(/rgba?\(([^)]+)\)/);
+      if (rgbMatch) {
+        const [r, g, b] = rgbMatch[1].split(",").slice(0, 3).map((item) => Number(item.trim()));
+        return Number.isFinite(r) && Number.isFinite(g) && Number.isFinite(b) ? [r, g, b] : null;
+      }
+      const srgbMatch = value.match(/color\(srgb\s+([^)]+)\)/);
+      if (!srgbMatch) return null;
+      const [r, g, b] = srgbMatch[1]
+        .split("/")
+        .shift()!
+        .trim()
+        .split(/\s+/)
+        .slice(0, 3)
+        .map((item) => Number(item) * 255);
+      return Number.isFinite(r) && Number.isFinite(g) && Number.isFinite(b) ? [r, g, b] : null;
+    };
+    const luminance = ([r, g, b]: number[]) => {
+      const linear = [r, g, b].map((channel) => {
+        const value = channel / 255;
+        return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2];
+    };
+    const contrast = (foreground: number[], background: number[]) => {
+      const fg = luminance(foreground);
+      const bg = luminance(background);
+      return (Math.max(fg, bg) + 0.05) / (Math.min(fg, bg) + 0.05);
+    };
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    const foreground = parseColor(style.color);
+    const background = parseColor(style.backgroundColor);
+    return {
+      rect: { top: rect.top, right: rect.right, bottom: rect.bottom, left: rect.left },
+      contrastRatio: foreground && background ? contrast(foreground, background) : 0
+    };
+  });
+  expect(metrics.contrastRatio).toBeGreaterThanOrEqual(4.5);
+  for (const selector of [".now-playing", ".mobile-nav", ".search-screen .pagination-bar-bottom"]) {
+    const blocker = page.locator(selector).first();
+    if (!(await blocker.isVisible().catch(() => false))) continue;
+    const blockerBox = await blocker.boundingBox();
+    if (!blockerBox) continue;
+    const overlaps = !(
+      metrics.rect.right <= blockerBox.x ||
+      metrics.rect.left >= blockerBox.x + blockerBox.width ||
+      metrics.rect.bottom <= blockerBox.y ||
+      metrics.rect.top >= blockerBox.y + blockerBox.height
+    );
+    expect(overlaps, `.toast overlaps ${selector}`).toBe(false);
+  }
+}
+
 async function playFirstHomeSong(page: Page) {
   await page.getByRole("navigation").getByRole("button", { name: "首页" }).click();
   await page.getByRole("main").getByRole("button", { name: /周杰伦 本地试听/ }).click();
@@ -430,6 +488,16 @@ test("player controls pause, resume, seek, and move through full-length queue", 
   await currentPlayer.getByRole("button", { name: "随机播放" }).click();
   await currentPlayer.getByRole("button", { name: "列表循环" }).click();
   await expect(currentPlayer.getByRole("button", { name: "下一首" })).toBeEnabled();
+});
+
+test("toast stays readable above mobile playback controls", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await playFirstHomeSong(page);
+  await expectAudioPlaying(page);
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await page.getByRole("button", { name: "创建歌单" }).click();
+  await page.getByRole("dialog", { name: "创建新歌单" }).getByRole("button", { name: "创建" }).click();
+  await expectReadableToast(page, "请输入歌单名称");
 });
 
 test("searches local library and adds selections to a new playlist", async ({ page }) => {
@@ -1202,6 +1270,29 @@ test("empty keyword sends no search request", async ({ page }) => {
 
   expect(searchCalls).toBe(0);
   await expect(page.getByText("should not search blank keyword")).toHaveCount(0);
+});
+
+test("toast stays readable above mobile search pagination", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.route("**/api/flac/search**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        songs: testSongs.map((song) => ({ ...song, id: `flac_${song.id}`, source: "flac", remotePlayable: true })),
+        page: 1,
+        limit: 3,
+        total: 9,
+        hasMore: true
+      })
+    });
+  });
+
+  await page.getByRole("navigation").getByRole("button", { name: "搜索" }).click();
+  await page.getByPlaceholder("搜索音乐/歌手").fill("toast");
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".pagination-bar-bottom")).toBeVisible();
+  await page.locator(".song-row", { hasText: "周杰伦 本地试听" }).getByRole("button", { name: "添加到喜欢" }).click();
+  await expectReadableToast(page, "已添加到我喜欢的音乐");
 });
 
 test("new search clears stale loading immediately", async ({ page }) => {

@@ -844,12 +844,12 @@ h3 {
 }
 
 .detail-backdrop {
-  z-index: 18;
+  z-index: 50;
 }
 
 .modal-backdrop,
 .player-backdrop {
-  z-index: 20;
+  z-index: 55;
 }
 
 .modal,
@@ -1433,7 +1433,7 @@ input[type="range"] {
 
 .toast {
   position: fixed;
-  z-index: 40;
+  z-index: 70;
   left: 50%;
   bottom: 108px;
   transform: translateX(-50%);
@@ -1443,6 +1443,8 @@ input[type="range"] {
   background: var(--text);
   color: var(--bg);
   box-shadow: var(--shadow);
+  overflow-wrap: anywhere;
+  text-align: center;
 }
 
 button:disabled {
@@ -2307,6 +2309,13 @@ h2 {
   background: color-mix(in srgb, var(--panel) 96%, transparent);
 }
 
+.toast {
+  border: 1px solid color-mix(in srgb, var(--bg) 24%, transparent);
+  background: color-mix(in srgb, var(--text) 94%, transparent);
+  color: var(--bg);
+  backdrop-filter: blur(18px);
+}
+
 @media (max-width: 940px) {
   body {
     background:
@@ -2559,7 +2568,35 @@ h2 {
 
   .floating-lyric,
   .toast {
-    bottom: calc(var(--mobile-nav-height) + var(--mini-player-height) + 22px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(var(--mobile-nav-height) + var(--mini-player-height) + 64px + env(safe-area-inset-bottom, 0px));
+  }
+}
+
+@media (max-width: 940px) {
+  .app-shell.has-live-player .toast {
+    bottom: calc(var(--mobile-nav-height) + 124px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .app-shell.has-search-pagination .toast {
+    bottom: calc(var(--mobile-nav-height) + var(--mini-player-height) + 104px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .app-shell.has-live-player.has-search-pagination .toast {
+    bottom: calc(var(--mobile-nav-height) + 124px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .modal-backdrop,
+  .detail-backdrop,
+  .player-backdrop {
+    z-index: 60;
+  }
+
+  .toast {
+    z-index: 75;
+    max-width: min(560px, calc(100vw - 28px));
+    border-radius: 18px;
+    padding: 11px 14px;
+    line-height: 1.35;
   }
 }
 
