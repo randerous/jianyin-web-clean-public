@@ -53,6 +53,7 @@ import {
 } from "./lib/api";
 import { activeLyricIndex, formatTime, parseLrc } from "./lib/lyrics";
 import {
+  deleteLocalFile,
   downloadJson,
   hydrateLocalSongs,
   loadLocalFile,
@@ -147,6 +148,28 @@ function uniqueSongs(songs: Song[]) {
 
 function recentSongsWith(song: Song, songs: Song[]) {
   return uniqueSongs([song, ...songs]).slice(0, RECENT_HISTORY_LIMIT);
+}
+
+function isDownloadCachedSong(song: Song) {
+  return Boolean(song.localKey?.startsWith("download_"));
+}
+
+function remoteCopyAfterDownloadDeleted(song: Song) {
+  const next: Song = {
+    ...song,
+    url: "",
+    localKey: undefined,
+    verifiedPlayable: false,
+    needsImport: false
+  };
+  if (next.source === "local") {
+    next.needsImport = true;
+    next.remotePlayable = false;
+  } else {
+    next.remotePlayable = true;
+    next.verifiedPlayable = false;
+  }
+  return next;
 }
 
 function allLibrarySongs(playlists: Playlist[], history: Song[]) {
@@ -304,13 +327,13 @@ export default function App() {
 
   useEffect(() => {
     if (!activePlaylist?.songs.length) return;
-    prewarmRemoteSongs(activePlaylist.songs, 8);
+    prewarmRemoteSongs(activePlaylist.songs, 4);
   }, [activePlaylist, prewarmRemoteSongs]);
 
   useEffect(() => {
     if (!queue.length) return;
     const start = queueIndex >= 0 ? queueIndex + 1 : 0;
-    prewarmRemoteSongs([...queue.slice(start), ...queue.slice(0, start)], 8);
+    prewarmRemoteSongs([...queue.slice(start), ...queue.slice(0, start)], 2);
   }, [prewarmRemoteSongs, queue, queueIndex]);
 
   useEffect(() => {
@@ -908,6 +931,57 @@ export default function App() {
     setQueueIndex(nextQueueIndex);
   }, []);
 
+  const deleteDownloadedSongs = useCallback(async (songs: Song[]) => {
+    const targets = songs.filter(isDownloadCachedSong);
+    if (!targets.length) {
+      setToast("没有可删除的下载歌曲");
+      return;
+    }
+    const label = targets.length === 1 ? `“${targets[0].name}”` : `${targets.length} 首歌曲`;
+    if (!window.confirm(`确认删除下载的 ${label}？本地缓存文件会被移除。`)) return;
+    const keys = new Set(targets.map((song) => song.localKey).filter((key): key is string => Boolean(key)));
+    await Promise.all([...keys].map((key) => deleteLocalFile(key).catch(() => null)));
+    const replaceDeleted = (song: Song) => song.localKey && keys.has(song.localKey) ? remoteCopyAfterDownloadDeleted(song) : song;
+    setDownloadHistory((items) => items.filter((song) => !song.localKey || !keys.has(song.localKey)));
+    setHistory((items) => items.map(replaceDeleted));
+    setFavorites((items) => items.map(replaceDeleted));
+    setRemoteResults((items) => items.map(replaceDeleted));
+    setPlaylists((items) => items.map((playlist) => {
+      const nextSongs = playlist.songs.map(replaceDeleted);
+      return { ...playlist, songs: nextSongs, cover: nextSongs[0]?.cover ?? playlist.cover };
+    }));
+    setPreviewPlaylist((playlist) => {
+      if (!playlist) return playlist;
+      if (playlist.id === "download_history_preview") {
+        const nextSongs = playlist.songs.filter((song) => !song.localKey || !keys.has(song.localKey));
+        return { ...playlist, songs: nextSongs, cover: nextSongs[0]?.cover ?? playlist.cover, trackCount: nextSongs.length };
+      }
+      return { ...playlist, songs: playlist.songs.map(replaceDeleted) };
+    });
+    setQueue((items) => {
+      const currentQueueSong = queueRef.current[queueIndexRef.current];
+      const currentQueueSongKey = currentQueueSong ? songKey(currentQueueSong) : "";
+      const currentLocalKey = currentQueueSong?.localKey;
+      const next = items.filter((song) => !song.localKey || !keys.has(song.localKey));
+      setQueueIndex((index) => {
+        if (!next.length) return -1;
+        const currentNextIndex = currentQueueSongKey ? next.findIndex((song) => songKey(song) === currentQueueSongKey) : -1;
+        return currentNextIndex >= 0 ? currentNextIndex : Math.min(Math.max(0, index), next.length - 1);
+      });
+      if (currentLocalKey && keys.has(currentLocalKey)) {
+        audioRef.current?.pause();
+        setPlaying(false);
+      }
+      return next;
+    });
+    setSelected((items) => {
+      const next = new Set(items);
+      targets.forEach((song) => next.delete(songKey(song)));
+      return next;
+    });
+    setToast(`已删除 ${targets.length} 首下载歌曲`);
+  }, []);
+
   const importAndOpenNeteasePlaylist = useCallback(async (playlistId: string) => {
     setPlaylistOpeningId(playlistId);
     try {
@@ -1347,6 +1421,7 @@ export default function App() {
           onFavorite={toggleFavorite}
           onDownload={downloadSong}
           onDownloadSelected={(songs) => downloadSongs(songs)}
+          onDeleteDownload={(songs) => void deleteDownloadedSongs(songs)}
           onAddToQueue={(songs) => addSongsToQueue(songs)}
           onSelect={(song) => setSelected((items) => {
             const next = new Set(items);
@@ -1822,7 +1897,7 @@ function ClockIcon() {
   return <Music />;
 }
 
-function PlaylistDetail({ playlist, saved, favoriteKeys, selected, onClose, onPlay, onFavorite, onDownload, onDownloadSelected, onAddToQueue, onSelect, onSavePlaylist, onAddSelected, onCreatePlaylistWithSelected, onRemoveSelected, onReverse }: {
+function PlaylistDetail({ playlist, saved, favoriteKeys, selected, onClose, onPlay, onFavorite, onDownload, onDownloadSelected, onDeleteDownload, onAddToQueue, onSelect, onSavePlaylist, onAddSelected, onCreatePlaylistWithSelected, onRemoveSelected, onReverse }: {
   playlist: Playlist;
   saved: boolean;
   favoriteKeys: Set<string>;
@@ -1832,6 +1907,7 @@ function PlaylistDetail({ playlist, saved, favoriteKeys, selected, onClose, onPl
   onFavorite: (song: Song) => void;
   onDownload: (song: Song) => void;
   onDownloadSelected: (songs: Song[]) => void;
+  onDeleteDownload: (songs: Song[]) => void;
   onAddToQueue: (songs: Song[]) => void;
   onSelect: (song: Song) => void;
   onSavePlaylist: () => void;
@@ -1847,6 +1923,8 @@ function PlaylistDetail({ playlist, saved, favoriteKeys, selected, onClose, onPl
     ? playlist.songs.filter((song) => [song.name, song.artist].some((value) => value.toLowerCase().includes(normalizedFilter)))
     : playlist.songs;
   const selectedSongs = visibleSongs.filter((song) => selected.has(songKey(song)));
+  const isDownloadManager = playlist.id === "download_history_preview";
+  const deletableSelectedSongs = selectedSongs.filter(isDownloadCachedSong);
   return (
     <div className="detail-backdrop">
       <section className="detail" role="dialog" aria-modal="true" aria-label={playlist.name}>
@@ -1864,13 +1942,15 @@ function PlaylistDetail({ playlist, saved, favoriteKeys, selected, onClose, onPl
           <button className="primary-button" disabled={!playlist.songs.length} onClick={() => playlist.songs[0] && onPlay(playlist.songs[0], playlist.songs)}><Play /> 播放全部</button>
           <button disabled={!visibleSongs.length} onClick={() => visibleSongs.forEach(onSelect)}><ListPlus /> 全选可见</button>
           <button disabled={!selectedSongs.length} onClick={() => onAddToQueue(selectedSongs)}><ListPlus /> 加入队列</button>
-          <button disabled={!selectedSongs.length} onClick={() => onDownloadSelected(selectedSongs)}><Download /> 下载所选</button>
-          {!saved && <button className="primary-button" onClick={onSavePlaylist}><Plus /> 收藏歌单</button>}
+          {isDownloadManager
+            ? <button className="danger-button" disabled={!deletableSelectedSongs.length} onClick={() => onDeleteDownload(deletableSelectedSongs)}><Trash2 /> 删除所选</button>
+            : <button disabled={!selectedSongs.length} onClick={() => onDownloadSelected(selectedSongs)}><Download /> 下载所选</button>}
+          {!saved && !isDownloadManager && <button className="primary-button" onClick={onSavePlaylist}><Plus /> 收藏歌单</button>}
           {saved && <button onClick={onReverse}>反转排序</button>}
           {saved && <button onClick={() => onAddSelected(selectedSongs)} disabled={!selectedSongs.length}>加入当前歌单</button>}
           {saved && <button onClick={onRemoveSelected} disabled={!selected.size}>移除所选</button>}
         </div>
-        {selectedSongs.length > 0 && (
+        {selectedSongs.length > 0 && !isDownloadManager && (
           <form className="inline-create" onSubmit={(event) => {
             event.preventDefault();
             const name = createName.trim();
@@ -1883,7 +1963,7 @@ function PlaylistDetail({ playlist, saved, favoriteKeys, selected, onClose, onPl
           </form>
         )}
         <div className="playlist-only-column">
-          <div><h3>当前歌单</h3><div className="song-list">{visibleSongs.map((song) => <SongRow key={songKey(song)} song={song} selectable selected={selected.has(songKey(song))} favorite={favoriteKeys.has(songKey(song))} onPlay={(target) => onPlay(target, playlist.songs)} onFavorite={onFavorite} onSelect={onSelect} onDownload={onDownload} />)}{!visibleSongs.length && <p className="empty-text">没有匹配歌曲</p>}</div></div>
+          <div><h3>当前歌单</h3><div className="song-list">{visibleSongs.map((song) => <SongRow key={songKey(song)} song={song} selectable selected={selected.has(songKey(song))} favorite={favoriteKeys.has(songKey(song))} onPlay={(target) => onPlay(target, playlist.songs)} onFavorite={isDownloadManager ? undefined : onFavorite} onSelect={onSelect} onDownload={isDownloadManager ? undefined : onDownload} onDelete={isDownloadManager && isDownloadCachedSong(song) ? (target) => onDeleteDownload([target]) : undefined} />)}{!visibleSongs.length && <p className="empty-text">没有匹配歌曲</p>}</div></div>
         </div>
       </section>
     </div>

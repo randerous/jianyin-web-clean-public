@@ -27,6 +27,7 @@ app.use(express.json({ limit: "512kb" }));
 	const SEARCH_VERIFY_BATCH_SIZE = 10;
 	const PLAYLIST_CANDIDATE_LIMIT = 1000;
 	const PLAYLIST_INITIAL_PLAYABLE_LIMIT = 60;
+	const PLAYLIST_FAST_OPEN_LIMIT = 20;
 	const DEFAULT_PLAY_QUALITY = "exhigh";
 	const QUALITY_FALLBACK_ORDER = ["jymaster", "sky", "jyeffect", "hires", "lossless", "exhigh", "standard"];
 const RESOLVED_URL_TTL_MS = 8 * 60 * 1000;
@@ -36,7 +37,6 @@ const playlistTimeoutFromEnv = Number(process.env.JIANYIN_PLAYLIST_TIMEOUT_MS);
 const PLAYLIST_UPSTREAM_TIMEOUT_MS = Number.isFinite(playlistTimeoutFromEnv) && playlistTimeoutFromEnv > 0
   ? Math.min(Math.trunc(playlistTimeoutFromEnv), 10_000)
   : 3_500;
-const RECOMMENDED_PLAYLIST_PREFETCH_CONCURRENCY = 2;
 const NETEASE_REFERER = "https://music.163.com/";
 const NETEASE_USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36";
 const BILI_REFERER = "https://www.bilibili.com";
@@ -52,6 +52,8 @@ const FLAC_BASE_URL = "https://flac.music.hi.cn";
 const FLAC_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 	const resolvedUrlCache = new Map();
 	const searchCache = new Map();
+	const flacSearchCache = new Map();
+	const flacSearchInFlight = new Map();
 	const playlistDetailCache = new Map();
 	const playlistDetailInFlight = new Map();
 	const biliStreamCache = new Map();
@@ -217,6 +219,8 @@ async function writeSharedState(state) {
 	  neteaseAccountCookie = cleanText(cookie);
 	  resolvedUrlCache.clear();
 	  searchCache.clear();
+	  flacSearchCache.clear();
+	  flacSearchInFlight.clear();
 	}
 
 	function setBiliCookie(cookie) {
@@ -475,6 +479,23 @@ async function writeSharedState(state) {
 	}
 
 	async function searchFlacSongs(keyword, page, limit) {
+	  const normalizedKeyword = cleanText(keyword).toLowerCase();
+	  const cacheKey = `${normalizedKeyword}:${page}:${limit}`;
+	  const cached = flacSearchCache.get(cacheKey);
+	  if (cached && cached.expiresAt > Date.now()) return { ...cached.data, cached: true };
+	  const pending = flacSearchInFlight.get(cacheKey);
+	  if (pending) return { ...await pending, cached: true };
+	  const request = searchFlacSongsUncached(keyword, page, limit).then((data) => {
+	    flacSearchCache.set(cacheKey, { data, expiresAt: Date.now() + SEARCH_CACHE_TTL_MS });
+	    return data;
+	  }).finally(() => {
+	    flacSearchInFlight.delete(cacheKey);
+	  });
+	  flacSearchInFlight.set(cacheKey, request);
+	  return { ...await request, cached: false };
+	}
+
+	async function searchFlacSongsUncached(keyword, page, limit) {
 	  const upstreamSize = 20;
 	  const targetStart = (page - 1) * limit;
 	  const targetEnd = page * limit;
@@ -510,6 +531,15 @@ async function writeSharedState(state) {
 
 	  const hasMore = songs.length >= limit && !reachedEnd;
 	  return { songs, rawCount, total, hasMore };
+	}
+
+	function prewarmFlacSearchForSongs(songs, limit = 4) {
+	  for (const song of songs.slice(0, limit)) {
+	    if (song?.source !== "flac") continue;
+	    const keyword = `${cleanText(song.name)} ${cleanText(song.artist)}`.trim();
+	    if (!keyword) continue;
+	    void searchFlacSongs(keyword, 1, 5).catch(() => null);
+	  }
 	}
 
 	function flacCacheKey(id, format, bitrate, time, sign) {
@@ -886,21 +916,7 @@ function playableRejectReason(data) {
 	  const orderedIds = (playlist.trackIds ?? []).map((item) => String(item?.id ?? "")).filter((id) => /^\d+$/.test(id));
 	  const ids = orderedIds.length ? orderedIds : tracks.map((track) => String(track.id ?? "")).filter((id) => /^\d+$/.test(id));
 	  const wantedIds = ids.slice(0, limit);
-	  const missing = wantedIds.filter((id) => !trackMap.has(id));
-	  if (missing.length && typeof netease.song_detail === "function") {
-	    for (const batch of missing.reduce((groups, id, index) => {
-	      if (index % 300 === 0) groups.push([]);
-	      groups[groups.length - 1].push(id);
-	      return groups;
-	    }, [])) {
-	      const detail = await netease.song_detail({ ids: batch.join(",") });
-	      for (const song of detail.body?.songs ?? []) {
-	        const id = String(song?.id ?? "");
-	        if (id) trackMap.set(id, song);
-	      }
-	    }
-	  }
-	  return wantedIds.map((id) => trackMap.get(id)).filter(Boolean);
+	  return wantedIds.map((id) => trackMap.get(id) ?? { id }).filter(Boolean);
 	}
 
 	function playlistTrackCount(playlist, songs) {
@@ -955,22 +971,6 @@ function playableRejectReason(data) {
 	    trackCount: Number(playlist?.trackCount ?? playlist?.songCount ?? 0) || 0,
 	    creatorNickname: cleanText(playlist?.creator?.nickname, "")
 	  };
-	}
-
-	function prefetchRecommendedPlaylistDetails(playlists, cookie = neteaseAccountCookie) {
-	  const ids = playlists.map((playlist) => cleanText(playlist?.id)).filter((id) => /^\d+$/.test(id));
-	  if (!ids.length) return;
-	  let cursor = 0;
-	  const worker = async () => {
-	    while (cursor < ids.length) {
-	      const id = ids[cursor];
-	      cursor += 1;
-	      await getPlaylistDetailWithFallback(id, cookie).catch(() => {});
-	    }
-	  };
-	  for (let i = 0; i < Math.min(RECOMMENDED_PLAYLIST_PREFETCH_CONCURRENCY, ids.length); i += 1) {
-	    void worker();
-	  }
 	}
 
 	async function getRecommendedPlaylists(limit, offset = 0) {
@@ -1062,7 +1062,7 @@ function playableRejectReason(data) {
 	      );
 	      playlist.tracks = tracks.body?.songs ?? playlist.tracks ?? [];
 	    } catch {
-	      // playlist_detail still contains trackIds; expandPlaylistTracks can try song_detail.
+	      // Keep the endpoint quick; trackIds are enough to build first-screen placeholders.
 	    }
 	  }
 	    playlistDetailCache.set(cacheKey, { playlist, expiresAt: Date.now() + PLAYLIST_DETAIL_CACHE_TTL_MS });
@@ -1437,16 +1437,17 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 
   try {
 	    const quality = normalizeQuality(req.query.quality);
-	    const playlist = await getPlaylistDetailWithFallback(id, neteaseAccountCookie, PLAYLIST_INITIAL_PLAYABLE_LIMIT);
+	    const playlist = await getPlaylistDetailWithFallback(id, neteaseAccountCookie, PLAYLIST_FAST_OPEN_LIMIT);
     if (!playlist) {
       res.status(404).json({ error: "playlist_not_found", message: "没有找到这个歌单" });
       return;
     }
-	    const mapped = await mapVerifiedPlaylist(playlist, quality, neteaseAccountCookie, PLAYLIST_INITIAL_PLAYABLE_LIMIT);
+	    const mapped = await mapVerifiedPlaylist(playlist, quality, neteaseAccountCookie, PLAYLIST_FAST_OPEN_LIMIT);
     if (!mapped.songs.length) {
       res.status(404).json({ error: "playlist_empty", message: "这个公开歌单没有可完整播放歌曲" });
       return;
     }
+	    prewarmFlacSearchForSongs(mapped.songs, 4);
 	    res.json({ playlist: mapped, quality });
 	  } catch (error) {
 	    res.status(502).json({ error: "netease_playlist_failed", message: errorMessage(error) });
@@ -1459,7 +1460,6 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 	    const refresh = parseOffset(req.query.refresh, 0, 99);
 	    const offset = parseOffset(req.query.offset, refresh ? (refresh * limit) % 300 : 0, 300);
 	    const recommendedPlaylists = await getRecommendedPlaylists(limit, offset);
-	    prefetchRecommendedPlaylistDetails(recommendedPlaylists);
 	    res.json({ radarSongs: [], hotSongs: [], recommendedPlaylists, quality: normalizeQuality(req.query.quality), refresh, offset });
 	  } catch (error) {
 	    res.status(502).json({ error: "netease_home_failed", message: errorMessage(error) });
@@ -1510,8 +1510,8 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 	  try {
 	    const limit = parseLimit(req.query.limit, 30, 30);
 	    const page = parsePage(req.query.page);
-	    const { songs, rawCount, total, hasMore } = await searchFlacSongs(keyword, page, limit);
-	    res.json({ songs, filtered: Math.max(0, rawCount - songs.length), page, limit, total, hasMore });
+	    const { songs, rawCount, total, hasMore, cached } = await searchFlacSongs(keyword, page, limit);
+	    res.json({ songs, filtered: Math.max(0, rawCount - songs.length), page, limit, total, hasMore, cached });
 	  } catch (error) {
 	    res.status(502).json({ error: "flac_search_failed", message: errorMessage(error) });
 	  }

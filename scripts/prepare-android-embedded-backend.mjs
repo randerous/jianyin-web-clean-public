@@ -85,11 +85,36 @@ function findInstalledPackage(packageName, fromDir, optional = false) {
   throw new Error(`Local package not found: ${packageName} from ${fromDir}`);
 }
 
+function isAppleDoublePath(path) {
+  return path.split(/[\\/]/).some((part) => part.startsWith("._"));
+}
+
+function copyTreeWithoutAppleDouble(source, target) {
+  cpSync(source, target, {
+    recursive: true,
+    force: true,
+    filter: (entry) => !isAppleDoublePath(entry)
+  });
+}
+
+function removeAppleDoubleFiles(path) {
+  if (!existsSync(path)) return;
+  for (const name of readdirSync(path)) {
+    const child = resolve(path, name);
+    if (name.startsWith("._")) {
+      rmSync(child, { recursive: true, force: true });
+      continue;
+    }
+    if (statSync(child).isDirectory()) removeAppleDoubleFiles(child);
+  }
+}
+
 function copyPackageWithoutNestedNodeModules(source, target) {
   cpSync(source, target, {
     recursive: true,
     force: true,
     filter: (entry) => {
+      if (isAppleDoublePath(entry)) return false;
       const rel = relative(source, entry);
       if (!rel) return true;
       return !rel.split(sep).includes("node_modules");
@@ -372,11 +397,11 @@ function patchGeneratedGradle() {
 
   if (existsSync(cordovaNativeLibs)) {
     resetDir(cordovaNativeLibsBuildPath, cordovaRoot);
-    cpSync(cordovaNativeLibs, cordovaNativeLibsBuildPath, { recursive: true });
+    copyTreeWithoutAppleDouble(cordovaNativeLibs, cordovaNativeLibsBuildPath);
     resetDir(resolve(cordovaNativeLibs, "libnode"), cordovaNativeLibs);
     resetDir(resolve(cordovaNativeLibsBuildPath, "libnode"), cordovaNativeLibsBuildPath);
-    cpSync(existsSync(nodeMobile16kLibnode) ? nodeMobile16kLibnode : nodeMobileLibnode, resolve(cordovaNativeLibs, "libnode"), { recursive: true });
-    cpSync(existsSync(nodeMobile16kLibnode) ? nodeMobile16kLibnode : nodeMobileLibnode, resolve(cordovaNativeLibsBuildPath, "libnode"), { recursive: true });
+    copyTreeWithoutAppleDouble(existsSync(nodeMobile16kLibnode) ? nodeMobile16kLibnode : nodeMobileLibnode, resolve(cordovaNativeLibs, "libnode"));
+    copyTreeWithoutAppleDouble(existsSync(nodeMobile16kLibnode) ? nodeMobile16kLibnode : nodeMobileLibnode, resolve(cordovaNativeLibsBuildPath, "libnode"));
     for (const base of [resolve(cordovaNativeLibs, "libnode"), resolve(cordovaNativeLibsBuildPath, "libnode")]) {
       for (const abiDirName of readdirSync(resolve(base, "bin"))) {
         if (!androidAbis.includes(abiDirName)) {
@@ -435,10 +460,10 @@ function prepareAssets() {
   resetDir(nodeProject, cordovaAssets);
   resetDir(builtinAssets, cordovaAssets);
 
-  cpSync(pluginAssets, builtinAssets, { recursive: true });
+  copyTreeWithoutAppleDouble(pluginAssets, builtinAssets);
   cpSync(resolve(root, "server.mjs"), resolve(nodeProject, "server.mjs"));
-  cpSync(resolve(root, "dist"), resolve(nodeProject, "dist"), { recursive: true });
-  cpSync(resolve(runtimeRoot, "node_modules"), resolve(nodeProject, "node_modules"), { recursive: true });
+  copyTreeWithoutAppleDouble(resolve(root, "dist"), resolve(nodeProject, "dist"));
+  copyTreeWithoutAppleDouble(resolve(runtimeRoot, "node_modules"), resolve(nodeProject, "node_modules"));
   cpSync(resolve(runtimeRoot, "package-lock.json"), resolve(nodeProject, "package-lock.json"));
   cpSync(resolve(runtimeRoot, "package.json"), resolve(nodeProject, "package.json"));
   writeNodeEntrypoint();
@@ -447,6 +472,8 @@ function prepareAssets() {
   writeFileSync(resolve(cordovaAssets, "www", "NODEJS_MOBILE_BUILD_NATIVE_MODULES_VALUE.txt"), "0\n");
   collectAssetLists();
   writeBootstrapPage();
+  removeAppleDoubleFiles(cordovaAssets);
+  removeAppleDoubleFiles(appPublic);
 }
 
 installRuntimeDependencies();

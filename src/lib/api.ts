@@ -163,6 +163,7 @@ function flacSongId(song: Song) {
 }
 
 const FLAC_PREWARM_TTL_MS = 7 * 60 * 1000;
+const FLAC_PREWARM_CONCURRENCY = 2;
 const flacPrewarmInFlight = new Map<string, Promise<Song | null>>();
 const flacPrewarmCache = new Map<string, { song: Song; at: number }>();
 
@@ -236,37 +237,59 @@ function freshPrewarmedSong(song: Song) {
 }
 
 export async function prewarmFlacSongs(songs: Song[], limit = 4, onResolved?: (original: Song, resolved: Song) => void) {
-  const targets: Song[] = [];
+  const targets: {
+    song: Song;
+    key: string;
+    resolve: (song: Song | null) => void;
+  }[] = [];
   const seen = new Set<string>();
-  for (const song of songs) {
+  for (const song of songs.slice(0, limit)) {
     if (song.source !== "flac" || song.localKey) continue;
     const key = flacPrewarmKey(song);
     const cached = flacPrewarmCache.get(key);
     if (seen.has(key) || flacPrewarmInFlight.has(key) || (cached && Date.now() - cached.at < FLAC_PREWARM_TTL_MS)) continue;
     seen.add(key);
-    targets.push(song);
-    if (targets.length >= limit) break;
+    let resolveTask: (song: Song | null) => void = () => {};
+    const task = new Promise<Song | null>((resolve) => {
+      resolveTask = resolve;
+    });
+    flacPrewarmInFlight.set(key, task);
+    targets.push({ song, key, resolve: resolveTask });
   }
 
-  await Promise.all(targets.map((song) => {
-    const key = flacPrewarmKey(song);
-    const job = prewarmResolvedFlacSong(song)
-      .then((resolved) => {
-        flacPrewarmCache.set(key, { song: resolved, at: Date.now() });
-        onResolved?.(song, resolved);
-        return resolved;
-      })
-      .catch(() => null)
-      .finally(() => {
-        flacPrewarmInFlight.delete(key);
-      });
-    flacPrewarmInFlight.set(key, job);
-    return job;
-  }));
+  let cursor = 0;
+  const runNext = async (): Promise<void> => {
+    const task = targets[cursor];
+    cursor += 1;
+    if (!task) return;
+    try {
+      const resolved = await prewarmResolvedFlacSong(task.song);
+      const now = Date.now();
+      flacPrewarmCache.set(task.key, { song: resolved, at: now });
+      flacPrewarmCache.set(flacPrewarmKey(resolved), { song: resolved, at: now });
+      onResolved?.(task.song, resolved);
+      task.resolve(resolved);
+    } catch {
+      task.resolve(null);
+    } finally {
+      flacPrewarmInFlight.delete(task.key);
+    }
+    await runNext();
+  };
+
+  await Promise.all(Array.from({ length: Math.min(FLAC_PREWARM_CONCURRENCY, targets.length) }, () => runNext()));
 }
 
 async function prewarmResolvedFlacSong(song: Song) {
-  if (/^\d+$/.test(flacSongId(song))) return fetchResolvedFlacSong(song);
+  if (/^\d+$/.test(flacSongId(song))) {
+    try {
+      return await fetchResolvedFlacSong(song);
+    } catch {
+      const refreshed = await refreshFlacSong(song);
+      if (refreshed) return fetchResolvedFlacSong(refreshed);
+      throw new Error("测试源歌曲预热失败");
+    }
+  }
   const refreshed = await refreshFlacSong(song);
   if (!refreshed) throw new Error("测试源歌曲预热失败");
   return fetchResolvedFlacSong(refreshed);

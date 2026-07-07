@@ -7,6 +7,7 @@ const externalServer = process.env.JIANYIN_E2E_EXTERNAL_SERVER === "1";
 export default defineConfig({
   testDir: "./tests",
   testMatch: "**/*.e2e.ts",
+  testIgnore: "**/._*",
   timeout: 30_000,
   expect: { timeout: 6_000 },
   reporter: [["list"]],
