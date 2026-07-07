@@ -536,7 +536,7 @@ export default function App() {
     }
   }, [currentSong, playing]);
 
-  const resolvePlayable = useCallback(async (song: Song, options: { refresh?: boolean } = {}): Promise<Song> => {
+  const resolvePlayable = useCallback(async (song: Song, options: { refresh?: boolean; fallbackToMp3?: boolean } = {}): Promise<Song> => {
     if (song.localKey) {
       const blob = await loadLocalFile(song.localKey);
       if (!blob) throw new Error("本地文件不在当前浏览器，请重新导入");
@@ -545,14 +545,14 @@ export default function App() {
     if (!options.refresh && verifiedUrlMatchesQuality(song, playQuality)) return song;
     if (song.source === "netease") return resolveNeteaseSong(song, playQuality);
     if (song.source === "bili") return resolveBiliSong(song);
-    if (song.source === "flac") return resolveFlacSong(song, { refresh: options.refresh ?? false });
+    if (song.source === "flac") return resolveFlacSong(song, { refresh: options.refresh ?? false, fallbackToMp3: options.fallbackToMp3 ?? false });
     if (song.url && !song.url.startsWith("local-file:")) return song;
     throw new Error("当前歌曲没有可播放链接");
   }, [playQuality]);
 
-  const playSong = useCallback(async (song: Song, source?: Song[], options: { quiet?: boolean; startAt?: number; refresh?: boolean } = {}) => {
+  const playSong = useCallback(async (song: Song, source?: Song[], options: { quiet?: boolean; startAt?: number; refresh?: boolean; fallbackToMp3?: boolean } = {}) => {
     try {
-      const playable = await resolvePlayable(song, { refresh: options.refresh });
+      const playable = await resolvePlayable(song, { refresh: options.refresh, fallbackToMp3: options.fallbackToMp3 });
       const originalKey = songKey(song);
       const playableKey = songKey(playable);
       const replaceResolved = (item: Song) => songKey(item) === originalKey ? playable : item;
@@ -613,7 +613,8 @@ export default function App() {
     if (audioRetryRef.current?.key === key && Math.abs(audioRetryRef.current.at - retryAt) <= 1) return;
     audioRetryRef.current = { key, at: retryAt };
     const source = attempt?.source?.length ? attempt.source : queueRef.current;
-    const ok = await playSong(song, source, { quiet: true, startAt: resumeAt, refresh: true });
+    const fallbackToMp3 = song.audioType === "flac" || song.url.includes("format=flac");
+    const ok = await playSong(song, source, { quiet: true, startAt: resumeAt, refresh: true, fallbackToMp3 });
     if (!ok) {
       audioRetryRef.current = null;
       setPlaying(false);
@@ -1770,7 +1771,7 @@ function SearchScreen(props: {
         <input name="keyword" value={props.query} onChange={(event) => props.setQuery(event.target.value)} placeholder="搜索音乐/歌手" />
         <button className="primary-button" type="submit">{props.searching ? "搜索中" : "搜索"}</button>
       </form>
-      <p className="network-line">{props.proxyOnline ? "测试源接口已连接；FLAC/320k 自动优先。" : "测试源暂不可用，请稍后再试。"}</p>
+      <p className="network-line">{props.proxyOnline ? "测试源接口已连接；默认优先 FLAC，失败自动回退 320k。" : "测试源暂不可用，请稍后再试。"}</p>
       <div className="chips">
         {recommendedKeywords.map((item) => <button key={item} onClick={() => { props.setQuery(item); props.onSearch(item); }}>{item}</button>)}
         {props.history.map((item) => <button key={`h-${item}`} onClick={() => { props.setQuery(item); props.onSearch(item); }}>{item}</button>)}

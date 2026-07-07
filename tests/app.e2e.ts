@@ -714,6 +714,22 @@ test("flac mocked search resolves url and lyrics", async ({ page }) => {
       })
     });
   });
+  await page.route("**/api/flac/song/12345**", async (route) => {
+    const url = new URL(route.request().url());
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        url: `/api/flac/stream/12345?format=flac&bitrate=2000&time=${url.searchParams.get("time")}&sign=${url.searchParams.get("sign")}`,
+        durationMs: 65000,
+        verifiedPlayable: true,
+        br: 2000000,
+        level: "flac",
+        type: "flac",
+        audioType: "flac",
+        quality: "flac"
+      })
+    });
+  });
   await page.route("**/api/flac/stream/12345**", async (route) => {
     await route.fulfill({ path: fullSongFile, headers: { "content-type": "audio/wav" } });
   });
@@ -731,6 +747,7 @@ test("flac mocked search resolves url and lyrics", async ({ page }) => {
   await expect(page.locator(".now-playing")).toContainText("MockFullSong");
   await expectAudioPlaying(page);
   await expectAudioLongerThan(page, 60);
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.src)).toContain("format=flac");
   const player = await openPlayer(page);
   await expect(player).toContainText("mock lyric line");
   await expect(page.getByText("TrialOnly")).toHaveCount(0);
@@ -959,6 +976,22 @@ test("download manager deletes cached songs", async ({ page }) => {
         limit: 30,
         total: 1,
         hasMore: false
+      })
+    });
+  });
+  await page.route("**/api/flac/song/777**", async (route) => {
+    const url = new URL(route.request().url());
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        url: `/api/flac/stream/777?format=flac&bitrate=2000&time=${url.searchParams.get("time")}&sign=${url.searchParams.get("sign")}`,
+        durationMs: 65000,
+        verifiedPlayable: true,
+        br: 2000000,
+        level: "flac",
+        type: "flac",
+        audioType: "flac",
+        quality: "flac"
       })
     });
   });
@@ -1402,6 +1435,70 @@ test("flac explicit search resolves and plays through flac stream endpoint", asy
   await expectAudioLongerThan(page, 60);
 });
 
+test("legacy cached 320k flac result refreshes to FLAC before playback", async ({ page }) => {
+  const songRequests: string[] = [];
+  await page.route("**/api/flac/search**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        songs: [{
+          id: "flac_4242",
+          name: "Legacy Cached Song",
+          artist: "FLAC Artist",
+          pic: "/assets/icon.png",
+          cover: "/assets/icon.png",
+          url: "/api/flac/stream/4242?format=mp3&bitrate=320&time=told&sign=sold",
+          durationMs: 65000,
+          verifiedPlayable: true,
+          source: "flac",
+          remotePlayable: true,
+          br: 320000,
+          level: "320k",
+          type: "mp3",
+          audioType: "mp3",
+          quality: "320k",
+          time: "told",
+          sign: "sold"
+        }],
+        page: 1,
+        limit: 30,
+        total: 1,
+        hasMore: false
+      })
+    });
+  });
+  await page.route("**/api/flac/song/4242**", async (route) => {
+    const url = new URL(route.request().url());
+    songRequests.push(url.searchParams.toString());
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        url: `/api/flac/stream/4242?format=flac&bitrate=2000&time=${url.searchParams.get("time")}&sign=${url.searchParams.get("sign")}`,
+        durationMs: 65000,
+        verifiedPlayable: true,
+        br: 2000000,
+        level: "flac",
+        type: "flac",
+        audioType: "flac",
+        quality: "flac"
+      })
+    });
+  });
+  await page.route("**/api/flac/stream/4242**", async (route) => {
+    await route.fulfill({ path: fullSongFile, headers: { "content-type": "audio/wav" } });
+  });
+
+  await page.getByRole("navigation").getByRole("button", { name: "搜索" }).click();
+  await page.getByPlaceholder("搜索音乐/歌手").fill("Legacy Cached Song");
+  await page.keyboard.press("Enter");
+  await page.getByRole("button", { name: "Legacy Cached Song FLAC Artist · 测试源" }).click();
+
+  await expect(page.locator(".now-playing")).toContainText("Legacy Cached Song");
+  await expectAudioPlaying(page);
+  expect(songRequests).toContain("format=flac&bitrate=2000&time=told&sign=sold");
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.src)).toContain("format=flac");
+});
+
 test("flac test source searches, filters, resolves, and plays full songs", async ({ page }) => {
   const searchRequests: URLSearchParams[] = [];
   const songRequests: string[] = [];
@@ -1498,7 +1595,7 @@ test("flac test source searches, filters, resolves, and plays full songs", async
   });
 
   await page.locator("nav button").nth(1).click();
-  await expect(page.locator(".network-line")).toContainText("FLAC/320k");
+  await expect(page.locator(".network-line")).toContainText("默认优先 FLAC");
   await page.locator('.search-box input[name="keyword"]').fill("September Earth Wind Fire");
   await page.keyboard.press("Enter");
   await expect(page.locator(".song-row", { hasText: "September" })).toBeVisible();
