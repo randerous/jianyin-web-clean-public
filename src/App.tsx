@@ -1281,8 +1281,14 @@ export default function App() {
     };
   }, [accountOpen, activePlaylist, activePlaylistSaved, createOpen, floatingLyric, neteaseOpen, playerOpen, settingsOpen, tab]);
 
+  const shellClassName = [
+    "app-shell",
+    currentSong ? "has-live-player" : "",
+    tab === "search" && Boolean(query.trim()) && (searchResults.length > 0 || searchPageInfo.page > 1 || searchPageInfo.hasMore) ? "has-search-pagination" : ""
+  ].filter(Boolean).join(" ");
+
   return (
-    <div className="app-shell">
+    <div className={shellClassName}>
       <audio
         ref={audioRef}
         onTimeUpdate={(event) => {
