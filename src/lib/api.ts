@@ -162,6 +162,25 @@ function flacSongId(song: Song) {
   return song.id.replace(/^flac_/, "");
 }
 
+function flacStreamFormat(song: Song) {
+  if (!song.url) return "";
+  try {
+    return new URL(song.url, window.location.href).searchParams.get("format")?.toLowerCase() ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function canReuseVerifiedFlacSong(song: Song, options: { fallbackToMp3?: boolean } = {}) {
+  if (!song.verifiedPlayable || !song.url || song.url.startsWith("local-file:") || !song.url.includes("/api/flac/stream/")) return false;
+  const format = flacStreamFormat(song);
+  const audioType = song.audioType?.toLowerCase() ?? "";
+  const quality = song.quality?.toLowerCase() ?? "";
+  if (options.fallbackToMp3) return format === "mp3" || audioType === "mp3" || quality === "320k";
+  if (!/^\d+$/.test(flacSongId(song))) return true;
+  return format === "flac" || audioType === "flac" || quality === "flac";
+}
+
 const FLAC_PREWARM_TTL_MS = 7 * 60 * 1000;
 const FLAC_PREWARM_CONCURRENCY = 2;
 const flacPrewarmInFlight = new Map<string, Promise<Song | null>>();
@@ -203,9 +222,16 @@ async function refreshFlacSong(song: Song) {
   return null;
 }
 
-async function fetchResolvedFlacSong(song: Song) {
+async function fetchResolvedFlacSong(song: Song, options: { fallbackToMp3?: boolean } = {}) {
   const id = flacSongId(song);
   const params = flacParams(song);
+  if (options.fallbackToMp3) {
+    params.set("format", "mp3");
+    params.set("bitrate", "320");
+  } else if (/^\d+$/.test(id) && params.get("format")?.toLowerCase() !== "flac") {
+    params.set("format", "flac");
+    params.set("bitrate", "2000");
+  }
   const suffix = params.size ? `?${params.toString()}` : "";
   const data = await fetchJson<{ url: string; durationMs?: number | null; verifiedPlayable?: boolean; br?: number | null; level?: string | null; audioType?: string | null; type?: string | null; quality?: string }>(`/api/flac/song/${encodeURIComponent(id)}${suffix}`);
   const resolvedUrl = normalizeRemoteUrl(data.url);
@@ -230,9 +256,10 @@ function flacPrewarmKey(song: Song) {
   return `${song.name.trim().toLowerCase()}::${song.artist.trim().toLowerCase()}`;
 }
 
-function freshPrewarmedSong(song: Song) {
+function freshPrewarmedSong(song: Song, options: { fallbackToMp3?: boolean } = {}) {
   const cached = flacPrewarmCache.get(flacPrewarmKey(song));
   if (!cached || Date.now() - cached.at >= FLAC_PREWARM_TTL_MS) return null;
+  if (!canReuseVerifiedFlacSong(cached.song, options)) return null;
   return cached.song;
 }
 
@@ -339,33 +366,33 @@ export async function resolveBiliSong(song: Song) {
   };
 }
 
-export async function resolveFlacSong(song: Song, options: { refresh?: boolean } = {}) {
-  if (!options.refresh && song.verifiedPlayable && song.url && !song.url.startsWith("local-file:") && song.url.includes("/api/flac/stream/")) return song;
+export async function resolveFlacSong(song: Song, options: { refresh?: boolean; fallbackToMp3?: boolean } = {}) {
+  if (!options.refresh && canReuseVerifiedFlacSong(song, options)) return song;
   if (!options.refresh) {
-    const prewarmed = freshPrewarmedSong(song);
+    const prewarmed = freshPrewarmedSong(song, options);
     if (prewarmed) return prewarmed;
     const inFlight = flacPrewarmInFlight.get(flacPrewarmKey(song));
     if (inFlight) {
       const resolved = await inFlight;
-      if (resolved) return resolved;
+      if (resolved && canReuseVerifiedFlacSong(resolved, options)) return resolved;
     }
   }
   if (options.refresh) {
     const refreshed = await refreshFlacSong(song);
-    if (refreshed) return fetchResolvedFlacSong(refreshed);
+    if (refreshed) return fetchResolvedFlacSong(refreshed, { fallbackToMp3: options.fallbackToMp3 });
   }
   if (!/^\d+$/.test(flacSongId(song))) {
     const refreshed = await refreshFlacSong(song);
-    if (refreshed) return fetchResolvedFlacSong(refreshed);
+    if (refreshed) return fetchResolvedFlacSong(refreshed, { fallbackToMp3: options.fallbackToMp3 });
     throw new Error("测试源歌曲缺少真实 ID");
   }
   try {
     const prewarmed = await (flacPrewarmInFlight.get(flacPrewarmKey(song)) ?? Promise.resolve(null));
-    if (prewarmed) return prewarmed;
-    return await fetchResolvedFlacSong(song);
+    if (prewarmed && canReuseVerifiedFlacSong(prewarmed, options)) return prewarmed;
+    return await fetchResolvedFlacSong(song, { fallbackToMp3: options.fallbackToMp3 });
   } catch (error) {
     const refreshed = await refreshFlacSong(song).catch(() => null);
-    if (refreshed) return fetchResolvedFlacSong(refreshed);
+    if (refreshed) return fetchResolvedFlacSong(refreshed, { fallbackToMp3: options.fallbackToMp3 });
     throw error;
   }
 }

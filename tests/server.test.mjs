@@ -475,7 +475,7 @@ test("flac test source searches full songs and proxies ranged streams", async ()
   assert.equal(await stream.text(), "0123456789");
 });
 
-test("flac test source prefers Android-decodable 320k over flac when both exist", async () => {
+test("flac test source prefers highest FLAC quality when both FLAC and 320k exist", async () => {
   const fetchImpl = async (url, init = {}) => {
     const textUrl = String(url);
     if (textUrl === "https://flac.music.hi.cn/") {
@@ -511,10 +511,93 @@ test("flac test source prefers Android-decodable 320k over flac when both exist"
   const search = await getJson(`${baseUrl}/api/flac/search?keyword=android&limit=1`);
 
   assert.equal(search.response.status, 200);
-  assert.equal(search.body.songs[0].audioType, "mp3");
-  assert.equal(search.body.songs[0].quality, "320k");
-  assert.match(search.body.songs[0].url, /format=mp3/);
-  assert.match(search.body.songs[0].url, /bitrate=320/);
+  assert.equal(search.body.songs[0].audioType, "flac");
+  assert.equal(search.body.songs[0].quality, "flac");
+  assert.match(search.body.songs[0].url, /format=flac/);
+  assert.match(search.body.songs[0].url, /bitrate=2000/);
+});
+
+test("flac song resolve falls back to 320k when FLAC URL is unavailable", async () => {
+  const requests = [];
+  const fetchImpl = async (url, init = {}) => {
+    const textUrl = String(url);
+    if (textUrl === "https://flac.music.hi.cn/") {
+      return new Response("", {
+        status: 200,
+        headers: { "set-cookie": "sl-session=mock; Path=/; sl_jwt_session=mockjwt; Path=/" }
+      });
+    }
+    if (textUrl.includes("/ajax.php?act=getUrl")) {
+      const body = String(init.body);
+      requests.push(new URLSearchParams(body));
+      if (body.includes("format=flac")) {
+        return Response.json({ code: 0, data: { url: "", format: "flac", bitrate: 2000, duration: 213 } });
+      }
+      if (body.includes("format=mp3") && body.includes("bitrate=320")) {
+        return Response.json({ code: 0, data: { url: "https://audio.test/full.mp3", format: "mp3", bitrate: 320, duration: 213 } });
+      }
+    }
+    throw new Error(`unexpected fetch ${textUrl}`);
+  };
+  const baseUrl = await startTestServer({ fetchImpl });
+
+  const result = await getJson(`${baseUrl}/api/flac/song/101?format=flac&bitrate=2000&time=t101&sign=s101`);
+
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.audioType, "mp3");
+  assert.equal(result.body.quality, "320k");
+  assert.match(result.body.url, /format=mp3/);
+  assert.match(result.body.url, /bitrate=320/);
+  assert.deepEqual(requests.map((params) => [params.get("format"), params.get("bitrate")]), [["flac", "2000"], ["mp3", "320"]]);
+});
+
+test("flac stream falls back to 320k when FLAC upstream audio fails", async () => {
+  const getUrlRequests = [];
+  const audioRequests = [];
+  const fetchImpl = async (url, init = {}) => {
+    const textUrl = String(url);
+    if (textUrl === "https://flac.music.hi.cn/") {
+      return new Response("", {
+        status: 200,
+        headers: { "set-cookie": "sl-session=mock; Path=/; sl_jwt_session=mockjwt; Path=/" }
+      });
+    }
+    if (textUrl.includes("/ajax.php?act=getUrl")) {
+      const body = String(init.body);
+      const params = new URLSearchParams(body);
+      getUrlRequests.push([params.get("format"), params.get("bitrate")]);
+      const isMp3 = params.get("format") === "mp3";
+      return Response.json({
+        code: 0,
+        data: {
+          url: isMp3 ? "https://audio.test/full.mp3" : "https://audio.test/full.flac",
+          format: isMp3 ? "mp3" : "flac",
+          bitrate: isMp3 ? 320 : 2000,
+          duration: 213
+        }
+      });
+    }
+    if (textUrl === "https://audio.test/full.flac") {
+      audioRequests.push("flac");
+      return new Response("bad", { status: 502 });
+    }
+    if (textUrl === "https://audio.test/full.mp3") {
+      audioRequests.push("mp3");
+      return new Response("0123456789", { status: 206, headers: { "content-type": "audio/mpeg" } });
+    }
+    throw new Error(`unexpected fetch ${textUrl}`);
+  };
+  const baseUrl = await startTestServer({ fetchImpl });
+
+  const stream = await fetch(`${baseUrl}/api/flac/stream/101?format=flac&bitrate=2000&time=t101&sign=s101`, {
+    headers: { Range: "bytes=0-9" }
+  });
+
+  assert.equal(stream.status, 206);
+  assert.equal(stream.headers.get("content-type"), "audio/mpeg");
+  assert.equal(await stream.text(), "0123456789");
+  assert.deepEqual(getUrlRequests, [["flac", "2000"], ["flac", "2000"], ["mp3", "320"]]);
+  assert.deepEqual(audioRequests, ["flac", "flac", "mp3"]);
 });
 
 test("flac test source builds app pages from upstream 20-song pages", async () => {

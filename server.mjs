@@ -442,10 +442,14 @@ async function writeSharedState(state) {
 
 	function chooseFlacQuality(item) {
 	  const formats = Array.isArray(item?.minfo) ? item.minfo : [];
-	  return formats.find((format) => cleanText(format.bitrate) === "320" && cleanText(format.format).toLowerCase() !== "flac")
-	    ?? formats.find((format) => cleanText(format.bitrate) === "320")
-	    ?? formats.find((format) => cleanText(format.format).toLowerCase() === "mp3")
-	    ?? formats.find((format) => cleanText(format.format).toLowerCase() === "flac")
+	  const score = (format) => {
+	    const kind = cleanText(format?.format).toLowerCase();
+	    const bitrate = Number(format?.bitrate ?? 0) || 0;
+	    if (kind === "flac") return 1_000_000 + bitrate;
+	    if (kind && kind !== "mp3") return 500_000 + bitrate;
+	    return bitrate;
+	  };
+	  return [...formats].sort((a, b) => score(b) - score(a))[0]
 	    ?? formats[0]
 	    ?? { format: "mp3", bitrate: "320", level: "p" };
 	}
@@ -546,6 +550,13 @@ async function writeSharedState(state) {
 	  return `${cleanText(id).replace(/^flac_/, "")}:${cleanText(format, "flac").toLowerCase()}:${cleanText(bitrate, cleanText(format).toLowerCase() === "flac" ? "2000" : "320")}:${cleanText(time)}:${cleanText(sign)}`;
 	}
 
+	function flacFallbackQuality(format, bitrate) {
+	  const cleanFormat = cleanText(format, "flac").toLowerCase();
+	  const cleanBitrate = cleanText(bitrate, cleanFormat === "flac" ? "2000" : "320");
+	  if (cleanFormat === "mp3" && cleanBitrate === "320") return null;
+	  return { format: "mp3", bitrate: "320" };
+	}
+
 	async function resolveFlacUrl(id, format, bitrate, time, sign, options = {}) {
 	  const cleanId = cleanText(id).replace(/^flac_/, "");
 	  const cleanFormat = cleanText(format, "flac").toLowerCase();
@@ -566,17 +577,73 @@ async function writeSharedState(state) {
 	  const url = cleanText(data.url);
 	  const durationMs = Number(data.duration ?? 0) * 1000;
 	  if (!url || durationMs <= MIN_FULL_SONG_MS) throw new Error("测试源没有返回完整可播放地址");
+	  const resolvedFormat = cleanText(data.format, cleanFormat).toLowerCase();
+	  const resolvedBitrate = String(Number(data.bitrate ?? cleanBitrate) || cleanBitrate);
 	  const resolved = {
 	    url,
 	    durationMs,
-	    br: (Number(data.bitrate ?? cleanBitrate) || 0) * 1000,
-	    level: cleanFormat === "flac" ? "flac" : `${data.bitrate ?? cleanBitrate}k`,
-	    audioType: cleanText(data.format, cleanFormat),
-	    type: cleanText(data.format, cleanFormat),
-	    quality: cleanFormat === "flac" ? "flac" : `${data.bitrate ?? cleanBitrate}k`
+	    br: Number(resolvedBitrate) * 1000,
+	    level: resolvedFormat === "flac" ? "flac" : `${resolvedBitrate}k`,
+	    audioType: resolvedFormat,
+	    type: resolvedFormat,
+	    quality: resolvedFormat === "flac" ? "flac" : `${resolvedBitrate}k`,
+	    format: resolvedFormat,
+	    bitrate: resolvedBitrate
 	  };
 	  flacStreamCache.set(cacheKey, { data: resolved, expiresAt: Date.now() + RESOLVED_URL_TTL_MS });
 	  return resolved;
+	}
+
+	async function resolveFlacUrlWithFallback(id, format, bitrate, time, sign, options = {}) {
+	  try {
+	    return await resolveFlacUrl(id, format, bitrate, time, sign, options);
+	  } catch (error) {
+	    const fallback = flacFallbackQuality(format, bitrate);
+	    if (!fallback) throw error;
+	    try {
+	      const data = await resolveFlacUrl(id, fallback.format, fallback.bitrate, time, sign, { ...options, forceRefresh: true });
+	      return { ...data, fallbackFrom: { format: cleanText(format, "flac").toLowerCase(), bitrate: cleanText(bitrate) } };
+	    } catch {
+	      throw error;
+	    }
+	  }
+	}
+
+	async function fetchFlacAudio(data, range) {
+	  return fetchImpl(data.url, {
+	    headers: {
+	      "User-Agent": FLAC_USER_AGENT,
+	      Referer: FLAC_BASE_URL,
+	      Accept: "audio/*,*/*;q=0.8",
+	      ...(range ? { Range: range } : {})
+	    },
+	    redirect: "follow"
+	  });
+	}
+
+	async function resolveFlacStreamWithFallback(id, format, bitrate, time, sign, range) {
+	  const attempts = [
+	    { format, bitrate, forceRefresh: false },
+	    { format, bitrate, forceRefresh: true },
+	    flacFallbackQuality(format, bitrate)
+	      ? { ...flacFallbackQuality(format, bitrate), forceRefresh: true, fallback: true }
+	      : null
+	  ].filter(Boolean);
+	  let lastError = null;
+	  for (const attempt of attempts) {
+	    try {
+	      const data = await resolveFlacUrl(id, attempt.format, attempt.bitrate, time, sign, { forceRefresh: attempt.forceRefresh });
+	      const upstream = await fetchFlacAudio(data, range);
+	      if (upstream.ok || upstream.status === 206) {
+	        return { data: attempt.fallback ? { ...data, fallbackFrom: { format, bitrate } } : data, upstream };
+	      }
+	      flacStreamCache.delete(flacCacheKey(id, attempt.format, attempt.bitrate, time, sign));
+	      lastError = new Error(`upstream status ${upstream.status}`);
+	    } catch (error) {
+	      lastError = error;
+	    }
+	  }
+	  throw lastError ?? new Error("test source audio upstream failed");
 	}
 
 	async function getBiliWbiKeys() {
@@ -1526,16 +1593,19 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 	  try {
 	    const format = cleanText(req.query.format, "flac");
 	    const bitrate = cleanText(req.query.bitrate, format === "flac" ? "2000" : "320");
-	    const data = await resolveFlacUrl(id, format, bitrate, req.query.time, req.query.sign);
+	    const data = await resolveFlacUrlWithFallback(id, format, bitrate, req.query.time, req.query.sign);
+	    const resolvedFormat = cleanText(data.format, format);
+	    const resolvedBitrate = cleanText(data.bitrate, bitrate);
 	    res.json({
-	      url: `/api/flac/stream/${encodeURIComponent(id)}?format=${encodeURIComponent(format)}&bitrate=${encodeURIComponent(bitrate)}&time=${encodeURIComponent(cleanText(req.query.time))}&sign=${encodeURIComponent(cleanText(req.query.sign))}`,
+	      url: `/api/flac/stream/${encodeURIComponent(id)}?format=${encodeURIComponent(resolvedFormat)}&bitrate=${encodeURIComponent(resolvedBitrate)}&time=${encodeURIComponent(cleanText(req.query.time))}&sign=${encodeURIComponent(cleanText(req.query.sign))}`,
 	      durationMs: data.durationMs,
 	      verifiedPlayable: true,
 	      br: data.br,
 	      level: data.level,
 	      audioType: data.audioType,
 	      type: data.type,
-	      quality: data.quality
+	      quality: data.quality,
+	      fallbackFrom: data.fallbackFrom
 	    });
 	  } catch (error) {
 	    res.status(404).json({ error: "flac_song_unavailable", message: errorMessage(error) });
@@ -1549,33 +1619,7 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 	    return;
 	  }
 	  try {
-	    let data = await resolveFlacUrl(id, req.query.format, req.query.bitrate, req.query.time, req.query.sign);
-	    let upstream = await fetchImpl(data.url, {
-	      headers: {
-	        "User-Agent": FLAC_USER_AGENT,
-	        Referer: FLAC_BASE_URL,
-	        Accept: "audio/*,*/*;q=0.8",
-	        ...(req.headers.range ? { Range: req.headers.range } : {})
-	      },
-	      redirect: "follow"
-	    });
-	    if (!upstream.ok && upstream.status !== 206) {
-	      flacStreamCache.delete(flacCacheKey(id, req.query.format, req.query.bitrate, req.query.time, req.query.sign));
-	      data = await resolveFlacUrl(id, req.query.format, req.query.bitrate, req.query.time, req.query.sign, { forceRefresh: true });
-	      upstream = await fetchImpl(data.url, {
-	        headers: {
-	          "User-Agent": FLAC_USER_AGENT,
-	          Referer: FLAC_BASE_URL,
-	          Accept: "audio/*,*/*;q=0.8",
-	          ...(req.headers.range ? { Range: req.headers.range } : {})
-	        },
-	        redirect: "follow"
-	      });
-	      if (!upstream.ok && upstream.status !== 206) {
-	        res.status(502).json({ error: "flac_upstream_failed", message: `upstream status ${upstream.status}` });
-	        return;
-	      }
-	    }
+	    const { upstream } = await resolveFlacStreamWithFallback(id, req.query.format, req.query.bitrate, req.query.time, req.query.sign, req.headers.range);
 	    if (!upstream.body) {
 	      res.status(502).json({ error: "flac_upstream_empty", message: "test source audio upstream failed" });
 	      return;
