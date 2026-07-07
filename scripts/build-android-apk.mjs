@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
+import { existsSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -18,6 +18,12 @@ const androidHomeCandidates = [
   resolve(root, "..", "android-sdk"),
   "/opt/homebrew/share/android-commandlinetools"
 ].filter(Boolean);
+const debugKeystoreCandidates = [
+  process.env.JIANYIN_DEBUG_KEYSTORE,
+  resolve(root, "..", "old", "debug.keystore"),
+  resolve(root, "..", ".android", "debug.keystore")
+].filter(Boolean);
+const ndkVersion = "28.2.13676358";
 
 function commandName(name) {
   return process.platform === "win32" ? `${name}.cmd` : name;
@@ -32,6 +38,58 @@ function findAndroidHome() {
   return androidHomeCandidates.find((path) => existsSync(resolve(path, "platforms")) && existsSync(resolve(path, "build-tools")));
 }
 
+function findDebugKeystore() {
+  return debugKeystoreCandidates.find((path) => existsSync(path));
+}
+
+function isAndroidNdkHome(path) {
+  if (!path) return false;
+  const ndkBuild = process.platform === "win32" ? "ndk-build.cmd" : "ndk-build";
+  return existsSync(resolve(path, "source.properties")) && existsSync(resolve(path, ndkBuild));
+}
+
+function findAndroidNdkHome(androidHome) {
+  const candidates = [
+    process.env.JIANYIN_ANDROID_NDK_PATH,
+    process.env.ANDROID_NDK_HOME,
+    process.env.ANDROID_NDK_ROOT
+  ].filter(Boolean);
+
+  if (androidHome) {
+    candidates.push(
+      resolve(androidHome, "ndk", ndkVersion),
+      resolve(androidHome, "ndk", ndkVersion, "android-ndk-r28c")
+    );
+    const ndkRoot = resolve(androidHome, "ndk");
+    if (existsSync(ndkRoot)) {
+      for (const name of readdirSync(ndkRoot)) {
+        const versionDir = resolve(ndkRoot, name);
+        candidates.push(versionDir);
+        if (existsSync(versionDir) && statSync(versionDir).isDirectory()) {
+          for (const childName of readdirSync(versionDir)) {
+            candidates.push(resolve(versionDir, childName));
+          }
+        }
+      }
+    }
+  }
+
+  return candidates.find(isAndroidNdkHome);
+}
+
+function localPropertyPath(path) {
+  return path.replace(/\\/g, "/");
+}
+
+function writeAndroidLocalProperties(env) {
+  if (!env.ANDROID_HOME) return;
+  const lines = [`sdk.dir=${localPropertyPath(env.ANDROID_HOME)}`];
+  if (env.JIANYIN_ANDROID_NDK_PATH) {
+    lines.push(`ndk.dir=${localPropertyPath(env.JIANYIN_ANDROID_NDK_PATH)}`);
+  }
+  writeFileSync(resolve(androidRoot, "local.properties"), `${lines.join("\n")}\n`);
+}
+
 function configureEnv() {
   const env = { ...process.env };
   env.COPYFILE_DISABLE = "1";
@@ -39,6 +97,13 @@ function configureEnv() {
   env.JAVA_HOME = findJavaHome() ?? env.JAVA_HOME;
   env.ANDROID_HOME = findAndroidHome() ?? env.ANDROID_HOME;
   env.ANDROID_SDK_ROOT = env.ANDROID_HOME;
+  env.JIANYIN_ANDROID_NDK_PATH = findAndroidNdkHome(env.ANDROID_HOME) ?? env.JIANYIN_ANDROID_NDK_PATH;
+  env.ANDROID_NDK_HOME = env.JIANYIN_ANDROID_NDK_PATH ?? env.ANDROID_NDK_HOME;
+  env.ANDROID_NDK_ROOT = env.JIANYIN_ANDROID_NDK_PATH ?? env.ANDROID_NDK_ROOT;
+  env.JIANYIN_DEBUG_KEYSTORE = findDebugKeystore() ?? env.JIANYIN_DEBUG_KEYSTORE;
+  env.JIANYIN_DEBUG_KEYSTORE_PASSWORD = env.JIANYIN_DEBUG_KEYSTORE_PASSWORD || "android";
+  env.JIANYIN_DEBUG_KEY_ALIAS = env.JIANYIN_DEBUG_KEY_ALIAS || "androiddebugkey";
+  env.JIANYIN_DEBUG_KEY_PASSWORD = env.JIANYIN_DEBUG_KEY_PASSWORD || "android";
 
   const pathParts = [];
   if (env.JAVA_HOME) pathParts.push(resolve(env.JAVA_HOME, "bin"));
@@ -113,6 +178,12 @@ function countAppleDoubleFiles(path) {
 }
 
 const appleDoubleBuildRoots = [
+  resolve(root, "dist"),
+  resolve(root, "build", "android-node-runtime"),
+  resolve(androidRoot, "app", "src", "main", "assets"),
+  resolve(androidRoot, "capacitor-cordova-android-plugins", "src", "main", "assets"),
+  resolve(androidRoot, "capacitor-cordova-android-plugins", "src", "main", "libs"),
+  resolve(androidRoot, "capacitor-cordova-android-plugins", "libs"),
   resolve(androidRoot, "app", "build"),
   resolve(androidRoot, "capacitor-cordova-android-plugins", "build"),
   resolve(root, "node_modules", "@capacitor", "android", "capacitor", "build")
@@ -124,17 +195,21 @@ function removeGeneratedAppleDoubleFiles() {
   }
 }
 
+function countGeneratedAppleDoubleFiles() {
+  return appleDoubleBuildRoots.reduce((count, path) => count + countAppleDoubleFiles(path), 0);
+}
+
 async function assembleDebug(env) {
   const command = process.platform === "win32" ? resolve(androidRoot, "gradlew.bat") : resolve(androidRoot, "gradlew");
   const cleaner = setInterval(removeGeneratedAppleDoubleFiles, 750);
   try {
     await runStreaming("Assemble Android debug APK", command, ["assembleDebug"], { cwd: androidRoot, env });
   } catch (error) {
-    const appleDoubleCount = countAppleDoubleFiles(root);
+    const appleDoubleCount = countGeneratedAppleDoubleFiles();
     if (!appleDoubleCount) throw error;
 
     console.warn(`Found ${appleDoubleCount} AppleDouble metadata files after failed assemble. Cleaning and retrying once...`);
-    removeAppleDoubleFiles(root);
+    removeGeneratedAppleDoubleFiles();
     await runStreaming("Retry Android debug APK assemble", command, ["assembleDebug"], { cwd: androidRoot, env });
   } finally {
     clearInterval(cleaner);
@@ -197,9 +272,10 @@ function verifyApk(env) {
 
 const env = configureEnv();
 
+writeAndroidLocalProperties(env);
 run("Build desktop/web assets", commandName("npm"), ["run", "build"], { env });
 run("Sync Capacitor Android project", commandName("npx"), ["cap", "sync", "android"], { env });
 run("Prepare embedded Android Node backend", process.execPath, [resolve(root, "scripts", "prepare-android-embedded-backend.mjs")], { env });
-removeAppleDoubleFiles(root);
+removeGeneratedAppleDoubleFiles();
 await assembleDebug(env);
 verifyApk(env);

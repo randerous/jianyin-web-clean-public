@@ -570,6 +570,61 @@ test("flac test source builds app pages from upstream 20-song pages", async () =
   assert.equal(search.body.songs.at(-1).id, "flac_95");
 });
 
+test("flac test source caches duplicate searches and shares in-flight requests", async () => {
+  let searchCalls = 0;
+  let releaseSearch;
+  const searchGate = new Promise((resolve) => {
+    releaseSearch = resolve;
+  });
+  const fetchImpl = async (url) => {
+    const textUrl = String(url);
+    if (textUrl === "https://flac.music.hi.cn/") {
+      return new Response("", {
+        status: 200,
+        headers: { "set-cookie": "sl-session=mock; Path=/; sl_jwt_session=mockjwt; Path=/" }
+      });
+    }
+    if (textUrl.includes("/ajax.php?act=search")) {
+      searchCalls += 1;
+      await searchGate;
+      return Response.json({
+        code: 0,
+        data: {
+          list: [{
+            id: "300",
+            name: "Cached Song",
+            artist: "Cache Artist",
+            duration: "213",
+            time: "t300",
+            sign: "s300",
+            minfo: [{ format: "mp3", bitrate: "320", level: "p" }]
+          }],
+          total: "1"
+        }
+      });
+    }
+    throw new Error(`unexpected fetch ${textUrl}`);
+  };
+  const baseUrl = await startTestServer({ fetchImpl });
+
+  const first = getJson(`${baseUrl}/api/flac/search?keyword=cached&limit=5&page=1`);
+  const second = getJson(`${baseUrl}/api/flac/search?keyword=cached&limit=5&page=1`);
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(searchCalls, 1);
+  releaseSearch();
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  const third = await getJson(`${baseUrl}/api/flac/search?keyword=cached&limit=5&page=1`);
+
+  assert.equal(firstResult.response.status, 200);
+  assert.equal(secondResult.response.status, 200);
+  assert.equal(third.response.status, 200);
+  assert.equal(firstResult.body.cached, false);
+  assert.equal(secondResult.body.cached, true);
+  assert.equal(third.body.cached, true);
+  assert.equal(searchCalls, 1);
+  assert.equal(third.body.songs[0].id, "flac_300");
+});
+
 test("flac test source refreshes cookie when ajax returns html challenge", async () => {
   let baseCalls = 0;
   let searchCalls = 0;
@@ -987,7 +1042,7 @@ test("playlist endpoint imports Netease metadata as FLAC-search playable placeho
   assert.equal(refreshedHome.body.offset, 40);
 });
 
-test("netease playlist detail only maps the initial FLAC-search batch and preserves track count", async () => {
+test("netease playlist detail only maps the 20-song first screen and preserves track count", async () => {
   const songs = Array.from({ length: 120 }, (_item, index) => song(index + 1));
   const playlist = {
     id: 990,
@@ -1010,13 +1065,13 @@ test("netease playlist detail only maps the initial FLAC-search batch and preser
   const imported = await getJson(`${baseUrl}/api/netease/playlist/990`);
 
   assert.equal(imported.response.status, 200);
-  assert.equal(imported.body.playlist.songs.length, 60);
+  assert.equal(imported.body.playlist.songs.length, 20);
   assert.equal(imported.body.playlist.songs[0].id, "flac_search_playlist_1");
-  assert.equal(imported.body.playlist.songs[59].id, "flac_search_playlist_60");
+  assert.equal(imported.body.playlist.songs[19].id, "flac_search_playlist_20");
   assert.equal(imported.body.playlist.trackCount, 120);
 });
 
-test("home recommendation prefetch warms playlist detail cache", async () => {
+test("home recommendation does not prefetch playlist detail", async () => {
   let detailCalls = 0;
   const playlist = {
     id: 77,
@@ -1040,6 +1095,7 @@ test("home recommendation prefetch warms playlist detail cache", async () => {
   const home = await getJson(`${baseUrl}/api/netease/home?playlistLimit=1`);
   assert.equal(home.response.status, 200);
   await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(detailCalls, 0);
   const imported = await getJson(`${baseUrl}/api/netease/playlist/77`);
 
   assert.equal(imported.response.status, 200);
@@ -1066,16 +1122,16 @@ test("netease playlist detail falls back to track_all when detail is slow", asyn
 
     const imported = await getJson(`${baseUrl}/api/netease/playlist/77`);
 
-    assert.equal(imported.response.status, 200);
-    assert.deepEqual(imported.body.playlist.songs.map((item) => item.id), ["flac_search_playlist_1", "flac_search_playlist_2"]);
-    assert.deepEqual(trackAllLimits, [60]);
+	    assert.equal(imported.response.status, 200);
+	    assert.deepEqual(imported.body.playlist.songs.map((item) => item.id), ["flac_search_playlist_1", "flac_search_playlist_2"]);
+	    assert.deepEqual(trackAllLimits, [20]);
   } finally {
     if (oldTimeout === undefined) delete process.env.JIANYIN_PLAYLIST_TIMEOUT_MS;
     else process.env.JIANYIN_PLAYLIST_TIMEOUT_MS = oldTimeout;
   }
 });
 
-test("home recommendation prefetch covers all returned playlists with low concurrency", async () => {
+test("home recommendation returns summaries without detail fan-out", async () => {
   const requested = [];
   const playlists = Array.from({ length: 12 }, (_item, index) => ({
     id: index + 1,
@@ -1096,9 +1152,9 @@ test("home recommendation prefetch covers all returned playlists with low concur
 
   const home = await getJson(`${baseUrl}/api/netease/home?playlistLimit=12`);
   assert.equal(home.response.status, 200);
-  await assertEventually(() => {
-    assert.deepEqual(requested.sort((a, b) => Number(a) - Number(b)), playlists.map((item) => String(item.id)));
-  });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(home.body.recommendedPlaylists.length, 12);
+  assert.deepEqual(requested, []);
 });
 
 test("netease account login validates cookie and syncs only playable playlists", async () => {

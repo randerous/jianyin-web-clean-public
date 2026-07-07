@@ -662,6 +662,14 @@ h3 {
   cursor: pointer;
 }
 
+.danger-button {
+  color: var(--coral);
+}
+
+.danger-button:disabled {
+  color: var(--muted);
+}
+
 .song-list {
   display: grid;
   gap: 8px;
@@ -1495,9 +1503,9 @@ button:disabled {
   }
 
   .song-actions {
-    display: grid;
-    grid-template-columns: repeat(4, 40px);
+    display: flex;
     justify-content: end;
+    flex-wrap: wrap;
   }
 
   .now-playing {
@@ -2342,10 +2350,6 @@ h2 {
   .song-actions .icon-button {
     width: 34px;
     height: 34px;
-  }
-
-  .song-actions .icon-button:nth-of-type(2) {
-    display: none;
   }
 
   .selection-bar {

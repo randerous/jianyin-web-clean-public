@@ -306,6 +306,17 @@ export async function loadLocalFile(key: string) {
   return blob;
 }
 
+export async function deleteLocalFile(key: string) {
+  const db = await openDb();
+  await new Promise<void>((resolve, reject) => {
+    const tx = db.transaction(LOCAL_STORE_NAME, "readwrite");
+    tx.objectStore(LOCAL_STORE_NAME).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+  db.close();
+}
+
 export async function hydrateLocalSongs(state: PersistedState) {
   const urls: string[] = [];
   const cache = new Map<string, string>();
