@@ -304,13 +304,13 @@ export default function App() {
 
   useEffect(() => {
     if (!activePlaylist?.songs.length) return;
-    prewarmRemoteSongs(activePlaylist.songs, 4);
+    prewarmRemoteSongs(activePlaylist.songs, 8);
   }, [activePlaylist, prewarmRemoteSongs]);
 
   useEffect(() => {
     if (!queue.length) return;
     const start = queueIndex >= 0 ? queueIndex + 1 : 0;
-    prewarmRemoteSongs([...queue.slice(start), ...queue.slice(0, start)], 3);
+    prewarmRemoteSongs([...queue.slice(start), ...queue.slice(0, start)], 8);
   }, [prewarmRemoteSongs, queue, queueIndex]);
 
   useEffect(() => {

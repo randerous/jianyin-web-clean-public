@@ -896,7 +896,7 @@ test("netease song resolve still plays when lyric request fails", async () => {
   assert.equal(result.body.lrc, "");
 });
 
-test("playlist and home endpoints only return full playable Netease songs", async () => {
+test("playlist endpoint imports Netease metadata as FLAC-search playable placeholders", async () => {
   const playlist = {
     id: 77,
     name: "Playlist",
@@ -974,10 +974,10 @@ test("playlist and home endpoints only return full playable Netease songs", asyn
   const refreshedHome = await getJson(`${baseUrl}/api/netease/home?refresh=2&playlistLimit=20`);
 
   assert.equal(imported.response.status, 200);
-  assert.deepEqual(imported.body.playlist.songs.map((item) => item.id), ["netease_1"]);
-  assert.deepEqual(imported.body.playlist.songs.map((item) => item.source), ["netease"]);
-  assert.deepEqual(imported.body.playlist.songs.map((item) => item.url), ["/api/netease/stream/1?quality=exhigh"]);
-  assert.equal(imported.body.playlist.songs[0].verifiedPlayable, true);
+  assert.deepEqual(imported.body.playlist.songs.map((item) => item.id), ["flac_search_playlist_1", "flac_search_playlist_2", "flac_search_playlist_3"]);
+  assert.deepEqual(imported.body.playlist.songs.map((item) => item.source), ["flac", "flac", "flac"]);
+  assert.deepEqual(imported.body.playlist.songs.map((item) => item.url), ["", "", ""]);
+  assert.equal(imported.body.playlist.songs[0].verifiedPlayable, false);
   assert.equal(imported.body.playlist.trackCount, 3);
   assert.deepEqual(home.body.radarSongs, []);
   assert.deepEqual(home.body.hotSongs, []);
@@ -987,9 +987,8 @@ test("playlist and home endpoints only return full playable Netease songs", asyn
   assert.equal(refreshedHome.body.offset, 40);
 });
 
-test("netease playlist detail only verifies the initial playable batch and preserves track count", async () => {
+test("netease playlist detail only maps the initial FLAC-search batch and preserves track count", async () => {
   const songs = Array.from({ length: 120 }, (_item, index) => song(index + 1));
-  const requestedIds = [];
   const playlist = {
     id: 990,
     name: "Large Playlist",
@@ -1002,11 +1001,8 @@ test("netease playlist detail only verifies the initial playable batch and prese
     async playlist_detail() {
       return { body: { playlist } };
     },
-    async song_url_v1({ id, level }) {
-      assert.equal(level, "exhigh");
-      requestedIds.push(...String(id).split(","));
-      const byId = Object.fromEntries(String(id).split(",").map((item) => [item, urlData({ url: `https://audio.test/${item}.mp3`, time: 65_000 })]));
-      return urlResponse(id, byId);
+    async song_url_v1() {
+      throw new Error("playlist import should not verify Netease song URLs");
     }
   };
   const baseUrl = await startTestServer({ neteaseClient });
@@ -1015,11 +1011,9 @@ test("netease playlist detail only verifies the initial playable batch and prese
 
   assert.equal(imported.response.status, 200);
   assert.equal(imported.body.playlist.songs.length, 60);
-  assert.equal(imported.body.playlist.songs[0].id, "netease_1");
-  assert.equal(imported.body.playlist.songs[59].id, "netease_60");
+  assert.equal(imported.body.playlist.songs[0].id, "flac_search_playlist_1");
+  assert.equal(imported.body.playlist.songs[59].id, "flac_search_playlist_60");
   assert.equal(imported.body.playlist.trackCount, 120);
-  assert.equal(requestedIds.length, 60);
-  assert.ok(requestedIds.every((id) => Number(id) <= 60));
 });
 
 test("home recommendation prefetch warms playlist detail cache", async () => {
@@ -1039,12 +1033,6 @@ test("home recommendation prefetch warms playlist detail cache", async () => {
     async playlist_detail() {
       detailCalls += 1;
       return { body: { playlist } };
-    },
-    async song_url({ id }) {
-      return urlResponse(id, {
-        "1": urlData({ url: "https://audio.test/1.mp3", time: 65_000 }),
-        "2": urlData({ url: "https://audio.test/2.mp3", time: 65_000 })
-      });
     }
   };
   const baseUrl = await startTestServer({ neteaseClient });
@@ -1056,7 +1044,7 @@ test("home recommendation prefetch warms playlist detail cache", async () => {
 
   assert.equal(imported.response.status, 200);
   assert.equal(detailCalls, 1);
-  assert.deepEqual(imported.body.playlist.songs.map((item) => item.source), ["netease", "netease"]);
+  assert.deepEqual(imported.body.playlist.songs.map((item) => item.source), ["flac", "flac"]);
 });
 
 test("netease playlist detail falls back to track_all when detail is slow", async () => {
@@ -1072,12 +1060,6 @@ test("netease playlist detail falls back to track_all when detail is slow", asyn
       async playlist_track_all({ limit }) {
         trackAllLimits.push(limit);
         return { body: { songs: [song(1), song(2)] } };
-      },
-      async song_url({ id }) {
-        return urlResponse(id, {
-          "1": urlData({ url: "https://audio.test/1.mp3", time: 65_000 }),
-          "2": urlData({ url: "https://audio.test/2.mp3", time: 65_000 })
-        });
       }
     };
     const baseUrl = await startTestServer({ neteaseClient });
@@ -1085,7 +1067,7 @@ test("netease playlist detail falls back to track_all when detail is slow", asyn
     const imported = await getJson(`${baseUrl}/api/netease/playlist/77`);
 
     assert.equal(imported.response.status, 200);
-    assert.deepEqual(imported.body.playlist.songs.map((item) => item.id), ["netease_1", "netease_2"]);
+    assert.deepEqual(imported.body.playlist.songs.map((item) => item.id), ["flac_search_playlist_1", "flac_search_playlist_2"]);
     assert.deepEqual(trackAllLimits, [60]);
   } finally {
     if (oldTimeout === undefined) delete process.env.JIANYIN_PLAYLIST_TIMEOUT_MS;
