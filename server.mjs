@@ -907,9 +907,10 @@ function playableRejectReason(data) {
 	  return Number(playlist.trackCount ?? playlist.trackIds?.length ?? songs.length) || songs.length;
 	}
 
-	async function mapVerifiedPlaylist(playlist, preferredQuality = DEFAULT_PLAY_QUALITY, cookie = neteaseAccountCookie) {
-	  const tracks = await expandPlaylistTracks(playlist);
-	  const songs = await mapPlaylistSongsToFlac(tracks);
+	async function mapVerifiedPlaylist(playlist, preferredQuality = DEFAULT_PLAY_QUALITY, cookie = neteaseAccountCookie, desiredLimit = PLAYLIST_INITIAL_PLAYABLE_LIMIT) {
+	  const limit = Math.min(Math.max(1, Number(desiredLimit) || PLAYLIST_INITIAL_PLAYABLE_LIMIT), PLAYLIST_CANDIDATE_LIMIT);
+	  const tracks = await expandPlaylistTracks(playlist, limit);
+	  const songs = await mapPlaylistSongsToFlac(tracks, limit);
 	  return {
 	    id: `netease_playlist_${String(playlist.id ?? "")}`,
 	    name: cleanText(playlist.name, "网易云公开歌单"),
@@ -1441,7 +1442,7 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
       res.status(404).json({ error: "playlist_not_found", message: "没有找到这个歌单" });
       return;
     }
-	    const mapped = await mapPlayableNeteasePlaylist(playlist, quality, neteaseAccountCookie, PLAYLIST_INITIAL_PLAYABLE_LIMIT);
+	    const mapped = await mapVerifiedPlaylist(playlist, quality, neteaseAccountCookie, PLAYLIST_INITIAL_PLAYABLE_LIMIT);
     if (!mapped.songs.length) {
       res.status(404).json({ error: "playlist_empty", message: "这个公开歌单没有可完整播放歌曲" });
       return;
