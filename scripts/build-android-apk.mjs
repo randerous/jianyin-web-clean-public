@@ -1,11 +1,13 @@
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const androidRoot = resolve(root, "android");
 const apkPath = resolve(androidRoot, "app", "build", "outputs", "apk", "debug", "app-debug.apk");
+const gradleBuildRoot = resolve(process.env.TMPDIR || "/tmp", "jianyin-web-clean-public-gradle-build");
+const externalApkPath = resolve(gradleBuildRoot, "app", "outputs", "apk", "debug", "app-debug.apk");
 const javaHomeCandidates = [
   process.env.JAVA_HOME,
   resolve(root, "..", "jdk-21"),
@@ -100,6 +102,7 @@ function configureEnv() {
   env.JIANYIN_ANDROID_NDK_PATH = findAndroidNdkHome(env.ANDROID_HOME) ?? env.JIANYIN_ANDROID_NDK_PATH;
   env.ANDROID_NDK_HOME = env.JIANYIN_ANDROID_NDK_PATH ?? env.ANDROID_NDK_HOME;
   env.ANDROID_NDK_ROOT = env.JIANYIN_ANDROID_NDK_PATH ?? env.ANDROID_NDK_ROOT;
+  env.JIANYIN_ANDROID_GRADLE_BUILD_DIR = gradleBuildRoot;
   env.JIANYIN_DEBUG_KEYSTORE = findDebugKeystore() ?? env.JIANYIN_DEBUG_KEYSTORE;
   env.JIANYIN_DEBUG_KEYSTORE_PASSWORD = env.JIANYIN_DEBUG_KEYSTORE_PASSWORD || "android";
   env.JIANYIN_DEBUG_KEY_ALIAS = env.JIANYIN_DEBUG_KEY_ALIAS || "androiddebugkey";
@@ -181,10 +184,15 @@ const appleDoubleBuildRoots = [
   resolve(root, "dist"),
   resolve(root, "build", "android-node-runtime"),
   resolve(androidRoot, "app", "src", "main", "assets"),
+  resolve(androidRoot, "app", "src", "main", "res"),
+  resolve(androidRoot, "capacitor-cordova-android-plugins", "src", "main", "java"),
+  resolve(androidRoot, "capacitor-cordova-android-plugins", "src", "main", "res"),
   resolve(androidRoot, "capacitor-cordova-android-plugins", "src", "main", "assets"),
   resolve(androidRoot, "capacitor-cordova-android-plugins", "src", "main", "libs"),
   resolve(androidRoot, "capacitor-cordova-android-plugins", "libs"),
+  resolve(androidRoot, "capacitor-cordova-android-plugins", ".cxx"),
   resolve(androidRoot, "app", "build"),
+  resolve(androidRoot, "app", ".cxx"),
   resolve(androidRoot, "capacitor-cordova-android-plugins", "build"),
   resolve(root, "node_modules", "@capacitor", "android", "capacitor", "build")
 ];
@@ -203,7 +211,13 @@ async function assembleDebug(env) {
   const command = process.platform === "win32" ? resolve(androidRoot, "gradlew.bat") : resolve(androidRoot, "gradlew");
   const cleaner = setInterval(removeGeneratedAppleDoubleFiles, 750);
   try {
+    rmSync(gradleBuildRoot, { recursive: true, force: true });
+    removeGeneratedAppleDoubleFiles();
     await runStreaming("Assemble Android debug APK", command, ["assembleDebug"], { cwd: androidRoot, env });
+    if (existsSync(externalApkPath)) {
+      mkdirSync(dirname(apkPath), { recursive: true });
+      copyFileSync(externalApkPath, apkPath);
+    }
   } catch (error) {
     const appleDoubleCount = countGeneratedAppleDoubleFiles();
     if (!appleDoubleCount) throw error;
@@ -211,6 +225,10 @@ async function assembleDebug(env) {
     console.warn(`Found ${appleDoubleCount} AppleDouble metadata files after failed assemble. Cleaning and retrying once...`);
     removeGeneratedAppleDoubleFiles();
     await runStreaming("Retry Android debug APK assemble", command, ["assembleDebug"], { cwd: androidRoot, env });
+    if (existsSync(externalApkPath)) {
+      mkdirSync(dirname(apkPath), { recursive: true });
+      copyFileSync(externalApkPath, apkPath);
+    }
   } finally {
     clearInterval(cleaner);
   }
