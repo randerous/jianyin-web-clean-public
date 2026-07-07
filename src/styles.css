@@ -337,10 +337,25 @@ h3 {
   padding: 0;
 }
 
+.cover-card-wrap {
+  position: relative;
+  min-width: 0;
+}
+
 .shelf-row .cover-card {
   width: 128px;
   flex: 0 0 128px;
   scroll-snap-align: start;
+}
+
+.shelf-row .cover-card-wrap {
+  width: 128px;
+  flex: 0 0 128px;
+  scroll-snap-align: start;
+}
+
+.shelf-row .cover-card-wrap .cover-card {
+  width: 100%;
 }
 
 .haze-card {
@@ -356,6 +371,23 @@ h3 {
   border: 1px solid var(--line);
   object-fit: cover;
   background: var(--panel);
+}
+
+.cover-delete {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 32px;
+  height: 32px;
+  border-color: rgba(255, 255, 255, 0.42);
+  background: rgba(20, 23, 31, 0.72);
+  color: #fff;
+  backdrop-filter: blur(8px);
+  z-index: 2;
+}
+
+.cover-delete:hover {
+  background: rgba(20, 23, 31, 0.86);
 }
 
 .cover-caption {
@@ -1467,7 +1499,8 @@ button:disabled {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .shelf-row .cover-card {
+  .shelf-row .cover-card,
+  .shelf-row .cover-card-wrap {
     width: 116px;
     flex-basis: 116px;
   }
@@ -1860,7 +1893,8 @@ h2 {
   display: none;
 }
 
-.shelf-row .cover-card {
+.shelf-row .cover-card,
+.shelf-row .cover-card-wrap {
   width: 140px;
   flex-basis: 140px;
 }
@@ -2310,7 +2344,8 @@ h2 {
     padding-right: 14px;
   }
 
-  .shelf-row .cover-card {
+  .shelf-row .cover-card,
+  .shelf-row .cover-card-wrap {
     width: 118px;
     flex-basis: 118px;
   }

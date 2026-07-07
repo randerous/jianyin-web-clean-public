@@ -18,11 +18,47 @@ buildscript {
 
 apply from: "variables.gradle"
 
+def externalGradleBuildDir = System.getenv("JIANYIN_ANDROID_GRADLE_BUILD_DIR")
+if (externalGradleBuildDir) {
+    rootProject.layout.buildDirectory.set(new File(externalGradleBuildDir, "root"))
+    subprojects { subproject ->
+        subproject.layout.buildDirectory.set(new File(externalGradleBuildDir, subproject.name))
+    }
+}
+
 allprojects {
     repositories {
         maven { url uri("${rootProject.projectDir}/local-maven") }
         google()
         mavenCentral()
+    }
+}
+
+def removeAppleDoubleMetadata = {
+    rootProject.delete(rootProject.fileTree(rootProject.projectDir) {
+        include 'app/build/**/._*'
+        include 'app/.cxx/**/._*'
+        include 'app/src/main/assets/**/._*'
+        include 'app/src/main/res/**/._*'
+        include 'capacitor-cordova-android-plugins/build/**/._*'
+        include 'capacitor-cordova-android-plugins/.cxx/**/._*'
+        include 'capacitor-cordova-android-plugins/src/main/assets/**/._*'
+        include 'capacitor-cordova-android-plugins/src/main/java/**/._*'
+        include 'capacitor-cordova-android-plugins/src/main/libs/**/._*'
+        include 'capacitor-cordova-android-plugins/src/main/res/**/._*'
+    })
+}
+
+gradle.projectsEvaluated {
+    subprojects { subproject ->
+        subproject.tasks.configureEach { task ->
+            if (task.name.startsWith('bundleLibRuntimeToDir') || task.name.startsWith('compile')) {
+                task.doLast { removeAppleDoubleMetadata() }
+            }
+            if (task.name.startsWith('dex') || task.name.startsWith('mergeLibDex')) {
+                task.doFirst { removeAppleDoubleMetadata() }
+            }
+        }
     }
 }
 

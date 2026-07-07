@@ -1054,6 +1054,54 @@ test("download manager deletes cached songs", async ({ page }) => {
   })).toBe(false);
 });
 
+test("download manager removes uncached download history entries", async ({ page }) => {
+  const song = {
+    id: "flac_uncached_history",
+    name: "Uncached Download History",
+    artist: "Cache Artist",
+    pic: "/assets/icon.png",
+    cover: "/assets/icon.png",
+    url: "/api/flac/stream/uncached?format=mp3&bitrate=320&time=tuncached&sign=suncached",
+    source: "flac",
+    remotePlayable: true,
+    verifiedPlayable: true,
+    durationMs: 65000,
+    br: 320000,
+    level: "320k",
+    type: "mp3",
+    audioType: "mp3",
+    quality: "320k",
+    time: "tuncached",
+    sign: "suncached"
+  };
+  const state = { ...testState(), downloadHistory: [song] };
+  page.on("dialog", (dialog) => void dialog.accept());
+  await page.request.post("/api/state", { data: { state } });
+  await page.evaluate(({ key, value }) => {
+    localStorage.setItem(key, JSON.stringify(value));
+  }, { key: storageKey, value: state });
+  await page.reload();
+
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await expect(page.getByRole("button", { name: "删除下载" })).toBeVisible();
+  await page.locator(".section-title .section-action").first().click();
+  const manager = page.locator(".detail");
+  const row = manager.locator(".song-row", { hasText: "Uncached Download History" });
+  await expect(row).toHaveCount(1);
+  await expect(row.getByRole("button", { name: "删除下载" })).toBeVisible();
+  await row.getByRole("button", { name: "删除下载" }).click();
+  await expect(row).toHaveCount(0);
+  await expect.poll(() => page.evaluate((key) => {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw).downloadHistory?.length ?? 0 : 0;
+  }, storageKey)).toBe(0);
+  await expect.poll(async () => {
+    const response = await page.request.get("/api/state");
+    const body = await response.json();
+    return body.state?.downloadHistory?.length ?? 0;
+  }).toBe(0);
+});
+
 test("slow search response cannot overwrite newer search results", async ({ page }) => {
   await page.route("**/api/flac/search**", async (route) => {
     const keyword = new URL(route.request().url()).searchParams.get("keyword");
