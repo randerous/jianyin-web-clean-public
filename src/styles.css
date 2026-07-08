@@ -2573,7 +2573,7 @@ h2 {
 }
 
 @media (max-width: 940px) {
-  .app-shell.has-live-player .toast {
+  .app-shell.has-mini-player .toast {
     bottom: calc(var(--mobile-nav-height) + 124px + env(safe-area-inset-bottom, 0px));
   }
 
@@ -2581,7 +2581,7 @@ h2 {
     bottom: calc(var(--mobile-nav-height) + var(--mini-player-height) + 104px + env(safe-area-inset-bottom, 0px));
   }
 
-  .app-shell.has-live-player.has-search-pagination .toast {
+  .app-shell.has-mini-player.has-search-pagination .toast {
     bottom: calc(var(--mobile-nav-height) + 124px + env(safe-area-inset-bottom, 0px));
   }
 

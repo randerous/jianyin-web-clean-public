@@ -160,6 +160,19 @@ function isDownloadCachedSong(song: Song) {
   return Boolean(downloadCacheKey(song));
 }
 
+function preserveDownloadedCache(existing: Song, incoming: Song) {
+  const key = downloadCacheKey(existing);
+  if (!key || downloadCacheKey(incoming)) return incoming;
+  return {
+    ...incoming,
+    localKey: key,
+    url: `local-file:${key}`,
+    needsImport: false,
+    remotePlayable: incoming.remotePlayable || existing.remotePlayable,
+    verifiedPlayable: incoming.verifiedPlayable || existing.verifiedPlayable
+  };
+}
+
 function remoteCopyAfterDownloadDeleted(song: Song) {
   const next: Song = {
     ...song,
@@ -180,6 +193,25 @@ function remoteCopyAfterDownloadDeleted(song: Song) {
 
 function allLibrarySongs(playlists: Playlist[], history: Song[]) {
   return uniqueSongs([...playlists.flatMap((playlist) => playlist.songs), ...history]);
+}
+
+function stateContentScore(state: PersistedState) {
+  return state.playlists.reduce((total, playlist) => total + playlist.songs.length, 0) +
+    state.favorites.length +
+    state.downloadHistory.length +
+    state.history.length +
+    state.queue.length;
+}
+
+function shouldMergeSharedState(localState: PersistedState, sharedState: PersistedState) {
+  const localScore = stateContentScore(localState);
+  const sharedScore = stateContentScore(sharedState);
+  if (!localScore || sharedScore >= localScore) return true;
+  const sharedLooksEmpty = sharedState.playlists.every((playlist) => playlist.songs.length === 0) &&
+    sharedState.favorites.length === 0 &&
+    sharedState.downloadHistory.length === 0;
+  if (sharedLooksEmpty) return false;
+  return sharedScore >= Math.max(3, Math.floor(localScore * 0.5));
 }
 
 function coverAfterSongResolved(playlist: Playlist, originalKey: string, resolvedCover?: string) {
@@ -288,7 +320,7 @@ export default function App() {
     if (!targets.length) return;
     void prewarmFlacSongs(targets, limit, (original, resolved) => {
       const originalKey = songKey(original);
-      const replaceResolved = (item: Song) => songKey(item) === originalKey ? resolved : item;
+      const replaceResolved = (item: Song) => songKey(item) === originalKey ? preserveDownloadedCache(item, resolved) : item;
       setRemoteResults((items) => items.map(replaceResolved));
       setQueue((items) => items.map(replaceResolved));
       setHistory((items) => items.map(replaceResolved));
@@ -409,7 +441,10 @@ export default function App() {
     let live = true;
     const localState: PersistedState = { playlists, favorites, history, downloadHistory, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart, androidStatusNotificationEnabled };
     void loadSharedState()
-      .then(async (shared) => hydrateLocalSongs(shared ? mergeStates(localState, shared) : localState))
+      .then(async (shared) => {
+        const merged = shared && shouldMergeSharedState(localState, shared) ? mergeStates(localState, shared) : localState;
+        return hydrateLocalSongs(merged);
+      })
       .then((result) => {
         if (!live) return;
         setPlaylists(result.state.playlists);
@@ -558,10 +593,11 @@ export default function App() {
 
   const playSong = useCallback(async (song: Song, source?: Song[], options: { quiet?: boolean; startAt?: number; refresh?: boolean; fallbackToMp3?: boolean } = {}) => {
     try {
-      const playable = await resolvePlayable(song, { refresh: options.refresh, fallbackToMp3: options.fallbackToMp3 });
+      const resolved = await resolvePlayable(song, { refresh: options.refresh, fallbackToMp3: options.fallbackToMp3 });
+      const playable = preserveDownloadedCache(song, resolved);
       const originalKey = songKey(song);
       const playableKey = songKey(playable);
-      const replaceResolved = (item: Song) => songKey(item) === originalKey ? playable : item;
+      const replaceResolved = (item: Song) => songKey(item) === originalKey ? preserveDownloadedCache(item, playable) : item;
       const nextQueue = playableSongs((source?.length ? source : [playable]).map((item) => songKey(item) === songKey(song) ? playable : item));
       const nextIndex = Math.max(0, nextQueue.findIndex((item) => songKey(item) === songKey(playable)));
       setRemoteResults((items) => items.map(replaceResolved));
@@ -1283,7 +1319,7 @@ export default function App() {
 
   const shellClassName = [
     "app-shell",
-    currentSong ? "has-live-player" : "",
+    currentSong ? "has-mini-player" : "",
     tab === "search" && Boolean(query.trim()) && (searchResults.length > 0 || searchPageInfo.page > 1 || searchPageInfo.hasMore) ? "has-search-pagination" : ""
   ].filter(Boolean).join(" ");
 

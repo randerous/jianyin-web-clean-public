@@ -500,6 +500,38 @@ test("toast stays readable above mobile playback controls", async ({ page }) => 
   await expectReadableToast(page, "请输入歌单名称");
 });
 
+test("mobile playback controls do not push page content down", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await playFirstHomeSong(page);
+  await expectAudioPlaying(page);
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+
+  const metrics = await page.evaluate(() => {
+    const root = document.querySelector(".app-shell");
+    const workspace = document.querySelector(".workspace");
+    const topbar = document.querySelector(".topbar");
+    const heading = document.querySelector(".topbar h1");
+    const rectOf = (element: Element | null) => {
+      if (!element) return null;
+      const rect = element.getBoundingClientRect();
+      const style = getComputedStyle(element);
+      return { top: rect.top, bottom: rect.bottom, paddingTop: parseFloat(style.paddingTop), marginTop: parseFloat(style.marginTop) };
+    };
+    return {
+      rootClass: root?.className ?? "",
+      workspace: rectOf(workspace),
+      topbar: rectOf(topbar),
+      heading: rectOf(heading)
+    };
+  });
+
+  expect(metrics.rootClass).toContain("has-mini-player");
+  expect(metrics.rootClass).not.toContain("has-live-player");
+  expect(metrics.workspace?.paddingTop ?? 0).toBeLessThan(80);
+  expect(Math.abs(metrics.topbar?.marginTop ?? 0)).toBeLessThan(80);
+  expect(metrics.heading?.top ?? 999).toBeLessThan(130);
+});
+
 test("searches local library and adds selections to a new playlist", async ({ page }) => {
   await page.route("**/api/flac/search**", async (route) => {
     await route.fulfill({
@@ -660,6 +692,51 @@ test("remote playlists persist across clean browser contexts", async ({ page, br
   await expectAudioPlaying(cleanPage);
   await expectAudioLongerThan(cleanPage, 60);
   await clean.close();
+});
+
+test("empty shared state cannot overwrite a populated local library", async ({ page }) => {
+  const localSong = {
+    ...testSongs[0],
+    id: "local_protected_song",
+    name: "Protected Local Song",
+    artist: "Protected Artist"
+  };
+  const localState = {
+    ...testState(),
+    playlists: [
+      { id: "favorites", name: "我喜欢的音乐", cover: "/assets/icon.png", songs: [localSong], source: "local" },
+      { id: "protected_playlist", name: "Protected Playlist", cover: "/assets/icon.png", songs: [localSong], source: "local" }
+    ],
+    favorites: [localSong],
+    history: [localSong],
+    queue: [localSong],
+    queueIndex: 0
+  };
+
+  await mockHome(page);
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({
+          state: {
+            ...testState(),
+            playlists: [{ id: "favorites", name: "我喜欢的音乐", cover: "/assets/icon.png", songs: [], source: "local" }]
+          }
+        })
+      });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+  await page.addInitScript(({ key, value }) => {
+    localStorage.setItem(key, JSON.stringify(value));
+  }, { key: storageKey, value: localState });
+  await page.goto("/");
+
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await expect(page.getByRole("button", { name: /Protected Playlist 1 首歌曲/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /我喜欢的音乐 1 首歌曲/ })).toBeVisible();
 });
 
 test("playlist detail searches visible songs and downloads selected", async ({ page }) => {
@@ -1120,6 +1197,85 @@ test("download manager deletes cached songs", async ({ page }) => {
     db.close();
     return keys.some((key) => String(key).startsWith("download_flac_") && String(key).includes("777"));
   })).toBe(false);
+});
+
+test("download history reattaches orphaned cached audio", async ({ page }) => {
+  const cachedSong = {
+    id: "flac_888",
+    name: "Cached Refresh Song",
+    artist: "Cache Artist",
+    pic: "/assets/icon.png",
+    cover: "/assets/icon.png",
+    url: "/api/flac/stream/888?format=mp3&bitrate=320&time=t888&sign=s888",
+    source: "flac",
+    remotePlayable: true,
+    verifiedPlayable: true,
+    durationMs: 65000,
+    br: 2000000,
+    level: "flac",
+    type: "flac",
+    audioType: "flac",
+    quality: "flac"
+  };
+  const state = {
+    ...testState(),
+    playlists: [
+      { id: "favorites", name: "我喜欢的音乐", cover: "/assets/icon.png", songs: [], source: "local" },
+      { id: "cached_playlist", name: "Cached Playlist", cover: "/assets/icon.png", songs: [cachedSong], source: "local" }
+    ],
+    downloadHistory: [cachedSong]
+  };
+  let resolveRequests = 0;
+  await page.request.post("/api/state", { data: { state } });
+  await mockHome(page);
+  await page.route("**/api/flac/song/888**", async (route) => {
+    resolveRequests += 1;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        url: "/api/flac/stream/888?format=mp3&bitrate=320&time=t888&sign=s888",
+        durationMs: 65000,
+        verifiedPlayable: true,
+        br: 320000,
+        level: "320k",
+        type: "mp3",
+        audioType: "mp3",
+        quality: "320k"
+      })
+    });
+  });
+  await page.evaluate(async ({ key, value }) => {
+    const audioBlob = await fetch("/assets/full-song-65s.wav").then((response) => response.blob());
+    localStorage.setItem(key, JSON.stringify(value));
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("jianyin-web-clean-audio", 1);
+      request.onupgradeneeded = () => request.result.createObjectStore("files");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction("files", "readwrite");
+      tx.objectStore("files").put(audioBlob, "download_flac_flac_888");
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+  }, { key: storageKey, value: state });
+  await page.reload();
+
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await page.locator(".section-title .section-action").first().click();
+  await page.locator(".detail .song-row", { hasText: "Cached Refresh Song" }).click();
+  await expectAudioPlaying(page);
+  expect(resolveRequests).toBe(0);
+
+  await expect.poll(() => page.evaluate((key) => {
+    const raw = localStorage.getItem(key);
+    const state = raw ? JSON.parse(raw) : {};
+    const song = state.downloadHistory?.find((item: { id?: string }) => item.id === "flac_888");
+    return { localKey: song?.localKey ?? "", url: song?.url ?? "" };
+  }, storageKey)).toEqual({ localKey: "download_flac_flac_888", url: "local-file:download_flac_flac_888" });
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.currentSrc.startsWith("blob:"))).toBe(true);
 });
 
 test("download manager removes uncached download history entries", async ({ page }) => {
