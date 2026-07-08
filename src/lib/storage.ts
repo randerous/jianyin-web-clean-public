@@ -54,6 +54,11 @@ function isDownloadedSong(song: Song) {
   return Boolean(song.localKey?.startsWith("download_") || song.url.startsWith("local-file:download_"));
 }
 
+function candidateDownloadKey(song: Song) {
+  if (!song.id || (song.source !== "netease" && song.source !== "bili" && song.source !== "flac")) return "";
+  return `download_${song.source}_${song.id}`.replace(/[^a-zA-Z0-9_.-]/g, "_");
+}
+
 function isDemoPlaylist(playlist: Playlist) {
   return playlist.id === "daily" || playlist.id === "hot";
 }
@@ -320,30 +325,37 @@ export async function deleteLocalFile(key: string) {
 export async function hydrateLocalSongs(state: PersistedState) {
   const urls: string[] = [];
   const cache = new Map<string, string>();
+  const missingKeys = new Set<string>();
+  const downloadSongKeys = new Set(state.downloadHistory.map(songKey));
+
+  async function loadObjectUrl(key: string) {
+    let url = cache.get(key);
+    if (url || missingKeys.has(key)) return url ?? null;
+    const blob = await loadLocalFile(key).catch(() => null);
+    if (!blob) {
+      missingKeys.add(key);
+      return null;
+    }
+    url = URL.createObjectURL(blob);
+    urls.push(url);
+    cache.set(key, url);
+    return url;
+  }
 
   async function hydrate(song: Song): Promise<Song> {
     let next = song;
-    if (song.localKey && song.url.startsWith("local-file:")) {
-      let url = cache.get(song.localKey);
-      if (!url) {
-        const blob = await loadLocalFile(song.localKey).catch(() => null);
-        if (!blob) return { ...song, url: "", needsImport: true, name: song.name.includes("需重新导入") ? song.name : `${song.name}（需重新导入）` };
-        url = URL.createObjectURL(blob);
-        urls.push(url);
-        cache.set(song.localKey, url);
-      }
+    if (!song.localKey && downloadSongKeys.has(songKey(song))) {
+      const key = candidateDownloadKey(song);
+      const url = key ? await loadObjectUrl(key) : null;
+      if (url) next = { ...next, localKey: key, url, needsImport: false, remotePlayable: true, verifiedPlayable: true };
+    }
+    if (next.localKey && next.url.startsWith("local-file:")) {
+      const url = await loadObjectUrl(next.localKey);
+      if (!url) return { ...next, url: "", needsImport: true, name: next.name.includes("需重新导入") ? next.name : `${next.name}（需重新导入）` };
       next = { ...next, url, needsImport: false };
     }
-    if (song.coverKey && song.cover.startsWith("local-file:")) {
-      let cover = cache.get(song.coverKey);
-      if (!cover) {
-        const blob = await loadLocalFile(song.coverKey).catch(() => null);
-        if (blob) {
-          cover = URL.createObjectURL(blob);
-          urls.push(cover);
-          cache.set(song.coverKey, cover);
-        }
-      }
+    if (next.coverKey && next.cover.startsWith("local-file:")) {
+      const cover = await loadObjectUrl(next.coverKey);
       if (cover) next = { ...next, cover };
     }
     return next;
