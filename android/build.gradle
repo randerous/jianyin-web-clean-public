@@ -23,6 +23,12 @@ if (externalGradleBuildDir) {
     rootProject.layout.buildDirectory.set(new File(externalGradleBuildDir, "root"))
     subprojects { subproject ->
         subproject.layout.buildDirectory.set(new File(externalGradleBuildDir, subproject.name))
+        if (subproject.name == "capacitor-cordova-android-plugins") {
+            subproject.pluginManager.withPlugin("com.android.library") {
+                subproject.android.externalNativeBuild.cmake.buildStagingDirectory =
+                    new File(externalGradleBuildDir, "${subproject.name}-cxx")
+            }
+        }
     }
 }
 
