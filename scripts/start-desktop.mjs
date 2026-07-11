@@ -13,7 +13,12 @@ process.env.COPY_EXTENDED_ATTRIBUTES_DISABLE = "1";
 
 function run(command, args, label) {
   console.log(`\n==> ${label}`);
-  const result = spawnSync(command, args, { cwd: root, env: process.env, stdio: "inherit" });
+  const result = spawnSync(command, args, {
+    cwd: root,
+    env: process.env,
+    stdio: "inherit",
+    shell: process.platform === "win32"
+  });
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command} ${args.join(" ")} failed with exit code ${result.status}`);
 }
