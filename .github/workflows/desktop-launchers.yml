@@ -1,0 +1,62 @@
+name: Desktop launchers
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/desktop-launchers.yml"
+      - "scripts/start-desktop.mjs"
+      - "scripts/bootstrap-node-windows.ps1"
+      - "start-jianyin-windows.cmd"
+      - "start-jianyin-macos.command"
+      - "package.json"
+      - "package-lock.json"
+  pull_request:
+    paths:
+      - ".github/workflows/desktop-launchers.yml"
+      - "scripts/start-desktop.mjs"
+      - "scripts/bootstrap-node-windows.ps1"
+      - "start-jianyin-windows.cmd"
+      - "start-jianyin-macos.command"
+      - "package.json"
+      - "package-lock.json"
+
+jobs:
+  launch:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            launcher: .\start-jianyin-windows.cmd
+          - os: macos-latest
+            launcher: ./start-jianyin-macos.command
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      PORT: 5210
+      JIANYIN_NO_OPEN: 1
+      JIANYIN_EXIT_AFTER_READY: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Validate Windows bootstrap syntax
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            "scripts/bootstrap-node-windows.ps1",
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if ($errors.Count) {
+            $errors | ForEach-Object { Write-Error $_ }
+            exit 1
+          }
+      - name: Launch desktop app
+        run: ${{ matrix.launcher }}

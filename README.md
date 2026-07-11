@@ -11,15 +11,31 @@
 - Android 版内置本地 Node 服务，不依赖电脑后端
 - 桌面版通过本地服务运行在 `http://127.0.0.1:5188/`
 
-## 桌面版运行
+## 桌面版一键运行
+
+在 GitHub 项目页面点击 `Code → Download ZIP` 并解压，或者用 Git 拉取仓库。进入项目目录后直接运行对应文件：
+
+- Windows：双击 `start-jianyin-windows.cmd`
+- macOS：双击 `start-jianyin-macos.command`
+
+脚本会自动完成以下操作：
+
+1. 检查 Node.js；缺少兼容版本时，从 Node.js 官方站点下载 Node 22 LTS 到项目内 `.runtime`，校验 SHA-256，不修改系统环境。
+2. 首次运行自动安装依赖，后续在依赖未变化时跳过安装。
+3. 自动构建生产版本并启动 `http://127.0.0.1:5188/`。
+4. 自动打开默认浏览器。保持启动窗口开启；关闭窗口即可停止本地服务。
+
+也可以在终端中启动：
 
 ```powershell
-npm install
-npm run build
-.\start-jianyin-web-clean.ps1
+# Windows
+.\start-jianyin-windows.cmd
 ```
 
-启动脚本会拉起本地服务并打开浏览器。
+```bash
+# macOS
+./start-jianyin-macos.command
+```
 
 ## Android 构建
 
