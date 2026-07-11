@@ -1,6 +1,6 @@
 {
   "name": "jianyin-web-clean",
-  "version": "1.0.11",
+  "version": "1.0.12",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,9 +12,14 @@
     "android:open": "cap open android",
     "preview": "node server.mjs",
     "test": "npm run test:api && npm run test:e2e",
-    "test:api": "node --test tests/server.test.mjs",
-    "test:e2e": "playwright test",
-    "test:smoke:flac": "REAL_FLAC_SMOKE=1 node --test --test-name-pattern \"real flac source smoke\" tests/server.test.mjs",
+    "test:api": "node scripts/run-api-tests.mjs",
+    "test:e2e": "playwright test --config playwright.config.ts && node scripts/generate-test-status.mjs",
+    "test:perf": "npm run build && npm run test:perf:run",
+    "test:perf:run": "playwright test --config playwright.performance.config.ts && node scripts/generate-test-status.mjs",
+    "test:status": "node scripts/generate-test-status.mjs",
+    "test:status:reset": "node scripts/generate-test-status.mjs --reset",
+    "test:all": "npm run test:status:reset && npm run build && npm test && npm run test:perf:run",
+    "test:smoke:flac": "node --test tests/smoke/real-flac.smoke.mjs",
     "test:smoke:playlist": "playwright test --grep \"remote playlists persist across clean browser contexts\" --project=chromium"
   },
   "dependencies": {

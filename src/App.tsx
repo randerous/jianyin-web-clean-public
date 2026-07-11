@@ -52,6 +52,7 @@ import {
   syncNeteaseAccountPlaylists
 } from "./lib/api";
 import { activeLyricIndex, formatTime, parseLrc } from "./lib/lyrics";
+import { createSharedStateWriter } from "./lib/shared-state-writer";
 import {
   deleteLocalFile,
   downloadJson,
@@ -291,6 +292,11 @@ export default function App() {
   const coverInputRef = useRef<HTMLInputElement | null>(null);
   const searchRunRef = useRef(0);
   const sharedStateReadyRef = useRef(false);
+  const sharedDataRefsRef = useRef<unknown[]>([]);
+  const latestSharedStateRef = useRef<PersistedState | null>(null);
+  const sharedSettingsTimerRef = useRef<number | null>(null);
+  const sharedStateWriterRef = useRef<ReturnType<typeof createSharedStateWriter> | null>(null);
+  const homeRequestRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
   const queueRef = useRef(queue);
   const queueIndexRef = useRef(queueIndex);
   const modeRef = useRef(mode);
@@ -302,6 +308,12 @@ export default function App() {
   const pausedPlaybackRef = useRef<{ key: string; at: number } | null>(null);
 
   const currentSong = queue[queueIndex] ?? null;
+  if (!sharedStateWriterRef.current) {
+    sharedStateWriterRef.current = createSharedStateWriter(
+      (state, options) => saveSharedState(state, options),
+      () => setToast("共享歌单保存失败")
+    );
+  }
   const favoriteKeys = useMemo(() => new Set(favorites.map(songKey)), [favorites]);
   const activePlaylist =
     playlists.find((playlist) => playlist.id === activePlaylistId) ??
@@ -370,8 +382,13 @@ export default function App() {
 
   useEffect(() => {
     if (!queue.length) return;
-    const start = queueIndex >= 0 ? queueIndex + 1 : 0;
-    prewarmRemoteSongs([...queue.slice(start), ...queue.slice(0, start)], 2);
+    if (queueIndex < 0) {
+      prewarmRemoteSongs(queue.slice(0, 2), 2);
+      return;
+    }
+    const previous = queue[(queueIndex - 1 + queue.length) % queue.length];
+    const next = queue[(queueIndex + 1) % queue.length];
+    prewarmRemoteSongs([next, previous], 2);
   }, [prewarmRemoteSongs, queue, queueIndex]);
 
   useEffect(() => {
@@ -408,6 +425,11 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
+    const sharedDataRefs = [playlists, favorites, history, downloadHistory, queue, queueIndex, searchHistory];
+    const previousSharedDataRefs = sharedDataRefsRef.current;
+    const sharedDataChanged = previousSharedDataRefs.length > 0
+      && sharedDataRefs.some((value, index) => value !== previousSharedDataRefs[index]);
+    sharedDataRefsRef.current = sharedDataRefs;
     const state: PersistedState = {
       playlists,
       favorites,
@@ -429,13 +451,46 @@ export default function App() {
       autoPlayOnStart,
       androidStatusNotificationEnabled
     };
+    latestSharedStateRef.current = state;
     try {
       saveState(state);
-      if (sharedStateReadyRef.current) void saveSharedState(state).catch(() => setToast("共享歌单保存失败"));
     } catch {
       setToast("浏览器存储空间不足，本次修改可能不会保存");
+      return;
     }
+    if (!sharedStateReadyRef.current) return;
+    if (sharedDataChanged) {
+      sharedStateWriterRef.current!.enqueue(state);
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      if (sharedSettingsTimerRef.current === timer) sharedSettingsTimerRef.current = null;
+      sharedStateWriterRef.current!.enqueue(state);
+    }, 250);
+    sharedSettingsTimerRef.current = timer;
+    return () => {
+      window.clearTimeout(timer);
+      if (sharedSettingsTimerRef.current === timer) sharedSettingsTimerRef.current = null;
+    };
   }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
+
+  useEffect(() => {
+    const flushLatestSharedState = () => {
+      if (!sharedStateReadyRef.current || !latestSharedStateRef.current || sharedSettingsTimerRef.current === null) return;
+      window.clearTimeout(sharedSettingsTimerRef.current);
+      sharedSettingsTimerRef.current = null;
+      sharedStateWriterRef.current!.flush(latestSharedStateRef.current);
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") flushLatestSharedState();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    window.addEventListener("pagehide", flushLatestSharedState);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      window.removeEventListener("pagehide", flushLatestSharedState);
+    };
+  }, []);
 
   useEffect(() => {
     let live = true;
@@ -483,10 +538,15 @@ export default function App() {
   }, []);
 
   const refreshHome = useCallback(async (refresh = 0) => {
+    const requestId = homeRequestRef.current.id + 1;
+    homeRequestRef.current.controller?.abort();
+    const controller = new AbortController();
+    homeRequestRef.current = { id: requestId, controller };
     setHomeLoading(true);
     setHomeError("");
     try {
-      const data = await fetchNeteaseHome(playQuality, refresh);
+      const data = await fetchNeteaseHome(playQuality, refresh, { signal: controller.signal });
+      if (homeRequestRef.current.id !== requestId) return;
       setHomeData({
         radarSongs: data.radarSongs,
         hotSongs: data.hotSongs,
@@ -494,6 +554,7 @@ export default function App() {
       });
       setProxyOnline(true);
     } catch (error) {
+      if (controller.signal.aborted || homeRequestRef.current.id !== requestId) return;
       setHomeError(error instanceof Error ? error.message : "首页推荐加载失败");
       setProxyOnline(false);
       setHomeData({
@@ -502,9 +563,14 @@ export default function App() {
         recommendedPlaylists: []
       });
     } finally {
-      setHomeLoading(false);
+      if (homeRequestRef.current.id === requestId) {
+        homeRequestRef.current.controller = null;
+        setHomeLoading(false);
+      }
     }
   }, [playQuality]);
+
+  useEffect(() => () => homeRequestRef.current.controller?.abort(), []);
 
   useEffect(() => {
     void refreshHome(0);
@@ -816,6 +882,15 @@ export default function App() {
       const next = exists ? items.filter((item) => songKey(item) !== songKey(favoriteSong)) : [favoriteSong, ...items];
       setPlaylists((playlists) => playlists.map((playlist) => playlist.id === FAVORITES_ID ? { ...playlist, songs: next, cover: next[0]?.cover ?? playlist.cover } : playlist));
       setToast(exists ? "已取消喜欢" : "已添加到我喜欢的音乐");
+      return next;
+    });
+  }, []);
+
+  const toggleSelectedSong = useCallback((song: Song) => {
+    setSelected((items) => {
+      const next = new Set(items);
+      const key = songKey(song);
+      next.has(key) ? next.delete(key) : next.add(key);
       return next;
     });
   }, []);
@@ -1327,6 +1402,7 @@ export default function App() {
     <div className={shellClassName}>
       <audio
         ref={audioRef}
+        preload="metadata"
         onTimeUpdate={(event) => {
           positionRef.current = event.currentTarget.currentTime;
           audioRetryRef.current = null;
@@ -1395,12 +1471,7 @@ export default function App() {
             onPage={(page) => submitSearch(query, page)}
             onPlay={(song) => playSong(song, searchResults)}
             onFavorite={toggleFavorite}
-            onSelect={(song) => setSelected((items) => {
-              const next = new Set(items);
-              const key = songKey(song);
-              next.has(key) ? next.delete(key) : next.add(key);
-              return next;
-            })}
+            onSelect={toggleSelectedSong}
             onSelectAllVisible={() => setSelected((items) => {
               const next = new Set(items);
               searchResults.forEach((song) => next.add(songKey(song)));
@@ -1481,15 +1552,10 @@ export default function App() {
           onPlay={playSong}
           onFavorite={toggleFavorite}
           onDownload={downloadSong}
-          onDownloadSelected={(songs) => downloadSongs(songs)}
-          onDeleteDownload={(songs) => void deleteDownloadedSongs(songs)}
-          onAddToQueue={(songs) => addSongsToQueue(songs)}
-          onSelect={(song) => setSelected((items) => {
-            const next = new Set(items);
-            const key = songKey(song);
-            next.has(key) ? next.delete(key) : next.add(key);
-            return next;
-          })}
+          onDownloadSelected={downloadSongs}
+          onDeleteDownload={deleteDownloadedSongs}
+          onAddToQueue={addSongsToQueue}
+          onSelect={toggleSelectedSong}
           onSavePlaylist={() => {
             setPlaylists((items) => [activePlaylist, ...items.filter((item) => item.id !== activePlaylist.id)]);
             setPreviewPlaylist((playlist) => playlist?.id === activePlaylist.id ? null : playlist);
@@ -1988,12 +2054,14 @@ function PlaylistDetail({ playlist, saved, favoriteKeys, selected, onClose, onPl
   const [filter, setFilter] = useState("");
   const [createName, setCreateName] = useState("");
   const normalizedFilter = filter.trim().toLowerCase();
-  const visibleSongs = normalizedFilter
+  const visibleSongs = useMemo(() => normalizedFilter
     ? playlist.songs.filter((song) => [song.name, song.artist].some((value) => value.toLowerCase().includes(normalizedFilter)))
-    : playlist.songs;
-  const selectedSongs = visibleSongs.filter((song) => selected.has(songKey(song)));
+    : playlist.songs, [normalizedFilter, playlist.songs]);
+  const selectedSongs = useMemo(() => visibleSongs.filter((song) => selected.has(songKey(song))), [selected, visibleSongs]);
   const isDownloadManager = playlist.id === "download_history_preview";
   const deletableSelectedSongs = isDownloadManager ? selectedSongs : selectedSongs.filter(isDownloadCachedSong);
+  const playPlaylistSong = useCallback((song: Song) => onPlay(song, playlist.songs), [onPlay, playlist.songs]);
+  const deleteDownloadedSong = useCallback((song: Song) => onDeleteDownload([song]), [onDeleteDownload]);
   return (
     <div className="detail-backdrop">
       <section className="detail" role="dialog" aria-modal="true" aria-label={playlist.name}>
@@ -2032,7 +2100,7 @@ function PlaylistDetail({ playlist, saved, favoriteKeys, selected, onClose, onPl
           </form>
         )}
         <div className="playlist-only-column">
-          <div><h3>当前歌单</h3><div className="song-list">{visibleSongs.map((song) => <SongRow key={songKey(song)} song={song} selectable selected={selected.has(songKey(song))} favorite={favoriteKeys.has(songKey(song))} onPlay={(target) => onPlay(target, playlist.songs)} onFavorite={isDownloadManager ? undefined : onFavorite} onSelect={onSelect} onDownload={isDownloadManager ? undefined : onDownload} onDelete={isDownloadManager ? (target) => onDeleteDownload([target]) : undefined} />)}{!visibleSongs.length && <p className="empty-text">没有匹配歌曲</p>}</div></div>
+          <div><h3>当前歌单</h3><div className="song-list">{visibleSongs.map((song) => <SongRow key={songKey(song)} song={song} selectable selected={selected.has(songKey(song))} favorite={favoriteKeys.has(songKey(song))} onPlay={playPlaylistSong} onFavorite={isDownloadManager ? undefined : onFavorite} onSelect={onSelect} onDownload={isDownloadManager ? undefined : onDownload} onDelete={isDownloadManager ? deleteDownloadedSong : undefined} />)}{!visibleSongs.length && <p className="empty-text">没有匹配歌曲</p>}</div></div>
         </div>
       </section>
     </div>

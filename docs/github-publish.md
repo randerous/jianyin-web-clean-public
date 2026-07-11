@@ -42,10 +42,11 @@ The script will:
 
 ## Publish Code And APK
 
-Build the Android APK, push code, and upload `app-debug.apk` to a prerelease:
+Build the Android APK, push code, and upload `app-release.apk` to a release:
 
 ```powershell
-npm run github:publish -- --owner randerous --repo jianyin-web-clean-public --build-apk --upload-apk --commit "Release debug APK"
+npm run android:apk
+gh release create v1.0.12 android/app/build/outputs/apk/release/app-release.apk --title "v1.0.12" --generate-notes
 ```
 
 The APK itself is not committed to Git. It is uploaded as a release asset.

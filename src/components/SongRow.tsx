@@ -1,4 +1,5 @@
 import { Download, Heart, Play, Square, SquareCheckBig, Trash2 } from "lucide-react";
+import { memo } from "react";
 import type { Song } from "../types";
 
 export function sourceLabel(source: Song["source"]) {
@@ -21,7 +22,7 @@ type Props = {
   onDelete?: (song: Song) => void;
 };
 
-export default function SongRow({ song, active, favorite, selectable, selected, onPlay, onFavorite, onSelect, onDownload, onDelete }: Props) {
+function SongRow({ song, active, favorite, selectable, selected, onPlay, onFavorite, onSelect, onDownload, onDelete }: Props) {
   return (
     <div className={`song-row ${active ? "active" : ""}`}>
       <button className="song-hit" onClick={() => onPlay(song)} aria-label={`${song.name} ${song.artist} · ${sourceLabel(song.source)}`}>
@@ -59,3 +60,5 @@ export default function SongRow({ song, active, favorite, selectable, selected, 
     </div>
   );
 }
+
+export default memo(SongRow);

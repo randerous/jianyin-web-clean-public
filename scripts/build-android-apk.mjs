@@ -5,9 +5,9 @@ import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const androidRoot = resolve(root, "android");
-const apkPath = resolve(androidRoot, "app", "build", "outputs", "apk", "debug", "app-debug.apk");
+const apkPath = resolve(androidRoot, "app", "build", "outputs", "apk", "release", "app-release.apk");
 const gradleBuildRoot = resolve(process.env.TMPDIR || "/tmp", "jianyin-web-clean-public-gradle-build");
-const externalApkPath = resolve(gradleBuildRoot, "app", "outputs", "apk", "debug", "app-debug.apk");
+const externalApkPath = resolve(gradleBuildRoot, "app", "outputs", "apk", "release", "app-release.apk");
 const javaHomeCandidates = [
   process.env.JAVA_HOME,
   resolve(root, "..", "jdk-21"),
@@ -20,10 +20,9 @@ const androidHomeCandidates = [
   resolve(root, "..", "android-sdk"),
   "/opt/homebrew/share/android-commandlinetools"
 ].filter(Boolean);
-const debugKeystoreCandidates = [
-  process.env.JIANYIN_DEBUG_KEYSTORE,
-  resolve(root, "..", "old", "debug.keystore"),
-  resolve(root, "..", ".android", "debug.keystore")
+const releaseKeystoreCandidates = [
+  process.env.JIANYIN_RELEASE_KEYSTORE,
+  resolve(root, "..", "old", "debug.keystore")
 ].filter(Boolean);
 const ndkVersion = "28.2.13676358";
 
@@ -40,8 +39,8 @@ function findAndroidHome() {
   return androidHomeCandidates.find((path) => existsSync(resolve(path, "platforms")) && existsSync(resolve(path, "build-tools")));
 }
 
-function findDebugKeystore() {
-  return debugKeystoreCandidates.find((path) => existsSync(path));
+function findReleaseKeystore() {
+  return releaseKeystoreCandidates.find((path) => existsSync(path));
 }
 
 function isAndroidNdkHome(path) {
@@ -96,6 +95,7 @@ function configureEnv() {
   const env = { ...process.env };
   env.COPYFILE_DISABLE = "1";
   env.COPY_EXTENDED_ATTRIBUTES_DISABLE = "1";
+  env.JIANYIN_ANDROID_RELEASE = "1";
   env.JAVA_HOME = findJavaHome() ?? env.JAVA_HOME;
   env.ANDROID_HOME = findAndroidHome() ?? env.ANDROID_HOME;
   env.ANDROID_SDK_ROOT = env.ANDROID_HOME;
@@ -103,10 +103,10 @@ function configureEnv() {
   env.ANDROID_NDK_HOME = env.JIANYIN_ANDROID_NDK_PATH ?? env.ANDROID_NDK_HOME;
   env.ANDROID_NDK_ROOT = env.JIANYIN_ANDROID_NDK_PATH ?? env.ANDROID_NDK_ROOT;
   env.JIANYIN_ANDROID_GRADLE_BUILD_DIR = gradleBuildRoot;
-  env.JIANYIN_DEBUG_KEYSTORE = findDebugKeystore() ?? env.JIANYIN_DEBUG_KEYSTORE;
-  env.JIANYIN_DEBUG_KEYSTORE_PASSWORD = env.JIANYIN_DEBUG_KEYSTORE_PASSWORD || "android";
-  env.JIANYIN_DEBUG_KEY_ALIAS = env.JIANYIN_DEBUG_KEY_ALIAS || "androiddebugkey";
-  env.JIANYIN_DEBUG_KEY_PASSWORD = env.JIANYIN_DEBUG_KEY_PASSWORD || "android";
+  env.JIANYIN_RELEASE_KEYSTORE = findReleaseKeystore() ?? env.JIANYIN_RELEASE_KEYSTORE;
+  env.JIANYIN_RELEASE_KEYSTORE_PASSWORD = env.JIANYIN_RELEASE_KEYSTORE_PASSWORD || "android";
+  env.JIANYIN_RELEASE_KEY_ALIAS = env.JIANYIN_RELEASE_KEY_ALIAS || "androiddebugkey";
+  env.JIANYIN_RELEASE_KEY_PASSWORD = env.JIANYIN_RELEASE_KEY_PASSWORD || "android";
 
   const pathParts = [];
   if (env.JAVA_HOME) pathParts.push(resolve(env.JAVA_HOME, "bin"));
@@ -207,13 +207,13 @@ function countGeneratedAppleDoubleFiles() {
   return appleDoubleBuildRoots.reduce((count, path) => count + countAppleDoubleFiles(path), 0);
 }
 
-async function assembleDebug(env) {
+async function assembleRelease(env) {
   const command = process.platform === "win32" ? resolve(androidRoot, "gradlew.bat") : resolve(androidRoot, "gradlew");
   const cleaner = setInterval(removeGeneratedAppleDoubleFiles, 750);
   try {
     rmSync(gradleBuildRoot, { recursive: true, force: true });
     removeGeneratedAppleDoubleFiles();
-    await runStreaming("Assemble Android debug APK", command, ["assembleDebug"], { cwd: androidRoot, env });
+    await runStreaming("Assemble Android release APK", command, ["assembleRelease"], { cwd: androidRoot, env });
     if (existsSync(externalApkPath)) {
       mkdirSync(dirname(apkPath), { recursive: true });
       copyFileSync(externalApkPath, apkPath);
@@ -224,7 +224,7 @@ async function assembleDebug(env) {
 
     console.warn(`Found ${appleDoubleCount} AppleDouble metadata files after failed assemble. Cleaning and retrying once...`);
     removeGeneratedAppleDoubleFiles();
-    await runStreaming("Retry Android debug APK assemble", command, ["assembleDebug"], { cwd: androidRoot, env });
+    await runStreaming("Retry Android release APK assemble", command, ["assembleRelease"], { cwd: androidRoot, env });
     if (existsSync(externalApkPath)) {
       mkdirSync(dirname(apkPath), { recursive: true });
       copyFileSync(externalApkPath, apkPath);
@@ -290,10 +290,14 @@ function verifyApk(env) {
 
 const env = configureEnv();
 
+if (!env.JIANYIN_RELEASE_KEYSTORE || !existsSync(env.JIANYIN_RELEASE_KEYSTORE)) {
+  throw new Error("Release keystore not found. Refusing to build an unsigned APK.");
+}
+
 writeAndroidLocalProperties(env);
 run("Build desktop/web assets", commandName("npm"), ["run", "build"], { env });
 run("Sync Capacitor Android project", commandName("npx"), ["cap", "sync", "android"], { env });
 run("Prepare embedded Android Node backend", process.execPath, [resolve(root, "scripts", "prepare-android-embedded-backend.mjs")], { env });
 removeGeneratedAppleDoubleFiles();
-await assembleDebug(env);
+await assembleRelease(env);
 verifyApk(env);

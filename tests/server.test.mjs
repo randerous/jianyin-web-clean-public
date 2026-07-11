@@ -850,27 +850,6 @@ test("flac song resolve rejects missing url and short getUrl responses", async (
   assert.equal(short.body.error, "flac_song_unavailable");
 });
 
-test("real flac source smoke: searches, resolves, and streams full audio", { skip: process.env.REAL_FLAC_SMOKE !== "1" }, async () => {
-  const baseUrl = await startTestServer({});
-  const search = await getJson(`${baseUrl}/api/flac/search?keyword=${encodeURIComponent("September Earth Wind Fire")}&limit=5`);
-  assert.equal(search.response.status, 200);
-  assert.ok(search.body.songs.length > 0);
-  const first = search.body.songs[0];
-  assert.equal(first.source, "flac");
-  assert.ok(first.durationMs > 60_000);
-
-  const songPath = first.url.replace("/api/flac/stream/", "/api/flac/song/");
-  const song = await getJson(`${baseUrl}${songPath}`);
-  assert.equal(song.response.status, 200);
-  assert.equal(song.body.verifiedPlayable, true);
-  assert.ok(song.body.durationMs > 60_000);
-
-  const stream = await fetch(`${baseUrl}${song.body.url}`, { headers: { Range: "bytes=0-65535" } });
-  assert.equal(stream.status, 206);
-  assert.match(stream.headers.get("content-type") ?? "", /^audio\//);
-  assert.equal((await stream.arrayBuffer()).byteLength, 65_536);
-});
-
 test("search verifies candidates in small batches, stops after desired playable results, and caches", async () => {
   const requested = [];
   const neteaseClient = {

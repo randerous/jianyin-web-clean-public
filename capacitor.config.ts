@@ -1,5 +1,7 @@
 import type { CapacitorConfig } from "@capacitor/cli";
 
+const releaseBuild = process.env.JIANYIN_ANDROID_RELEASE === "1";
+
 const config: CapacitorConfig = {
   appId: "com.randerous.jianyin",
   appName: "既见",
@@ -9,7 +11,7 @@ const config: CapacitorConfig = {
     backgroundColor: "#eef3f7",
     allowMixedContent: true,
     captureInput: false,
-    webContentsDebuggingEnabled: true
+    webContentsDebuggingEnabled: !releaseBuild
   },
   server: {
     androidScheme: "https",
