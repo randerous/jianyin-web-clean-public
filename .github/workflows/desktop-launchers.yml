@@ -58,5 +58,11 @@ jobs:
             $errors | ForEach-Object { Write-Error $_ }
             exit 1
           }
+      - name: Bootstrap verified local Node on Windows
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          & "scripts/bootstrap-node-windows.ps1"
+          & ".runtime/node/node.exe" -e "const [M,m]=process.versions.node.split('.').map(Number); process.exit(M === 22 && m >= 12 ? 0 : 1)"
       - name: Launch desktop app
         run: ${{ matrix.launcher }}
