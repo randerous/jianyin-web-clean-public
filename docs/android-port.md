@@ -28,17 +28,17 @@ That command is the source of truth for Android packaging. It runs, in order:
 1. `npm run build`
 2. `npx cap sync android`
 3. `node scripts/prepare-android-embedded-backend.mjs`
-4. `android/gradlew assembleDebug -PjianyinAbi=arm64-v8a`
+4. `android/gradlew assembleRelease -PjianyinAbi=arm64-v8a`
 5. APK asset verification
 
 Do not run `npx cap sync android` and then Gradle directly when making a test
 APK. That skips the embedded backend preparation step and can produce a broken
 package.
 
-The debug APK is generated at:
+The signed release APK is generated at:
 
 ```text
-android/app/build/outputs/apk/debug/app-debug.apk
+android/app/build/outputs/apk/release/app-release.apk
 ```
 
 The workflow verifies that the APK contains both:
@@ -62,10 +62,10 @@ Open the Android project:
 npm run android:open
 ```
 
-Install the debug APK on a connected device:
+Install the release APK on a connected device:
 
 ```bash
-adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+adb install -r android/app/build/outputs/apk/release/app-release.apk
 ```
 
 ## Android 15 Notes

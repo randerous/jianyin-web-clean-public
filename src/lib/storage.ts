@@ -267,11 +267,13 @@ export async function loadSharedState() {
   return data.state ? normalizeState(data.state) : null;
 }
 
-export async function saveSharedState(state: PersistedState) {
+export async function saveSharedState(state: PersistedState, options: { keepalive?: boolean } = {}) {
+  const body = JSON.stringify({ state: serializeState(state) });
   const response = await fetch(apiUrl("/api/state"), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ state: serializeState(state) })
+    body,
+    keepalive: Boolean(options.keepalive && body.length <= 60_000)
   });
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));

@@ -47,6 +47,7 @@ public class MainActivity extends BridgeActivity {
                 granted -> {});
         super.onCreate(savedInstanceState);
         configureSystemBars();
+        configureMediaPlayback();
         configureDownloads();
         configurePlaybackBridge();
         configureBackGesture();
@@ -80,6 +81,13 @@ public class MainActivity extends BridgeActivity {
             flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
         }
         decor.setSystemUiVisibility(flags);
+    }
+
+    private void configureMediaPlayback() {
+        if (getBridge() == null || getBridge().getWebView() == null) {
+            return;
+        }
+        getBridge().getWebView().getSettings().setMediaPlaybackRequiresUserGesture(false);
     }
 
     private void configureBackGesture() {

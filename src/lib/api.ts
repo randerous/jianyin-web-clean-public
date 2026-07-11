@@ -74,8 +74,8 @@ function normalizeRemoteUrl(value: unknown) {
   return url.startsWith("/api/") ? apiUrl(url) : url;
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
-  const response = await fetch(apiUrl(url));
+async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(apiUrl(url), init);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const message = isRecord(data) ? asString(data.message, asString(data.error, "请求失败")) : "请求失败";
@@ -492,25 +492,45 @@ export async function syncBiliAccountPlaylists() {
   return (data.playlists ?? []).map(normalizeRemotePlaylist).filter((playlist): playlist is Playlist => Boolean(playlist));
 }
 
-export async function fetchNeteaseHome(quality: PlayQuality = "exhigh", refresh = 0) {
+type NeteaseHomeData = {
+  radarSongs: Song[];
+  hotSongs: Song[];
+  recommendedPlaylists: Playlist[];
+};
+
+const neteaseHomeInFlight = new Map<string, Promise<NeteaseHomeData>>();
+
+export async function fetchNeteaseHome(quality: PlayQuality = "exhigh", refresh = 0, options: { signal?: AbortSignal } = {}) {
   const params = new URLSearchParams({ quality });
   if (refresh > 0) params.set("refresh", String(refresh));
-  const data = await fetchJson<{
-    radarSongs?: RemoteSong[];
-    hotSongs?: RemoteSong[];
-    recommendedPlaylists?: RemotePlaylist[];
-  }>(`/api/netease/home?${params.toString()}`);
-  return {
-    radarSongs: (data.radarSongs ?? []).map(normalizeRemoteSong).filter((song): song is Song => Boolean(song)),
-    hotSongs: (data.hotSongs ?? []).map(normalizeRemoteSong).filter((song): song is Song => Boolean(song)),
-    recommendedPlaylists: (data.recommendedPlaylists ?? []).map((playlist, index) => ({
-      id: `netease_playlist_${asString(playlist.id)}`,
-      name: asString(playlist.name, "推荐歌单"),
-      cover: asString(playlist.cover, asString(playlist.coverPic, asString(playlist.picUrl, cover(index + 1)))),
-      songs: (playlist.songs ?? []).map((song, songIndex) => normalizeRemoteSong(song, songIndex)).filter((song): song is Song => Boolean(song)),
-      source: "netease",
-      trackCount: typeof playlist.trackCount === "number" ? playlist.trackCount : 0,
-      creatorNickname: asString(playlist.creatorNickname)
-    } satisfies Playlist)).filter((playlist) => playlist.id !== "netease_playlist_")
+  const key = params.toString();
+  const load = async (): Promise<NeteaseHomeData> => {
+    const data = await fetchJson<{
+      radarSongs?: RemoteSong[];
+      hotSongs?: RemoteSong[];
+      recommendedPlaylists?: RemotePlaylist[];
+    }>(`/api/netease/home?${key}`, { signal: options.signal });
+    return {
+      radarSongs: (data.radarSongs ?? []).map(normalizeRemoteSong).filter((song): song is Song => Boolean(song)),
+      hotSongs: (data.hotSongs ?? []).map(normalizeRemoteSong).filter((song): song is Song => Boolean(song)),
+      recommendedPlaylists: (data.recommendedPlaylists ?? []).map((playlist, index) => ({
+        id: `netease_playlist_${asString(playlist.id)}`,
+        name: asString(playlist.name, "推荐歌单"),
+        cover: asString(playlist.cover, asString(playlist.coverPic, asString(playlist.picUrl, cover(index + 1)))),
+        songs: (playlist.songs ?? []).map((song, songIndex) => normalizeRemoteSong(song, songIndex)).filter((song): song is Song => Boolean(song)),
+        source: "netease",
+        trackCount: typeof playlist.trackCount === "number" ? playlist.trackCount : 0,
+        creatorNickname: asString(playlist.creatorNickname)
+      } satisfies Playlist)).filter((playlist) => playlist.id !== "netease_playlist_")
+    };
   };
+
+  if (options.signal) return load();
+  const inFlight = neteaseHomeInFlight.get(key);
+  if (inFlight) return inFlight;
+  const request = load().finally(() => {
+    if (neteaseHomeInFlight.get(key) === request) neteaseHomeInFlight.delete(key);
+  });
+  neteaseHomeInFlight.set(key, request);
+  return request;
 }

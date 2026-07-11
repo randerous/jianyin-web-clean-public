@@ -31,7 +31,7 @@ npm run android:apk
 生成的 APK 位于：
 
 ```text
-android/app/build/outputs/apk/debug/app-debug.apk
+android/app/build/outputs/apk/release/app-release.apk
 ```
 
 Android 内嵌后端会随 APK 一起打包，手机端可独立完成搜索、播放、下载和缓存。
