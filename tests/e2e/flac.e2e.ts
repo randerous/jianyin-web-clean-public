@@ -123,7 +123,7 @@ test("flac search hides unplayable, trial, and 30 second songs", async ({ page }
   await expect(page.getByText("NoUrl")).toHaveCount(0);
 });
 
-test("flac search controls immediate playback and download cache", async ({ page }) => {
+test("flac download caches the current song without interrupting playback", async ({ page }) => {
   const searchRequests: URLSearchParams[] = [];
   const songRequests: string[] = [];
   await page.route("**/api/flac/search**", async (route) => {
@@ -188,11 +188,31 @@ test("flac search controls immediate playback and download cache", async ({ page
   await expectAudioLongerThan(page, 60);
   expect(songRequests.every((query) => query.includes("sign=squality"))).toBe(true);
 
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.currentTime)).toBeGreaterThan(1);
+  const playbackBeforeDownload = await page.locator("audio").evaluate((audio: HTMLAudioElement) => {
+    audio.dataset.downloadEmptiedEvents = "0";
+    audio.addEventListener("emptied", () => {
+      audio.dataset.downloadEmptiedEvents = String(Number(audio.dataset.downloadEmptiedEvents ?? "0") + 1);
+    });
+    return { src: audio.src, currentTime: audio.currentTime };
+  });
+
   const downloadPromise = page.waitForEvent("download");
   const player = await openPlayer(page);
   await player.getByRole("button", { name: "更多选项" }).click();
   await player.getByRole("button", { name: "下载歌曲" }).click();
   await downloadPromise;
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => ({
+    src: audio.src,
+    paused: audio.paused,
+    currentTime: audio.currentTime,
+    emptiedEvents: Number(audio.dataset.downloadEmptiedEvents ?? "0")
+  }))).toMatchObject({
+    src: playbackBeforeDownload.src,
+    paused: false,
+    emptiedEvents: 0
+  });
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.currentTime)).toBeGreaterThan(playbackBeforeDownload.currentTime);
   await page.getByRole("button", { name: "返回" }).click();
   await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
   await page.locator(".section-title .section-action").first().click();

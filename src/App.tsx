@@ -970,10 +970,14 @@ export default function App() {
     setSelected(new Set());
   }, []);
 
-  const updateSongEverywhere = useCallback((target: Song, updater: (song: Song) => Song) => {
+  const updateSongEverywhere = useCallback((target: Song, updater: (song: Song) => Song, options: { preserveCurrentPlaybackSource?: boolean } = {}) => {
     const key = songKey(target);
     const update = (song: Song) => songKey(song) === key ? updater(song) : song;
-    setQueue((items) => items.map(update));
+    setQueue((items) => items.map((song, index) => {
+      const updated = update(song);
+      if (!options.preserveCurrentPlaybackSource || index !== queueIndexRef.current || songKey(song) !== key) return updated;
+      return { ...updated, url: song.url };
+    }));
     setHistory((items) => items.map(update));
     setDownloadHistory((items) => items.map(update));
     setFavorites((items) => items.map(update));
@@ -1047,7 +1051,7 @@ export default function App() {
         needsImport: false,
         remotePlayable: true
       };
-      updateSongEverywhere(original, () => cached);
+      updateSongEverywhere(original, () => cached, { preserveCurrentPlaybackSource: true });
       return cached;
     } catch {
       return target;
