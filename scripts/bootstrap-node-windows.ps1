@@ -7,10 +7,10 @@ $RuntimeDir = Join-Path $ProjectDir ".runtime\node"
 $RuntimeNode = Join-Path $RuntimeDir "node.exe"
 if (Test-Path $RuntimeNode) { exit 0 }
 
-Write-Host "未检测到兼容的 Node.js，正在下载官方 Node 22 LTS 到项目目录..."
+Write-Host "Compatible Node.js was not found. Downloading official Node 22 LTS into this project..."
 $releases = Invoke-RestMethod "https://nodejs.org/dist/index.json"
 $release = $releases | Where-Object { $_.version -like "v22.*" -and $_.lts } | Select-Object -First 1
-if (-not $release) { throw "无法从 Node.js 官方索引找到 Node 22 LTS" }
+if (-not $release) { throw "Node 22 LTS was not found in the official Node.js release index" }
 
 $arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64" -and $release.files -contains "win-arm64-zip") { "arm64" } else { "x64" }
 $archiveName = "node-$($release.version)-win-$arch.zip"
@@ -24,17 +24,17 @@ try {
     Invoke-WebRequest "$baseUrl/$archiveName" -OutFile $ArchivePath
     Invoke-WebRequest "$baseUrl/SHASUMS256.txt" -OutFile $ChecksumsPath
     $checksumLine = Get-Content $ChecksumsPath | Where-Object { $_ -match "\s$([Regex]::Escape($archiveName))$" } | Select-Object -First 1
-    if (-not $checksumLine) { throw "官方校验文件中没有 $archiveName" }
+    if (-not $checksumLine) { throw "$archiveName was not found in the official checksum file" }
     $expected = ($checksumLine -split "\s+")[0].ToLowerInvariant()
     $actual = (Get-FileHash $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($actual -ne $expected) { throw "Node.js 下载文件 SHA-256 校验失败" }
+    if ($actual -ne $expected) { throw "Node.js download SHA-256 verification failed" }
 
     Expand-Archive $ArchivePath -DestinationPath $TempDir
     $ExtractedDir = Join-Path $TempDir "node-$($release.version)-win-$arch"
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $RuntimeDir) | Out-Null
     if (Test-Path $RuntimeDir) { Remove-Item $RuntimeDir -Recurse -Force }
     Move-Item $ExtractedDir $RuntimeDir
-    Write-Host "Node.js $($release.version) 已准备完成。"
+    Write-Host "Node.js $($release.version) is ready."
 } finally {
     Remove-Item $TempDir -Recurse -Force -ErrorAction SilentlyContinue
 }
