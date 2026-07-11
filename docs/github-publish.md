@@ -46,7 +46,7 @@ Build the Android APK, push code, and upload `app-release.apk` to a release:
 
 ```powershell
 npm run android:apk
-gh release create v1.0.12 android/app/build/outputs/apk/release/app-release.apk --title "v1.0.12" --generate-notes
+gh release create v1.0.13 android/app/build/outputs/apk/release/app-release.apk --title "v1.0.13" --generate-notes
 ```
 
 The APK itself is not committed to Git. It is uploaded as a release asset.

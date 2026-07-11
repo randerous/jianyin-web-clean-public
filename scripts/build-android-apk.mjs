@@ -148,6 +148,15 @@ function runStreaming(label, command, args, options = {}) {
   });
 }
 
+function statIfPresent(path) {
+  try {
+    return statSync(path);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 function removeAppleDoubleFiles(path) {
   if (!existsSync(path)) return;
   for (const name of readdirSync(path)) {
@@ -157,8 +166,8 @@ function removeAppleDoubleFiles(path) {
       continue;
     }
 
-    const stats = statSync(child);
-    if (stats.isDirectory()) {
+    const stats = statIfPresent(child);
+    if (stats?.isDirectory()) {
       removeAppleDoubleFiles(child);
     }
   }
@@ -174,8 +183,8 @@ function countAppleDoubleFiles(path) {
       continue;
     }
 
-    const stats = statSync(child);
-    if (stats.isDirectory()) count += countAppleDoubleFiles(child);
+    const stats = statIfPresent(child);
+    if (stats?.isDirectory()) count += countAppleDoubleFiles(child);
   }
   return count;
 }

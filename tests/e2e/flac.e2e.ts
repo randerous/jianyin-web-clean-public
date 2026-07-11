@@ -709,6 +709,110 @@ test("flac playback refreshes stale signature after a long pause before resuming
   expect(songRequests.some((query) => query.includes("sign=fresh-sign"))).toBe(true);
 });
 
+test("persisted flac search queue refreshes after reload on the first resume click", async ({ page }) => {
+  const staleSong = {
+    id: "flac_15368606",
+    name: "Persisted September",
+    artist: "Earth, Wind & Fire",
+    url: "/api/flac/stream/15368606?format=flac&bitrate=2000&time=old-time&sign=old-sign",
+    cover: "/assets/icon.png",
+    source: "flac" as const,
+    remotePlayable: true,
+    verifiedPlayable: true,
+    durationMs: 65000,
+    br: 2000000,
+    level: "flac",
+    audioType: "flac",
+    quality: "flac",
+    time: "old-time",
+    sign: "old-sign"
+  };
+  const persisted = { ...testState(), queue: [staleSong], queueIndex: 0 };
+  const searchRequests: URLSearchParams[] = [];
+  const songRequests: URLSearchParams[] = [];
+
+  await page.route("**/api/flac/search**", async (route) => {
+    const params = new URL(route.request().url()).searchParams;
+    searchRequests.push(params);
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        songs: [{
+          ...staleSong,
+          url: "/api/flac/stream/15368606?format=flac&bitrate=2000&time=fresh-time&sign=fresh-sign",
+          time: "fresh-time",
+          sign: "fresh-sign"
+        }],
+        page: 1,
+        limit: Number(params.get("limit") ?? 1),
+        total: 1,
+        hasMore: false
+      })
+    });
+  });
+  await page.route("**/api/flac/song/15368606**", async (route) => {
+    const params = new URL(route.request().url()).searchParams;
+    songRequests.push(params);
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        url: `/api/flac/stream/15368606?format=flac&bitrate=2000&time=${params.get("time")}&sign=${params.get("sign")}`,
+        durationMs: 65000,
+        verifiedPlayable: true,
+        br: 2000000,
+        level: "flac",
+        audioType: "flac",
+        quality: "flac"
+      })
+    });
+  });
+  await page.route("**/api/flac/stream/15368606**", async (route) => {
+    const sign = new URL(route.request().url()).searchParams.get("sign");
+    if (sign === "old-sign") {
+      await route.fulfill({ status: 403, contentType: "text/plain", body: "expired signature" });
+      return;
+    }
+    await route.fulfill({ path: fullSongFile, headers: { "content-type": "audio/wav", "accept-ranges": "bytes" } });
+  });
+
+  await page.route("**/api/state", async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state: persisted }) });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+  const persistedStateScript = await page.addInitScript(({ key, value }) => {
+    localStorage.setItem(key, JSON.stringify(value));
+  }, { key: storageKey, value: persisted });
+  await page.addInitScript(() => {
+    const originalPlay = HTMLMediaElement.prototype.play;
+    let inUserGesture = false;
+    document.addEventListener("click", () => {
+      inUserGesture = true;
+      setTimeout(() => { inUserGesture = false; }, 0);
+    }, true);
+    HTMLMediaElement.prototype.play = function playWithStrictGesture(this: HTMLMediaElement & { __playAuthorized?: boolean }) {
+      if (inUserGesture) this.__playAuthorized = true;
+      if (!this.__playAuthorized) {
+        return Promise.reject(new DOMException("play() failed because the user did not interact with the document first", "NotAllowedError"));
+      }
+      return originalPlay.call(this);
+    };
+  });
+
+  await page.reload();
+  await persistedStateScript.dispose();
+  await expect(page.locator(".now-playing")).toContainText("Persisted September");
+  await page.getByRole("button", { name: "播放", exact: true }).click();
+
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.src)).toContain("fresh-sign");
+  expect(searchRequests.some((params) => params.get("keyword")?.includes("Persisted September"))).toBe(true);
+  expect(songRequests.some((params) => params.get("sign") === "fresh-sign")).toBe(true);
+  await expectAudioPlaying(page);
+  await expect(page.locator(".toast")).not.toContainText("浏览器阻止了自动播放");
+});
+
 test("queue prewarms only the immediate previous and next FLAC songs", async ({ page }) => {
   const queueSongs = Array.from({ length: 5 }, (_, index) => ({
     id: `flac_${100 + index}`,

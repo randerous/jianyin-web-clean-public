@@ -306,6 +306,7 @@ export default function App() {
   const audioAttemptRef = useRef<{ song: Song; source: Song[] } | null>(null);
   const audioRetryRef = useRef<{ key: string; at: number } | null>(null);
   const pausedPlaybackRef = useRef<{ key: string; at: number } | null>(null);
+  const playbackRefreshRef = useRef(false);
 
   const currentSong = queue[queueIndex] ?? null;
   if (!sharedStateWriterRef.current) {
@@ -702,6 +703,7 @@ export default function App() {
         setPosition(startAt);
         await audioRef.current.play();
       }
+      pausedPlaybackRef.current = null;
       return true;
     } catch (error) {
       setPlaying(false);
@@ -711,6 +713,7 @@ export default function App() {
   }, [playbackSpeed, resolvePlayable]);
 
   const retryCurrentSongAfterAudioError = useCallback(async () => {
+    if (playbackRefreshRef.current) return;
     const audio = audioRef.current;
     const attempt = audioAttemptRef.current;
     const song = attempt?.song ?? queueRef.current[queueIndexRef.current];
@@ -732,12 +735,15 @@ export default function App() {
 
   const shouldRefreshAfterLongPause = useCallback((song: Song) => {
     const paused = pausedPlaybackRef.current;
+    const attempted = audioAttemptRef.current?.song;
+    const resolvedInThisSession = attempted && songKey(attempted) === songKey(song);
     return Boolean(
       song.source === "flac" &&
       !song.localKey &&
-      paused &&
-      paused.key === songKey(song) &&
-      Date.now() - paused.at >= FLAC_PAUSED_REFRESH_MS
+      (
+        !resolvedInThisSession ||
+        (paused && paused.key === songKey(song) && Date.now() - paused.at >= FLAC_PAUSED_REFRESH_MS)
+      )
     );
   }, []);
 
@@ -746,13 +752,41 @@ export default function App() {
     pausedPlaybackRef.current = song?.source === "flac" && !song.localKey ? { key: songKey(song), at: Date.now() } : null;
   }, []);
 
+  const primePlaybackElement = useCallback((song: Song, startAt: number) => {
+    const audio = audioRef.current;
+    if (!audio || !song.url) return;
+    const targetSrc = new URL(song.url, window.location.href).href;
+    if (audio.src !== targetSrc) audio.src = song.url;
+    if (startAt > 0) audio.currentTime = startAt;
+    void audio.play().catch(() => {
+      // Keep the user gesture attached to this element while a stale remote URL is refreshed.
+    });
+  }, []);
+
   const resumeCurrentSong = useCallback(() => {
     if (!currentSong) return;
-    const startAt = Math.max(audioRef.current?.currentTime || 0, positionRef.current);
+    const audio = audioRef.current;
+    const startAt = Math.max(audio?.currentTime || 0, positionRef.current);
     const refresh = shouldRefreshAfterLongPause(currentSong);
+    primePlaybackElement(currentSong, startAt);
     pausedPlaybackRef.current = null;
-    void playSong(currentSong, queue, refresh ? { refresh: true, startAt } : {});
-  }, [currentSong, playSong, queue, shouldRefreshAfterLongPause]);
+    if (!refresh) {
+      void playSong(currentSong, queue, { startAt });
+      return;
+    }
+    playbackRefreshRef.current = true;
+    void playSong(currentSong, queue, { refresh: true, startAt }).finally(() => {
+      playbackRefreshRef.current = false;
+    });
+  }, [currentSong, playSong, primePlaybackElement, queue, shouldRefreshAfterLongPause]);
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "hidden") markPausedPlayback();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+  }, [markPausedPlayback]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -783,6 +817,12 @@ export default function App() {
     if (target) void playSong(target, items);
   }, [playSong]);
 
+  const playQueueIndexFromUserGesture = useCallback((index: number) => {
+    const current = queueRef.current[queueIndexRef.current];
+    if (current) primePlaybackElement(current, Math.max(audioRef.current?.currentTime || 0, positionRef.current));
+    playQueueIndex(index);
+  }, [playQueueIndex, primePlaybackElement]);
+
   const advanceQueue = useCallback(async (direction: -1 | 1, options: { quiet?: boolean } = {}) => {
     const items = queueRef.current;
     if (!items.length) return;
@@ -807,6 +847,18 @@ export default function App() {
   const previousSong = useCallback(() => {
     void advanceQueue(-1);
   }, [advanceQueue]);
+
+  const nextSongFromUserGesture = useCallback(() => {
+    const current = queueRef.current[queueIndexRef.current];
+    if (current) primePlaybackElement(current, Math.max(audioRef.current?.currentTime || 0, positionRef.current));
+    nextSong();
+  }, [nextSong, primePlaybackElement]);
+
+  const previousSongFromUserGesture = useCallback(() => {
+    const current = queueRef.current[queueIndexRef.current];
+    if (current) primePlaybackElement(current, Math.max(audioRef.current?.currentTime || 0, positionRef.current));
+    previousSong();
+  }, [previousSong, primePlaybackElement]);
 
   const handleAudioEnded = useCallback(() => {
     if (modeRef.current === "repeat" && audioRef.current) {
@@ -1536,7 +1588,7 @@ export default function App() {
         )}
       </main>
 
-      <NowPlaying song={currentSong} playing={playing} position={position} duration={duration} onOpen={() => setPlayerOpen(true)} onToggle={togglePlayback} onNext={nextSong} />
+      <NowPlaying song={currentSong} playing={playing} position={position} duration={duration} onOpen={() => setPlayerOpen(true)} onToggle={togglePlayback} onNext={nextSongFromUserGesture} />
       <MobileNav tab={tab} setTab={setTab} />
 
       {activePlaylist && (
@@ -1595,8 +1647,8 @@ export default function App() {
           mode={mode}
           onClose={() => setPlayerOpen(false)}
           onToggle={togglePlayback}
-          onNext={nextSong}
-          onPrevious={previousSong}
+          onNext={nextSongFromUserGesture}
+          onPrevious={previousSongFromUserGesture}
           onSeek={(value) => {
             if (audioRef.current) audioRef.current.currentTime = value;
             positionRef.current = value;
@@ -1604,7 +1656,7 @@ export default function App() {
           }}
           onMode={setMode}
           onFavorite={() => toggleFavorite(currentSong)}
-          onQueuePlay={playQueueIndex}
+          onQueuePlay={playQueueIndexFromUserGesture}
           onDownload={() => downloadSong(currentSong)}
           playbackSpeed={playbackSpeed}
           progressStyle={progressStyle}
