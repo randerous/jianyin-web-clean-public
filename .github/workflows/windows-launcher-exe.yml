@@ -34,7 +34,9 @@ jobs:
         shell: powershell
         run: |
           $env:JIANYIN_LAUNCHER_SMOKE = "1"
-          $process = Start-Process ".\启动既见.exe" -PassThru
+          $exe = Get-ChildItem -Filter "*.exe" | Where-Object { $_.Name -ne "node.exe" } | Select-Object -First 1
+          if (-not $exe) { throw "Launcher EXE was not generated" }
+          $process = Start-Process $exe.FullName -PassThru
           if (-not $process.WaitForExit(120000)) {
             $process.Kill()
             throw "Launcher smoke test timed out"
@@ -43,5 +45,5 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: jianyin-windows-launcher
-          path: 启动既见.exe
+          path: "*.exe"
           if-no-files-found: error

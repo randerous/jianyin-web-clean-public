@@ -4,7 +4,9 @@ $Root = Split-Path -Parent $PSScriptRoot
 $BuildDir = Join-Path $Root "build\windows-launcher"
 $RuntimeDir = Join-Path $BuildDir "runtime"
 $RuntimeZip = Join-Path $BuildDir "runtime.zip"
-$Output = Join-Path $Root "启动既见.exe"
+$IntermediateOutput = Join-Path $Root "start-jianyin.exe"
+$DesiredName = [string]::Concat([char]0x542f, [char]0x52a8, [char]0x65e2, [char]0x89c1, ".exe")
+$Output = Join-Path $Root $DesiredName
 
 if (Test-Path $BuildDir) { Remove-Item $BuildDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
@@ -26,9 +28,11 @@ try {
         /reference:System.IO.Compression.dll `
         /reference:System.IO.Compression.FileSystem.dll `
         "/resource:$RuntimeZip,JianyinRuntime" `
-        "/out:$Output" `
+        "/out:$IntermediateOutput" `
         "windows\Launcher.cs"
     if ($LASTEXITCODE -ne 0) { throw "Windows launcher compilation failed" }
+    if (Test-Path $Output) { Remove-Item $Output -Force }
+    Move-Item $IntermediateOutput $Output
 } finally {
     Pop-Location
 }
