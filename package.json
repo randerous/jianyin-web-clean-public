@@ -18,6 +18,7 @@
     "test:perf:run": "playwright test --config playwright.performance.config.ts && node scripts/generate-test-status.mjs",
     "test:status": "node scripts/generate-test-status.mjs",
     "test:status:reset": "node scripts/generate-test-status.mjs --reset",
+    "test:windows-launcher": "node --test tests/windows-launcher.test.mjs",
     "test:all": "npm run test:status:reset && npm run build && npm test && npm run test:perf:run",
     "test:smoke:flac": "node --test tests/smoke/real-flac.smoke.mjs",
     "test:smoke:playlist": "playwright test --grep \"remote playlists persist across clean browser contexts\" --project=chromium"
