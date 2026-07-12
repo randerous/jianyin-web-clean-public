@@ -42,7 +42,6 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
       - name: Validate Windows bootstrap syntax
         if: runner.os == 'Windows'
         shell: powershell
