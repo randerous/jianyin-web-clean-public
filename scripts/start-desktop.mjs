@@ -97,7 +97,9 @@ async function main() {
   console.log("既见桌面版一键启动");
   console.log(`项目目录：${root}`);
 
-  if (dependenciesNeedInstall()) run(npmCommand, ["ci"], "首次安装/更新依赖");
+  if (dependenciesNeedInstall()) {
+    run(npmCommand, ["ci", "--loglevel=error", "--no-audit", "--no-fund"], "首次安装/更新依赖");
+  }
   cleanGeneratedAppleDoubleFiles();
   run(npmCommand, ["run", "build"], "构建桌面生产版本");
   cleanGeneratedAppleDoubleFiles();
