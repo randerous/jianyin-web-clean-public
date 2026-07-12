@@ -12,10 +12,10 @@ New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
 Push-Location $Root
 try {
     npm run build
-    Copy-Item "package.json", "package-lock.json" $RuntimeDir
     Copy-Item "server.mjs" $RuntimeDir
     Copy-Item "dist" $RuntimeDir -Recurse
-    npm ci --omit=dev --no-audit --no-fund --loglevel=error --prefix $RuntimeDir
+    npm install --prefix $RuntimeDir --no-save --package-lock=false --omit=dev --no-audit --no-fund --loglevel=error `
+        express@5.2.1 NeteaseCloudMusicApi@4.32.0
     Compress-Archive -Path (Join-Path $RuntimeDir "*") -DestinationPath $RuntimeZip -CompressionLevel Optimal
 
     $Compiler = "$env:WINDIR\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
