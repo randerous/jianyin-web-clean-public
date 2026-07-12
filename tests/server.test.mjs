@@ -1282,6 +1282,44 @@ test("netease account login validates cookie and syncs only playable playlists",
   assert.equal(playlists.body.playlists[0].songs[0].id, "netease_8");
 });
 
+test("netease account playlist sync loads all available songs beyond 60", async () => {
+  const songs = Array.from({ length: 120 }, (_item, index) => song(index + 1));
+  const trackAllLimits = [];
+  const neteaseClient = {
+    async login_status() {
+      return { body: { data: { profile: { userId: 456, nickname: "Large Account" } } } };
+    },
+    async user_playlist() {
+      return { body: { playlist: [{ id: 701, name: "Large Mine", coverImgUrl: "/large-mine.png", trackCount: songs.length, creator: { nickname: "me" } }] } };
+    },
+    async playlist_detail() {
+      return { body: { playlist: { id: 701, name: "Large Mine", coverImgUrl: "/large-mine.png", trackCount: songs.length, tracks: songs.slice(0, 20), trackIds: songs.map((item) => ({ id: item.id })) } } };
+    },
+    async playlist_track_all({ limit }) {
+      trackAllLimits.push(limit);
+      return { body: { songs } };
+    },
+    async song_url_v1({ id }) {
+      const byId = Object.fromEntries(String(id).split(",").map((item) => [item, urlData({ url: `https://audio.test/${item}.mp3`, time: 65_000 })]));
+      return urlResponse(id, byId);
+    }
+  };
+  const baseUrl = await startTestServer({ neteaseClient });
+
+  const login = await getJson(`${baseUrl}/api/netease/account/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cookie: "MUSIC_U=large" })
+  });
+  const playlists = await getJson(`${baseUrl}/api/netease/account/playlists`);
+
+  assert.equal(login.response.status, 200);
+  assert.equal(playlists.response.status, 200);
+  assert.deepEqual(trackAllLimits, [1000]);
+  assert.equal(playlists.body.playlists[0].songs.length, 120);
+  assert.equal(playlists.body.playlists[0].songs.at(-1).id, "netease_120");
+});
+
 test("netease account rejects invalid cookies, sync failures, and logout clears auth", async () => {
   const calls = [];
   const neteaseClient = {

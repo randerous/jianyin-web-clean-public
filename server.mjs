@@ -1379,8 +1379,8 @@ app.get("/api/netease/search", async (req, res) => {
 	    const playlists = [];
 	    for (const summary of summaries) {
 	      if (playlists.length >= limit) break;
-	      const detail = await getPlaylistDetailWithFallback(summary.id.replace(/^netease_playlist_/, ""), neteaseAccountCookie);
-	      const mapped = await mapPlayableNeteasePlaylist(detail ?? {}, quality, neteaseAccountCookie);
+	      const detail = await getPlaylistDetailWithFallback(summary.id.replace(/^netease_playlist_/, ""), neteaseAccountCookie, PLAYLIST_CANDIDATE_LIMIT);
+	      const mapped = await mapPlayableNeteasePlaylist(detail ?? {}, quality, neteaseAccountCookie, PLAYLIST_CANDIDATE_LIMIT);
 	      if (mapped.songs.length) playlists.push({ ...mapped, coverPic: summary.coverPic || mapped.coverPic, trackCount: summary.trackCount, creatorNickname: summary.creatorNickname });
 	    }
 	    res.json({ loggedIn: true, playlists, quality });
