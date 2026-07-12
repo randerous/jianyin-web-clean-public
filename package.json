@@ -1,8 +1,11 @@
 {
   "name": "jianyin-web-clean",
   "version": "1.0.14",
+  "description": "既见音乐播放器 Windows 桌面版",
+  "author": "randerous",
   "private": true,
   "type": "module",
+  "main": "electron-main.mjs",
   "scripts": {
     "dev": "node server.mjs --dev",
     "build": "tsc && vite build",
@@ -20,7 +23,9 @@
     "test:status:reset": "node scripts/generate-test-status.mjs --reset",
     "test:all": "npm run test:status:reset && npm run build && npm test && npm run test:perf:run",
     "test:smoke:flac": "node --test tests/smoke/real-flac.smoke.mjs",
-    "test:smoke:playlist": "playwright test --grep \"remote playlists persist across clean browser contexts\" --project=chromium"
+    "test:smoke:playlist": "playwright test --grep \"remote playlists persist across clean browser contexts\" --project=chromium",
+    "test:desktop-package": "node --test tests/windows-portable.test.mjs",
+    "desktop:package:windows": "npm run build && electron-builder --win portable"
   },
   "dependencies": {
     "@capacitor/android": "^8.4.1",
@@ -40,6 +45,34 @@
     "@types/node": "^25.9.2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
+    "electron": "^37.10.3",
+    "electron-builder": "^26.15.3",
+    "electron": "^37.10.3",
+    "electron-builder": "^26.15.3",
     "playwright": "^1.60.0"
+  },
+  "build": {
+    "appId": "com.randerous.jianyin.desktop",
+    "productName": "既见",
+    "artifactName": "既见-${version}-windows-portable.${ext}",
+    "asar": false,
+    "beforePack": "scripts/electron-builder-hooks.mjs",
+    "afterPack": "scripts/electron-builder-hooks.mjs",
+    "files": [
+      "dist/**",
+      "public/assets/icon.png",
+      "electron-main.mjs",
+      "server.mjs",
+      "package.json",
+      "!**/._*"
+    ],
+    "win": {
+      "target": "portable",
+      "icon": "public/assets/icon.png",
+      "signAndEditExecutable": false
+    },
+    "directories": {
+      "output": "release"
+    }
   }
 }
