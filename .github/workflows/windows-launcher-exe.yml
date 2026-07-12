@@ -1,0 +1,47 @@
+name: Windows launcher EXE
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/windows-launcher-exe.yml"
+      - "windows/Launcher.cs"
+      - "scripts/build-windows-launcher.ps1"
+      - "server.mjs"
+      - "src/**"
+      - "public/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tests/windows-launcher.test.mjs"
+  workflow_dispatch:
+
+jobs:
+  build-and-smoke:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: node --test tests/windows-launcher.test.mjs
+      - name: Build launcher EXE
+        shell: powershell
+        run: scripts/build-windows-launcher.ps1
+      - name: Smoke test EXE and embedded server
+        shell: powershell
+        run: |
+          $env:JIANYIN_LAUNCHER_SMOKE = "1"
+          $process = Start-Process ".\启动既见.exe" -PassThru
+          if (-not $process.WaitForExit(120000)) {
+            $process.Kill()
+            throw "Launcher smoke test timed out"
+          }
+          if ($process.ExitCode -ne 0) { throw "Launcher smoke test failed: $($process.ExitCode)" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jianyin-windows-launcher
+          path: 启动既见.exe
+          if-no-files-found: error
