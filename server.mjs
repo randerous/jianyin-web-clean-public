@@ -1,15 +1,31 @@
 import express from "express";
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 const require = createRequire(import.meta.url);
 const defaultNetease = require("NeteaseCloudMusicApi");
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const execFileAsync = promisify(execFile);
+const UPDATE_REPOSITORY = "randerous/jianyin-web-clean-public";
+const UPDATE_API_URL = `https://api.github.com/repos/${UPDATE_REPOSITORY}/releases/latest`;
+const UPDATE_CACHE_TTL_MS = 5 * 60 * 1000;
+const UPDATE_RESTART_EXIT_CODE = 75;
+const APP_VERSION = (() => {
+  try {
+    const packageJson = JSON.parse(readFileSync(resolve(__dirname, "package.json"), "utf8"));
+    return typeof packageJson.version === "string" ? packageJson.version : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
 const args = process.argv.slice(2);
 const isDev = args.includes("--dev");
 const portArgIndex = args.indexOf("--port");
@@ -21,6 +37,7 @@ const sharedStatePath = process.env.JIANYIN_STATE_PATH
 export async function createApp({ neteaseClient = defaultNetease, fetchImpl = globalThis.fetch, dev = false, hmrPort = port + 10000, statePath = sharedStatePath } = {}) {
 const app = express();
 const netease = neteaseClient;
+const updateRoot = resolve(process.env.JIANYIN_UPDATE_ROOT || __dirname);
 let sharedStateWriteTail = Promise.resolve();
 app.use(express.json({ limit: "512kb" }));
 	const MIN_FULL_SONG_MS = 60_000;
@@ -58,6 +75,8 @@ const FLAC_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/5
 	const playlistDetailInFlight = new Map();
 	const biliStreamCache = new Map();
 	const flacStreamCache = new Map();
+	let latestUpdateCache = null;
+	let latestUpdateInFlight = null;
 	let flacCookie = "";
 	let flacCookieAt = 0;
 	let neteaseAccountCookie = "";
@@ -90,6 +109,45 @@ function errorMessage(error) {
   if (error?.body?.message) return redactSensitiveText(error.body.message);
   if (error?.body?.msg) return redactSensitiveText(error.body.msg);
   return redactSensitiveText(error instanceof Error ? error.message : String(error));
+}
+
+function releaseVersion(value) {
+  const match = String(value ?? "").trim().match(/^v?(\d+)\.(\d+)\.(\d+)$/);
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2]), Number(match[3])];
+}
+
+function compareVersions(left, right) {
+  const a = releaseVersion(left) ?? [0, 0, 0];
+  const b = releaseVersion(right) ?? [0, 0, 0];
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index] !== b[index]) return a[index] > b[index] ? 1 : -1;
+  }
+  return 0;
+}
+
+function safeGithubDownloadUrl(value) {
+  try {
+    const url = new URL(String(value ?? ""));
+    if (url.protocol !== "https:") return "";
+    if (!["github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com"].includes(url.hostname)) return "";
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
+function mapUpdateAsset(asset) {
+  const name = cleanText(asset?.name);
+  const url = safeGithubDownloadUrl(asset?.browser_download_url);
+  if (!name || !url) return null;
+  const digest = cleanText(asset?.digest).replace(/^sha256:/i, "").toLowerCase();
+  return {
+    name,
+    url,
+    sha256: /^[0-9a-f]{64}$/.test(digest) ? digest : "",
+    size: Number.isFinite(Number(asset?.size)) ? Number(asset.size) : null
+  };
 }
 
 function pipeUpstreamBody(upstream, res, errorCode = "upstream_stream_failed") {
@@ -1275,8 +1333,95 @@ function playableRejectReason(data) {
 	  };
 	}
 
+async function getLatestUpdate() {
+  if (latestUpdateCache && latestUpdateCache.expiresAt > Date.now()) return latestUpdateCache.data;
+  if (latestUpdateInFlight) return latestUpdateInFlight;
+  latestUpdateInFlight = (async () => {
+    const response = await fetchImpl(UPDATE_API_URL, {
+      headers: {
+        Accept: "application/vnd.github+json",
+        "User-Agent": "jianyin-web-clean-update-check"
+      },
+      redirect: "follow"
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(`GitHub 更新接口不可用：${response.status}`);
+    const tag = cleanText(body?.tag_name);
+    if (!releaseVersion(tag)) throw new Error("GitHub Release 版本号无效");
+    const assets = Array.isArray(body?.assets) ? body.assets.map(mapUpdateAsset).filter(Boolean) : [];
+    const data = {
+      currentVersion: APP_VERSION,
+      latestVersion: tag.replace(/^v/, ""),
+      tag,
+      available: compareVersions(tag, APP_VERSION) > 0,
+      releaseUrl: safeGithubDownloadUrl(body?.html_url) || `https://github.com/${UPDATE_REPOSITORY}/releases/tag/${encodeURIComponent(tag)}`,
+      publishedAt: typeof body?.published_at === "string" ? body.published_at : null,
+      notes: typeof body?.body === "string" ? body.body.slice(0, 4000) : "",
+      canApply: process.env.JIANYIN_ENABLE_UPDATE === "1" && existsSync(resolve(updateRoot, ".git")),
+      assets: {
+        apk: assets.find((asset) => asset.name === "app-release.apk") ?? null,
+        windowsLauncher: assets.find((asset) => asset.name === "jianyin-windows-launcher.exe") ?? null
+      }
+    };
+    latestUpdateCache = { data, expiresAt: Date.now() + UPDATE_CACHE_TTL_MS };
+    return data;
+  })().finally(() => {
+    latestUpdateInFlight = null;
+  });
+  return latestUpdateInFlight;
+}
+
+async function runGit(argumentsList) {
+  const result = await execFileAsync("git", argumentsList, {
+    cwd: updateRoot,
+    timeout: 15_000,
+    maxBuffer: 512 * 1024
+  });
+  return `${result.stdout ?? ""}${result.stderr ?? ""}`;
+}
+
 app.get("/api/health", (_req, res) => {
   res.json({ ok: true, provider: "NeteaseCloudMusicApi" });
+});
+
+app.get("/api/update/latest", async (_req, res) => {
+  try {
+    res.json(await getLatestUpdate());
+  } catch (error) {
+    res.status(502).json({ error: "update_check_failed", message: errorMessage(error) });
+  }
+});
+
+app.post("/api/update/apply", async (req, res) => {
+  if (process.env.JIANYIN_ENABLE_UPDATE !== "1" || !existsSync(resolve(updateRoot, ".git"))) {
+    res.status(403).json({ error: "update_apply_disabled", message: "当前服务不支持自动更新" });
+    return;
+  }
+  try {
+    const latest = await getLatestUpdate();
+    const requestedTag = cleanText(req.body?.tag);
+    if (requestedTag && requestedTag !== latest.tag) {
+      res.status(409).json({ error: "update_release_changed", message: "更新版本已变化，请重新检查" });
+      return;
+    }
+    if (!latest.available) {
+      res.json({ ok: true, updated: false, tag: latest.tag, message: "当前已是最新版本" });
+      return;
+    }
+    const status = await runGit(["status", "--porcelain"]);
+    if (status.trim()) {
+      res.status(409).json({ error: "update_workspace_dirty", message: "工作区有未提交修改，已跳过自动更新" });
+      return;
+    }
+    const before = (await runGit(["rev-parse", "HEAD"])).trim();
+    await runGit(["pull", "--ff-only"]);
+    const after = (await runGit(["rev-parse", "HEAD"])).trim();
+    const updated = Boolean(before && after && before !== after);
+    res.json({ ok: true, updated, tag: latest.tag });
+    if (updated) setTimeout(() => process.exit(UPDATE_RESTART_EXIT_CODE), 250);
+  } catch (error) {
+    res.status(502).json({ error: "update_apply_failed", message: errorMessage(error) });
+  }
 });
 
 app.get("/api/state", async (_req, res) => {

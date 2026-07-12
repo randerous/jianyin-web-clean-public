@@ -40,6 +40,7 @@ function readRootPackage() {
 function runtimePackageManifest(packageJson) {
   return {
     name: "jianyin-android-node-runtime",
+    version: packageJson.version,
     private: true,
     type: "module",
     dependencies: {

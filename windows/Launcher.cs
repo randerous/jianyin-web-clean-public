@@ -12,7 +12,7 @@ using System.Windows.Forms;
 
 internal static class Launcher
 {
-    private const string RuntimeVersion = "1.0.15";
+    private const string RuntimeVersion = "1.0.19";
     private const string NodeVersion = "22.17.0";
     private const string NodeSha256 = "721ab118a3aac8584348b132767eadf51379e0616f0db802cc1e66d7f0d98f85";
     private static readonly string DataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Jianyin");
@@ -146,7 +146,21 @@ internal static class Launcher
                 RedirectStandardError = true
             };
             info.EnvironmentVariables["JIANYIN_STATE_PATH"] = Path.Combine(DataDir, "state.json");
+            info.EnvironmentVariables["JIANYIN_ENABLE_UPDATE"] = "1";
+            info.EnvironmentVariables["JIANYIN_UPDATE_ROOT"] = AppDomain.CurrentDomain.BaseDirectory;
             server = Process.Start(info);
+            var launchedServer = server;
+            launchedServer.EnableRaisingEvents = true;
+            launchedServer.Exited += delegate
+            {
+                if (launchedServer.ExitCode != 75 || server != launchedServer) return;
+                server = null;
+                ThreadPool.QueueUserWorkItem(delegate
+                {
+                    Thread.Sleep(300);
+                    Start();
+                });
+            };
             server.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e) { if (e.Data != null) Log(e.Data); };
             server.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e) { if (e.Data != null) Log(e.Data); };
             server.BeginOutputReadLine();

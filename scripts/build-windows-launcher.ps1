@@ -15,6 +15,7 @@ Push-Location $Root
 try {
     npm run build
     Copy-Item "server.mjs" $RuntimeDir
+    Copy-Item "package.json" $RuntimeDir
     Copy-Item "dist" $RuntimeDir -Recurse
     npm install --prefix $RuntimeDir --no-save --package-lock=false --omit=dev --no-audit --no-fund --loglevel=error `
         express@5.2.1 NeteaseCloudMusicApi@4.32.0
