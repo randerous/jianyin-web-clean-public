@@ -1,0 +1,43 @@
+name: Windows portable EXE
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/windows-portable.yml"
+      - "electron-main.mjs"
+      - "scripts/electron-builder-hooks.mjs"
+      - "server.mjs"
+      - "src/**"
+      - "public/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tests/windows-portable.test.mjs"
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - run: npm run test:desktop-package
+      - run: npm run desktop:package:windows
+      - name: Smoke test packaged EXE
+        shell: powershell
+        run: |
+          $env:JIANYIN_ELECTRON_SMOKE = "1"
+          $exe = Get-ChildItem "release/*-windows-portable.exe" | Select-Object -First 1
+          if (-not $exe) { throw "Portable EXE was not generated" }
+          $process = Start-Process $exe.FullName -PassThru -Wait
+          if ($process.ExitCode -ne 0) { throw "Portable EXE smoke test failed: $($process.ExitCode)" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jianyin-windows-portable
+          path: release/*-windows-portable.exe
+          if-no-files-found: error
