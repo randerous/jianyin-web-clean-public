@@ -21,6 +21,7 @@ const sharedStatePath = process.env.JIANYIN_STATE_PATH
 export async function createApp({ neteaseClient = defaultNetease, fetchImpl = globalThis.fetch, dev = false, hmrPort = port + 10000, statePath = sharedStatePath } = {}) {
 const app = express();
 const netease = neteaseClient;
+let sharedStateWriteTail = Promise.resolve();
 app.use(express.json({ limit: "512kb" }));
 	const MIN_FULL_SONG_MS = 60_000;
 	const SEARCH_CANDIDATE_LIMIT = 180;
@@ -150,8 +151,16 @@ async function readSharedState() {
 }
 
 async function writeSharedState(state) {
-  await mkdir(dirname(statePath), { recursive: true });
-  await writeFile(statePath, JSON.stringify({ ...state, savedAt: new Date().toISOString() }, null, 2));
+  const operation = sharedStateWriteTail.then(async () => {
+    await mkdir(dirname(statePath), { recursive: true });
+    const existing = await readSharedState();
+    const incomingUpdatedAt = Number(state?.updatedAt);
+    const existingUpdatedAt = Number(existing?.updatedAt);
+    if (Number.isFinite(incomingUpdatedAt) && Number.isFinite(existingUpdatedAt) && incomingUpdatedAt < existingUpdatedAt) return;
+    await writeFile(statePath, JSON.stringify({ ...state, savedAt: new Date().toISOString() }, null, 2));
+  });
+  sharedStateWriteTail = operation.catch(() => {});
+  return operation;
 }
 
 	function parseLimit(value, fallback, max) {

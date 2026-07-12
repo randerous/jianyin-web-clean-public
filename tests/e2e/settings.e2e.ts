@@ -117,6 +117,90 @@ test("settings download quality is used for netease downloads", async ({ page })
   expect(songRequests).toContain("quality=lossless");
 });
 
+test("automatic cache stores a playing remote song without interrupting playback", async ({ page }) => {
+  const remoteSong = {
+    id: "flac_9001",
+    name: "Automatic Cache Song",
+    artist: "Cache Artist",
+    pic: "/assets/icon.png",
+    cover: "/assets/icon.png",
+    url: "/api/flac/stream/9001?format=flac&bitrate=2000&time=t9001&sign=s9001",
+    source: "flac",
+    remotePlayable: true,
+    verifiedPlayable: true,
+    durationMs: 65000,
+    br: 2000000,
+    level: "flac",
+    type: "flac",
+    audioType: "flac",
+    quality: "flac",
+    time: "t9001",
+    sign: "s9001"
+  };
+  await page.route("**/api/netease/home**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ radarSongs: [remoteSong], hotSongs: [], recommendedPlaylists: [] })
+    });
+  });
+  await page.route("**/api/flac/stream/9001**", async (route) => {
+    await route.fulfill({ path: fullSongFile, headers: { "content-type": "audio/wav" } });
+  });
+
+  const settings = await openSettings(page);
+  await settings.getByLabel("自动缓存").setChecked(true);
+  await settings.getByRole("button", { name: "关闭" }).click();
+  await page.reload();
+  await page.getByRole("main").getByRole("button", { name: /Automatic Cache Song/ }).click();
+  await expectAudioPlaying(page);
+
+  const before = await page.locator("audio").evaluate((audio: HTMLAudioElement) => ({ src: audio.src, currentTime: audio.currentTime }));
+  await expect.poll(() => page.evaluate(async () => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("jianyin-web-clean-audio", 1);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    if (!db.objectStoreNames.contains("files")) {
+      db.close();
+      return false;
+    }
+    const keys = await new Promise<IDBValidKey[]>((resolve, reject) => {
+      const tx = db.transaction("files", "readonly");
+      const request = tx.objectStore("files").getAllKeys();
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    db.close();
+    return keys.includes("download_flac_flac_9001");
+  })).toBe(true);
+  await expect.poll(async () => {
+    const state = await storedState(page);
+    return state.downloadHistory.some((song: { id: string; localKey?: string }) => song.id === "flac_9001" && song.localKey === "download_flac_flac_9001");
+  }).toBe(true);
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => ({ src: audio.src, paused: audio.paused, currentTime: audio.currentTime }))).toMatchObject({ src: before.src, paused: false });
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.currentTime)).toBeGreaterThan(before.currentTime);
+});
+
+test("startup autoplay attempts to resume the persisted queue when enabled", async ({ page }) => {
+  const state = await storedState(page);
+  const song = { ...testSongs[0], id: "startup_autoplay_song", name: "Startup Autoplay Song", remotePlayable: true };
+  const persisted = { ...state, queue: [song], queueIndex: 0, autoPlayOnStart: true, keepQueueOnExit: true, updatedAt: (state.updatedAt ?? Date.now()) + 1_000_000 };
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state: persisted }) });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+  await page.reload();
+  await expect(page.locator(".now-playing")).toContainText("Startup Autoplay Song");
+  await expect.poll(() => page.evaluate(() => {
+    const audio = document.querySelector("audio") as HTMLAudioElement | null;
+    return Boolean(audio && !audio.paused) || Boolean(document.querySelector(".toast")?.textContent?.includes("浏览器阻止了自动播放"));
+  })).toBe(true);
+});
+
 test("rapid settings changes persist locally and batch shared state writes", async ({ page }) => {
   await expect(page.getByRole("button", { name: "刷新推荐" })).toBeEnabled();
   await page.waitForLoadState("networkidle");
