@@ -364,6 +364,28 @@ test("shared state redacts credentials before persisting", async () => {
   assert.doesNotMatch(serialized, /MUSIC_U|SESSDATA|bili_jct|secret|accountCookie|cookie|token/i);
 });
 
+test("shared state ignores an older write that arrives after a newer write", async () => {
+  const statePath = resolve("test-results", `state-order-${Date.now()}-${Math.random()}.json`);
+  const baseUrl = await startTestServer({ neteaseClient: {}, statePath });
+
+  const newer = await getJson(`${baseUrl}/api/state`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ state: { marker: "newer", updatedAt: 200 } })
+  });
+  const older = await getJson(`${baseUrl}/api/state`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ state: { marker: "older", updatedAt: 100 } })
+  });
+  const read = await getJson(`${baseUrl}/api/state`);
+
+  assert.equal(newer.response.status, 200);
+  assert.equal(older.response.status, 200);
+  assert.equal(read.body.state.marker, "newer");
+  assert.equal(read.body.state.updatedAt, 200);
+});
+
 test("upstream error messages redact credential material", async () => {
   const neteaseClient = {
     async login_status() {

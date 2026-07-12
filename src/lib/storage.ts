@@ -130,7 +130,8 @@ function serializeState(state: PersistedState): PersistedState {
     autoCacheEnabled: state.autoCacheEnabled,
     keepQueueOnExit: state.keepQueueOnExit,
     autoPlayOnStart: state.autoPlayOnStart,
-    androidStatusNotificationEnabled: state.androidStatusNotificationEnabled
+    androidStatusNotificationEnabled: state.androidStatusNotificationEnabled,
+    updatedAt: state.updatedAt
   };
 }
 
@@ -172,6 +173,7 @@ export function normalizeState(value: unknown): PersistedState {
   const lyricSource = raw.lyricSource === "embedded" ? "embedded" : "network";
   const autoLyricsEnabled = raw.autoLyricsEnabled !== false;
   const playbackSpeed = typeof raw.playbackSpeed === "number" && Number.isFinite(raw.playbackSpeed) ? Math.min(4, Math.max(0.25, raw.playbackSpeed)) : 1;
+  const updatedAt = typeof raw.updatedAt === "number" && Number.isFinite(raw.updatedAt) && raw.updatedAt > 0 ? raw.updatedAt : undefined;
   return {
     playlists: withFavorites.map((playlist) => playlist.id === FAVORITES_ID ? { ...playlist, songs: favorites } : playlist),
     favorites,
@@ -191,7 +193,8 @@ export function normalizeState(value: unknown): PersistedState {
     autoCacheEnabled: Boolean(raw.autoCacheEnabled),
     keepQueueOnExit: raw.keepQueueOnExit !== false,
     autoPlayOnStart: Boolean(raw.autoPlayOnStart),
-    androidStatusNotificationEnabled: Boolean(raw.androidStatusNotificationEnabled)
+    androidStatusNotificationEnabled: Boolean(raw.androidStatusNotificationEnabled),
+    updatedAt
   };
 }
 
@@ -247,6 +250,8 @@ function mergePlaylists(local: Playlist[], remote: Playlist[]) {
 export function mergeStates(local: PersistedState, remote: PersistedState): PersistedState {
   const playlists = mergePlaylists(local.playlists, remote.playlists);
   const favorites = mergeSongs(local.favorites, remote.favorites);
+  const updatedAt = Math.max(local.updatedAt ?? 0, remote.updatedAt ?? 0);
+  const useRemoteSettings = Boolean(remote.updatedAt && (!local.updatedAt || remote.updatedAt > local.updatedAt));
   return normalizeState({
     ...remote,
     ...local,
@@ -256,7 +261,22 @@ export function mergeStates(local: PersistedState, remote: PersistedState): Pers
     downloadHistory: mergeSongs(local.downloadHistory, remote.downloadHistory).slice(0, RECENT_HISTORY_LIMIT),
     queue: local.queue.length ? local.queue : remote.queue,
     queueIndex: local.queue.length ? local.queueIndex : remote.queueIndex,
-    searchHistory: uniqueByKey([...local.searchHistory, ...remote.searchHistory], (item) => item).slice(0, 12)
+    searchHistory: uniqueByKey([...local.searchHistory, ...remote.searchHistory], (item) => item).slice(0, 12),
+    ...(useRemoteSettings ? {
+      theme: remote.theme,
+      playQuality: remote.playQuality,
+      downloadQuality: remote.downloadQuality,
+      progressStyle: remote.progressStyle,
+      lyricSource: remote.lyricSource,
+      autoLyricsEnabled: remote.autoLyricsEnabled,
+      playbackSpeed: remote.playbackSpeed,
+      fadeEnabled: remote.fadeEnabled,
+      autoCacheEnabled: remote.autoCacheEnabled,
+      keepQueueOnExit: remote.keepQueueOnExit,
+      autoPlayOnStart: remote.autoPlayOnStart,
+      androidStatusNotificationEnabled: remote.androidStatusNotificationEnabled
+    } : {}),
+    ...(updatedAt > 0 ? { updatedAt } : {})
   });
 }
 

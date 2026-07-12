@@ -285,6 +285,7 @@ export default function App() {
   const [accountBusy, setAccountBusy] = useState(false);
   const [accountError, setAccountError] = useState("");
   const [apiBaseInput, setApiBaseInput] = useState(() => getApiBaseUrl());
+  const [stateHydrated, setStateHydrated] = useState(false);
   const [objectUrls, setObjectUrls] = useState<string[]>([]);
   const [floatingLyric, setFloatingLyric] = useState(false);
   const [lyricsLoadingKey, setLyricsLoadingKey] = useState("");
@@ -312,6 +313,8 @@ export default function App() {
   const audioRetryRef = useRef<{ key: string; at: number } | null>(null);
   const pausedPlaybackRef = useRef<{ key: string; at: number } | null>(null);
   const playbackRefreshRef = useRef(false);
+  const autoPlayCheckedRef = useRef(false);
+  const cacheInFlightRef = useRef(new Map<string, Promise<Song>>());
 
   const currentSong = queue[queueIndex] ?? null;
   if (!sharedStateWriterRef.current) {
@@ -455,7 +458,8 @@ export default function App() {
       autoCacheEnabled,
       keepQueueOnExit,
       autoPlayOnStart,
-      androidStatusNotificationEnabled
+      androidStatusNotificationEnabled,
+      updatedAt: Date.now()
     };
     latestSharedStateRef.current = state;
     try {
@@ -500,7 +504,7 @@ export default function App() {
 
   useEffect(() => {
     let live = true;
-    const localState: PersistedState = { playlists, favorites, history, downloadHistory, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart, androidStatusNotificationEnabled };
+    const localState: PersistedState = { playlists, favorites, history, downloadHistory, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart, androidStatusNotificationEnabled, updatedAt: initial.updatedAt };
     void loadSharedState()
       .then(async (shared) => {
         const merged = shared && shouldMergeSharedState(localState, shared) ? mergeStates(localState, shared) : localState;
@@ -533,9 +537,13 @@ export default function App() {
         });
         saveState(result.state);
         sharedStateReadyRef.current = true;
+        setStateHydrated(true);
       })
       .catch(() => {
-        if (live) sharedStateReadyRef.current = true;
+        if (live) {
+          sharedStateReadyRef.current = true;
+          setStateHydrated(true);
+        }
       });
     return () => {
       live = false;
@@ -716,10 +724,22 @@ export default function App() {
     } catch (error) {
       if (requestId !== playRequestRef.current) return false;
       setPlaying(false);
-      if (!options.quiet) setToast(error instanceof Error ? error.message : "无法播放这首歌");
+      if (!options.quiet) {
+        const details = error instanceof Error ? `${error.name} ${error.message}` : String(error);
+        const message = /NotAllowedError|user did not interact|autoplay/i.test(details)
+          ? "浏览器阻止了自动播放，请再次点击播放"
+          : error instanceof Error ? error.message : "无法播放这首歌";
+        setToast(message);
+      }
       return false;
     }
   }, [playbackSpeed, resolvePlayable]);
+
+  useEffect(() => {
+    if (!stateHydrated || autoPlayCheckedRef.current || !autoPlayOnStart || !currentSong) return;
+    autoPlayCheckedRef.current = true;
+    void playSong(currentSong, queue);
+  }, [autoPlayOnStart, currentSong, playSong, queue, stateHydrated]);
 
   const retryCurrentSongAfterAudioError = useCallback(async () => {
     if (playbackRefreshRef.current) return;
@@ -1047,25 +1067,43 @@ export default function App() {
 
   const cacheDownloadedSong = useCallback(async (original: Song, target: Song) => {
     if (target.localKey || !isRemoteSong(target) || !target.url || target.url.startsWith("local-file:")) return target;
+    const key = songKey(original);
+    const existing = cacheInFlightRef.current.get(key);
+    if (existing) return existing;
+    const task = (async () => {
+      try {
+        const response = await fetch(target.url);
+        if (!response.ok) throw new Error("download cache failed");
+        const blob = await response.blob();
+        const localKey = `download_${target.source}_${target.id}`.replace(/[^a-zA-Z0-9_.-]/g, "_");
+        await saveLocalFile(localKey, blob);
+        const cached: Song = {
+          ...target,
+          localKey,
+          url: `local-file:${localKey}`,
+          needsImport: false,
+          remotePlayable: true
+        };
+        updateSongEverywhere(original, () => cached, { preserveCurrentPlaybackSource: true });
+        return cached;
+      } catch {
+        return target;
+      }
+    })();
+    cacheInFlightRef.current.set(key, task);
     try {
-      const response = await fetch(target.url);
-      if (!response.ok) throw new Error("download cache failed");
-      const blob = await response.blob();
-      const localKey = `download_${target.source}_${target.id}`.replace(/[^a-zA-Z0-9_.-]/g, "_");
-      await saveLocalFile(localKey, blob);
-      const cached: Song = {
-        ...target,
-        localKey,
-        url: `local-file:${localKey}`,
-        needsImport: false,
-        remotePlayable: true
-      };
-      updateSongEverywhere(original, () => cached, { preserveCurrentPlaybackSource: true });
-      return cached;
-    } catch {
-      return target;
+      return await task;
+    } finally {
+      if (cacheInFlightRef.current.get(key) === task) cacheInFlightRef.current.delete(key);
     }
   }, [updateSongEverywhere]);
+
+  useEffect(() => {
+    if (!autoCacheEnabled || !playing || !currentSong || !isRemoteSong(currentSong) || currentSong.localKey || !currentSong.url || currentSong.url.startsWith("local-file:")) return;
+    void cacheDownloadedSong(currentSong, currentSong).then((cached) => {
+      if (cached.localKey) setDownloadHistory((items) => recentSongsWith(cached, items));
+    });
+  }, [autoCacheEnabled, cacheDownloadedSong, currentSong, playing]);
 
   const importLrcForCurrentSong = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -1241,7 +1279,7 @@ export default function App() {
   }, []);
 
   const backup = useCallback(async () => {
-    const state: PersistedState = { playlists, favorites, history, downloadHistory, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart, androidStatusNotificationEnabled };
+    const state: PersistedState = { playlists, favorites, history, downloadHistory, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart, androidStatusNotificationEnabled, updatedAt: Date.now() };
     const payload = await makeBackup(state);
     downloadJson(`jianyin_web_clean_${new Date().toISOString().replace(/[:.]/g, "-")}.json`, payload);
     setToast(payload.localFiles?.length ? `已导出备份，包含 ${payload.localFiles.length} 个本地音频` : "已导出备份");

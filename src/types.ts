@@ -59,6 +59,7 @@ export type PersistedState = {
   keepQueueOnExit: boolean;
   autoPlayOnStart: boolean;
   androidStatusNotificationEnabled: boolean;
+  updatedAt?: number;
 };
 
 export type AccountState = {
