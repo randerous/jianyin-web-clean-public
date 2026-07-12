@@ -6,8 +6,6 @@ on:
     paths:
       - ".github/workflows/desktop-launchers.yml"
       - "scripts/start-desktop.mjs"
-      - "scripts/bootstrap-node-windows.ps1"
-      - "start-jianyin-windows.cmd"
       - "start-jianyin-macos.command"
       - "package.json"
       - "package-lock.json"
@@ -15,8 +13,6 @@ on:
     paths:
       - ".github/workflows/desktop-launchers.yml"
       - "scripts/start-desktop.mjs"
-      - "scripts/bootstrap-node-windows.ps1"
-      - "start-jianyin-windows.cmd"
       - "start-jianyin-macos.command"
       - "package.json"
       - "package-lock.json"
@@ -26,8 +22,6 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: windows-latest
-            launcher: .\start-jianyin-windows.cmd
           - os: macos-latest
             launcher: ./start-jianyin-macos.command
     runs-on: ${{ matrix.os }}
@@ -42,26 +36,5 @@ jobs:
         with:
           node-version: 22
           cache: npm
-      - name: Validate Windows bootstrap syntax
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          $tokens = $null
-          $errors = $null
-          [void][System.Management.Automation.Language.Parser]::ParseFile(
-            "scripts/bootstrap-node-windows.ps1",
-            [ref]$tokens,
-            [ref]$errors
-          )
-          if ($errors.Count) {
-            $errors | ForEach-Object { Write-Error $_ }
-            exit 1
-          }
-      - name: Bootstrap verified local Node on Windows
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          & "scripts/bootstrap-node-windows.ps1"
-          & ".runtime/node/node.exe" -e "const [M,m]=process.versions.node.split('.').map(Number); process.exit(M === 22 && m >= 12 ? 0 : 1)"
       - name: Launch desktop app
         run: ${{ matrix.launcher }}

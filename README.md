@@ -15,22 +15,19 @@
 
 在 GitHub 项目页面点击 `Code → Download ZIP` 并解压，或者用 Git 拉取仓库。进入项目目录后直接运行对应文件：
 
-- Windows：双击 `start-jianyin-windows.cmd`
+- Windows：双击 `启动既见.exe`
 - macOS：双击 `start-jianyin-macos.command`
 
-脚本会自动完成以下操作：
+Windows EXE 会自动完成以下操作：
 
-1. 检查 Node.js；缺少兼容版本时，从 Node.js 官方站点下载 Node 22 LTS 到项目内 `.runtime`，校验 SHA-256，不修改系统环境。
-2. 首次运行自动安装依赖，后续在依赖未变化时跳过安装。
-3. 自动构建生产版本并启动 `http://127.0.0.1:5188/`。
-4. 自动打开默认浏览器。保持启动窗口开启；关闭窗口即可停止本地服务。
+1. 安全执行 `git pull --ff-only`；存在本地修改或无法更新时保留当前版本继续运行。
+2. 从 EXE 内置生产运行包启动，不执行 `npm install`；缺少 Node.js 时从 Node.js 官方站点下载并校验 SHA-256。
+3. 优先使用 `5188`，被占用时自动选择空闲端口。
+4. 自动打开默认浏览器；服务在系统托盘后台运行，从托盘退出即可停止服务。
+
+用户状态和日志保存在 Windows 用户数据目录 `%LOCALAPPDATA%\\Jianyin`。
 
 也可以在终端中启动：
-
-```powershell
-# Windows
-.\start-jianyin-windows.cmd
-```
 
 ```bash
 # macOS
