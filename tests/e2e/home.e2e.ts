@@ -49,6 +49,16 @@ test("home recommended playlist opens from homepage state", async ({ page }) => 
 });
 
 test("home recommended playlist imports remote detail before opening", async ({ page }) => {
+  const songs = Array.from({ length: 25 }, (_item, index) => ({
+    id: String(321 + index),
+    name: `Home Playlist Song ${index + 1}`,
+    artist: "Cloud Artist",
+    pic: "/assets/icon.png",
+    url: "/assets/full-song-65s.wav",
+    source: "netease",
+    durationMs: 65000,
+    verifiedPlayable: true
+  }));
   await page.route(/\/api\/netease\/playlist\/3778678.*/, async (route) => {
     await route.fulfill({
       contentType: "application/json",
@@ -58,16 +68,8 @@ test("home recommended playlist imports remote detail before opening", async ({ 
           name: "Home Playlist",
           cover: "/assets/icon.png",
           source: "netease",
-          songs: [{
-            id: "321",
-            name: "Home Playlist Song",
-            artist: "Cloud Artist",
-            pic: "/assets/icon.png",
-            url: "/assets/full-song-65s.wav",
-            source: "netease",
-            durationMs: 65000,
-            verifiedPlayable: true
-          }]
+          trackCount: songs.length,
+          songs
         }
       })
     });
@@ -76,7 +78,8 @@ test("home recommended playlist imports remote detail before opening", async ({ 
   await page.getByRole("button", { name: /Home Playlist/ }).click();
   const playlist = page.getByRole("dialog", { name: "Home Playlist" });
   await expect(playlist).toBeVisible();
-  await expect(playlist).toContainText("Home Playlist Song");
+  await expect(playlist).toContainText("Home Playlist Song 25");
+  await expect(playlist.locator(".song-row")).toHaveCount(25);
 });
 
 test("home refresh button reloads recommendation content", async ({ page }) => {

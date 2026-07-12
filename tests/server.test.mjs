@@ -1126,19 +1126,23 @@ test("playlist endpoint imports Netease metadata as FLAC-search playable placeho
   assert.equal(refreshedHome.body.offset, 40);
 });
 
-test("netease playlist detail only maps the 20-song first screen and preserves track count", async () => {
+test("netease playlist detail loads all available songs and preserves track count", async () => {
   const songs = Array.from({ length: 120 }, (_item, index) => song(index + 1));
   const playlist = {
     id: 990,
     name: "Large Playlist",
     coverImgUrl: "/large.png",
     trackCount: songs.length,
-    tracks: songs,
+    tracks: songs.slice(0, 20),
     trackIds: songs.map((item) => ({ id: item.id }))
   };
   const neteaseClient = {
     async playlist_detail() {
       return { body: { playlist } };
+    },
+    async playlist_track_all({ limit }) {
+      assert.equal(limit, 1000);
+      return { body: { songs } };
     },
     async song_url_v1() {
       throw new Error("playlist import should not verify Netease song URLs");
@@ -1149,9 +1153,9 @@ test("netease playlist detail only maps the 20-song first screen and preserves t
   const imported = await getJson(`${baseUrl}/api/netease/playlist/990`);
 
   assert.equal(imported.response.status, 200);
-  assert.equal(imported.body.playlist.songs.length, 20);
+  assert.equal(imported.body.playlist.songs.length, 120);
   assert.equal(imported.body.playlist.songs[0].id, "flac_search_playlist_1");
-  assert.equal(imported.body.playlist.songs[19].id, "flac_search_playlist_20");
+  assert.equal(imported.body.playlist.songs[119].id, "flac_search_playlist_120");
   assert.equal(imported.body.playlist.trackCount, 120);
 });
 
@@ -1208,7 +1212,7 @@ test("netease playlist detail falls back to track_all when detail is slow", asyn
 
 	    assert.equal(imported.response.status, 200);
 	    assert.deepEqual(imported.body.playlist.songs.map((item) => item.id), ["flac_search_playlist_1", "flac_search_playlist_2"]);
-	    assert.deepEqual(trackAllLimits, [20]);
+	    assert.deepEqual(trackAllLimits, [1000]);
   } finally {
     if (oldTimeout === undefined) delete process.env.JIANYIN_PLAYLIST_TIMEOUT_MS;
     else process.env.JIANYIN_PLAYLIST_TIMEOUT_MS = oldTimeout;

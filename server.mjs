@@ -28,7 +28,6 @@ app.use(express.json({ limit: "512kb" }));
 	const SEARCH_VERIFY_BATCH_SIZE = 10;
 	const PLAYLIST_CANDIDATE_LIMIT = 1000;
 	const PLAYLIST_INITIAL_PLAYABLE_LIMIT = 60;
-	const PLAYLIST_FAST_OPEN_LIMIT = 20;
 	const DEFAULT_PLAY_QUALITY = "exhigh";
 	const QUALITY_FALLBACK_ORDER = ["jymaster", "sky", "jyeffect", "hires", "lossless", "exhigh", "standard"];
 const RESOLVED_URL_TTL_MS = 8 * 60 * 1000;
@@ -1129,16 +1128,20 @@ function playableRejectReason(data) {
 	    playlist = await getPlaylistTracksFallback(id, cookie, limit).catch(() => null);
 	  }
 	  if (!playlist) return null;
-	  if ((!Array.isArray(playlist.tracks) || !playlist.tracks.length) && typeof netease.playlist_track_all === "function") {
+	  const currentTracks = Array.isArray(playlist.tracks) ? playlist.tracks : [];
+	  const advertisedCount = Number(playlist.trackCount ?? playlist.trackIds?.length ?? 0) || 0;
+	  const needsFullTracks = !currentTracks.length || (advertisedCount > currentTracks.length && currentTracks.length < limit);
+	  if (needsFullTracks && typeof netease.playlist_track_all === "function") {
 	    try {
 	      const tracks = await withTimeout(
 	        retryNetease(() => netease.playlist_track_all({ id, limit, offset: 0, cookie }), 1),
 	        PLAYLIST_UPSTREAM_TIMEOUT_MS,
 	        "netease playlist_track_all"
 	      );
-	      playlist.tracks = tracks.body?.songs ?? playlist.tracks ?? [];
+	      const fullTracks = Array.isArray(tracks.body?.songs) ? tracks.body.songs : [];
+	      if (fullTracks.length > currentTracks.length) playlist.tracks = fullTracks;
 	    } catch {
-	      // Keep the endpoint quick; trackIds are enough to build first-screen placeholders.
+	      // Keep the endpoint available; the detail response may still contain usable tracks.
 	    }
 	  }
 	    playlistDetailCache.set(cacheKey, { playlist, expiresAt: Date.now() + PLAYLIST_DETAIL_CACHE_TTL_MS });
@@ -1513,12 +1516,12 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 
   try {
 	    const quality = normalizeQuality(req.query.quality);
-	    const playlist = await getPlaylistDetailWithFallback(id, neteaseAccountCookie, PLAYLIST_FAST_OPEN_LIMIT);
+	    const playlist = await getPlaylistDetailWithFallback(id, neteaseAccountCookie, PLAYLIST_CANDIDATE_LIMIT);
     if (!playlist) {
       res.status(404).json({ error: "playlist_not_found", message: "没有找到这个歌单" });
       return;
     }
-	    const mapped = await mapVerifiedPlaylist(playlist, quality, neteaseAccountCookie, PLAYLIST_FAST_OPEN_LIMIT);
+	    const mapped = await mapVerifiedPlaylist(playlist, quality, neteaseAccountCookie, PLAYLIST_CANDIDATE_LIMIT);
     if (!mapped.songs.length) {
       res.status(404).json({ error: "playlist_empty", message: "这个公开歌单没有可完整播放歌曲" });
       return;
