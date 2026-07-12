@@ -12,7 +12,7 @@ using System.Windows.Forms;
 
 internal static class Launcher
 {
-    private const string RuntimeVersion = "1.0.14";
+    private const string RuntimeVersion = "1.0.15";
     private const string NodeVersion = "22.17.0";
     private const string NodeSha256 = "721ab118a3aac8584348b132767eadf51379e0616f0db802cc1e66d7f0d98f85";
     private static readonly string DataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Jianyin");
