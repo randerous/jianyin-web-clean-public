@@ -1337,26 +1337,64 @@ async function getLatestUpdate() {
   if (latestUpdateCache && latestUpdateCache.expiresAt > Date.now()) return latestUpdateCache.data;
   if (latestUpdateInFlight) return latestUpdateInFlight;
   latestUpdateInFlight = (async () => {
+    const githubHeaders = {
+      Accept: "application/vnd.github+json",
+      "User-Agent": "jianyin-web-clean-update-check"
+    };
     const response = await fetchImpl(UPDATE_API_URL, {
-      headers: {
-        Accept: "application/vnd.github+json",
-        "User-Agent": "jianyin-web-clean-update-check"
-      },
+      headers: githubHeaders,
       redirect: "follow"
     });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(`GitHub 更新接口不可用：${response.status}`);
     const tag = cleanText(body?.tag_name);
     if (!releaseVersion(tag)) throw new Error("GitHub Release 版本号无效");
+    const available = compareVersions(tag, APP_VERSION) > 0;
+    const latestNote = {
+      version: tag.replace(/^v/, ""),
+      tag,
+      publishedAt: typeof body?.published_at === "string" ? body.published_at : null,
+      notes: typeof body?.body === "string" ? body.body.slice(0, 4000) : ""
+    };
+    let releaseNotes = available ? [latestNote] : [];
+    if (available) {
+      try {
+        const releasesResponse = await fetchImpl(`https://api.github.com/repos/${UPDATE_REPOSITORY}/releases?per_page=100`, {
+          headers: githubHeaders,
+          redirect: "follow"
+        });
+        const releases = await releasesResponse.json().catch(() => []);
+        if (releasesResponse.ok && Array.isArray(releases)) {
+          releaseNotes = releases
+            .filter((release) => !release?.draft && !release?.prerelease)
+            .map((release) => {
+              const releaseTag = cleanText(release?.tag_name);
+              if (!releaseVersion(releaseTag) || compareVersions(releaseTag, APP_VERSION) <= 0 || compareVersions(releaseTag, tag) > 0) return null;
+              return {
+                version: releaseTag.replace(/^v/, ""),
+                tag: releaseTag,
+                publishedAt: typeof release?.published_at === "string" ? release.published_at : null,
+                notes: typeof release?.body === "string" ? release.body.slice(0, 4000) : ""
+              };
+            })
+            .filter(Boolean)
+            .sort((left, right) => compareVersions(left.tag, right.tag));
+          if (!releaseNotes.length) releaseNotes = [latestNote];
+        }
+      } catch {
+        // The latest release remains usable when historical notes are unavailable.
+      }
+    }
     const assets = Array.isArray(body?.assets) ? body.assets.map(mapUpdateAsset).filter(Boolean) : [];
     const data = {
       currentVersion: APP_VERSION,
       latestVersion: tag.replace(/^v/, ""),
       tag,
-      available: compareVersions(tag, APP_VERSION) > 0,
+      available,
       releaseUrl: safeGithubDownloadUrl(body?.html_url) || `https://github.com/${UPDATE_REPOSITORY}/releases/tag/${encodeURIComponent(tag)}`,
       publishedAt: typeof body?.published_at === "string" ? body.published_at : null,
-      notes: typeof body?.body === "string" ? body.body.slice(0, 4000) : "",
+      notes: latestNote.notes,
+      releaseNotes,
       canApply: process.env.JIANYIN_ENABLE_UPDATE === "1" && existsSync(resolve(updateRoot, ".git")),
       assets: {
         apk: assets.find((asset) => asset.name === "app-release.apk") ?? null,

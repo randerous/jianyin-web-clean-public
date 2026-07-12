@@ -71,13 +71,17 @@ test("automatic update checks only run after the switch is enabled", async ({ pa
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
-        currentVersion: "1.0.19",
-        latestVersion: "1.0.20",
-        tag: "v1.0.20",
+        currentVersion: "1.0.20",
+        latestVersion: "1.0.22",
+        tag: "v1.0.22",
         available: true,
-        releaseUrl: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.20",
+        releaseUrl: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.22",
         publishedAt: null,
         notes: "",
+        releaseNotes: [
+          { version: "1.0.21", tag: "v1.0.21", publishedAt: null, notes: "修复播放恢复" },
+          { version: "1.0.22", tag: "v1.0.22", publishedAt: null, notes: "新增自动更新说明" }
+        ],
         canApply: false,
         assets: { apk: null, windowsLauncher: null }
       })
@@ -88,7 +92,11 @@ test("automatic update checks only run after the switch is enabled", async ({ pa
   expect(updateCalls).toBe(0);
   await settings.getByLabel("自动检查更新").setChecked(true);
   await expect.poll(() => updateCalls).toBe(1);
-  await expect(settings).toContainText("发现 v1.0.20");
+  await expect(settings).toContainText("发现 v1.0.22");
+  await expect(settings.getByRole("region", { name: "更新说明" })).toContainText("v1.0.21");
+  await expect(settings.getByRole("region", { name: "更新说明" })).toContainText("修复播放恢复");
+  await expect(settings.getByRole("region", { name: "更新说明" })).toContainText("v1.0.22");
+  await expect(settings.getByRole("region", { name: "更新说明" })).toContainText("新增自动更新说明");
   await expect.poll(async () => (await storedState(page)).autoUpdateEnabled).toBe(true);
 
   await page.reload();
@@ -110,18 +118,22 @@ test("Android update bridge receives only a verified APK asset", async ({ page }
     await route.fulfill({
       contentType: "application/json",
       body: JSON.stringify({
-        currentVersion: "1.0.19",
-        latestVersion: "1.0.20",
-        tag: "v1.0.20",
+        currentVersion: "1.0.20",
+        latestVersion: "1.0.22",
+        tag: "v1.0.22",
         available: true,
-        releaseUrl: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.20",
+        releaseUrl: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.22",
         publishedAt: null,
         notes: "",
+        releaseNotes: [
+          { version: "1.0.21", tag: "v1.0.21", publishedAt: null, notes: "修复播放恢复" },
+          { version: "1.0.22", tag: "v1.0.22", publishedAt: null, notes: "新增自动更新说明" }
+        ],
         canApply: false,
         assets: {
           apk: {
             name: "app-release.apk",
-            url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.20/app-release.apk",
+            url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.22/app-release.apk",
             sha256: expectedSha256,
             size: 1
           },
@@ -135,10 +147,10 @@ test("Android update bridge receives only a verified APK asset", async ({ page }
   await settings.getByLabel("自动检查更新").setChecked(true);
   await expect.poll(() => page.evaluate(() => (window as Window & { __updateCalls?: unknown[] }).__updateCalls?.length ?? 0)).toBe(1);
   expect(await page.evaluate(() => (window as Window & { __updateCalls?: unknown[] }).__updateCalls?.[0])).toEqual([
-    "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.20/app-release.apk",
+    "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.22/app-release.apk",
     "app-release.apk",
     expectedSha256,
-    "v1.0.20"
+    "v1.0.22"
   ]);
 });
 

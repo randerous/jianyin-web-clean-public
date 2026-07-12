@@ -54,6 +54,7 @@ import {
 import { activeLyricIndex, formatTime, parseLrc } from "./lib/lyrics";
 import { createSharedStateWriter } from "./lib/shared-state-writer";
 import { applyDesktopUpdate, CURRENT_VERSION, fetchLatestUpdate, UPDATE_CHECK_INTERVAL_MS } from "./lib/update";
+import type { LatestUpdate } from "./lib/update";
 import {
   deleteLocalFile,
   downloadJson,
@@ -289,6 +290,7 @@ export default function App() {
   const [accountError, setAccountError] = useState("");
   const [apiBaseInput, setApiBaseInput] = useState(() => getApiBaseUrl());
   const [updateStatus, setUpdateStatus] = useState("");
+  const [updateInfo, setUpdateInfo] = useState<LatestUpdate | null>(null);
   const [stateHydrated, setStateHydrated] = useState(false);
   const [objectUrls, setObjectUrls] = useState<string[]>([]);
   const [floatingLyric, setFloatingLyric] = useState(false);
@@ -348,6 +350,7 @@ export default function App() {
     try {
       const latest = await fetchLatestUpdate(controller.signal);
       if (controller.signal.aborted) return;
+      setUpdateInfo(latest);
       if (!latest.available) {
         if (manual) setUpdateStatus(`当前已是最新版本 ${latest.currentVersion}`);
         return;
@@ -1558,6 +1561,7 @@ export default function App() {
     };
   }, [accountOpen, activePlaylist, activePlaylistSaved, createOpen, floatingLyric, neteaseOpen, playerOpen, settingsOpen, tab]);
 
+  const releaseNotes = Array.isArray(updateInfo?.releaseNotes) ? updateInfo.releaseNotes : [];
   const shellClassName = [
     "app-shell",
     currentSong ? "has-mini-player" : "",
@@ -1869,6 +1873,17 @@ export default function App() {
               <button onClick={() => void checkForUpdates(true)}>检查更新</button>
               <span className="muted">当前版本 {CURRENT_VERSION}{updateStatus ? ` · ${updateStatus}` : ""}</span>
             </div>
+            {updateInfo?.available && releaseNotes.length > 0 && (
+              <section className="update-notes" aria-label="更新说明">
+                <strong>更新到 {updateInfo.latestVersion} 的说明</strong>
+                {releaseNotes.map((release) => (
+                  <article key={release.tag}>
+                    <h3>{release.tag}{release.publishedAt ? ` · ${release.publishedAt.slice(0, 10)}` : ""}</h3>
+                    <p>{release.notes || "该版本未提供文字说明。"}</p>
+                  </article>
+                ))}
+              </section>
+            )}
             <label className="switch-line"><span>显示既见状态栏通知</span><input type="checkbox" checked={androidStatusNotificationEnabled} onChange={(event) => setAndroidStatusNotificationEnabled(event.target.checked)} /></label>
             <button className="wide-action" onClick={() => setAccountOpen(true)}><UserRound /> 账号管理</button>
             <button className="wide-action" onClick={backup}><Download /> 备份数据</button>
