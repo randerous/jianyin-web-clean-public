@@ -147,6 +147,10 @@ function uniqueSongs(songs: Song[]) {
   });
 }
 
+function playlistDisplayCount(playlist: Playlist) {
+  return Number(playlist.trackCount) > 0 ? Number(playlist.trackCount) : playlist.songs.length;
+}
+
 function recentSongsWith(song: Song, songs: Song[]) {
   return uniqueSongs([song, ...songs]).slice(0, RECENT_HISTORY_LIMIT);
 }
@@ -304,6 +308,7 @@ export default function App() {
   const positionRef = useRef(position);
   const androidPlaybackPushRef = useRef({ key: "", playing: false, duration: 0, statusNotificationEnabled: false, lastPosition: -1, lastPushAt: 0 });
   const audioAttemptRef = useRef<{ song: Song; source: Song[] } | null>(null);
+  const playRequestRef = useRef(0);
   const audioRetryRef = useRef<{ key: string; at: number } | null>(null);
   const pausedPlaybackRef = useRef<{ key: string; at: number } | null>(null);
   const playbackRefreshRef = useRef(false);
@@ -659,8 +664,11 @@ export default function App() {
   }, [playQuality]);
 
   const playSong = useCallback(async (song: Song, source?: Song[], options: { quiet?: boolean; startAt?: number; refresh?: boolean; fallbackToMp3?: boolean } = {}) => {
+    const requestId = playRequestRef.current + 1;
+    playRequestRef.current = requestId;
     try {
       const resolved = await resolvePlayable(song, { refresh: options.refresh, fallbackToMp3: options.fallbackToMp3 });
+      if (requestId !== playRequestRef.current) return false;
       const playable = preserveDownloadedCache(song, resolved);
       const originalKey = songKey(song);
       const playableKey = songKey(playable);
@@ -706,6 +714,7 @@ export default function App() {
       pausedPlaybackRef.current = null;
       return true;
     } catch (error) {
+      if (requestId !== playRequestRef.current) return false;
       setPlaying(false);
       if (!options.quiet) setToast(error instanceof Error ? error.message : "无法播放这首歌");
       return false;
@@ -1876,7 +1885,7 @@ function HomeScreen({ data, loading, openingPlaylistId, error, onPlay, onOpenPla
           return (
           <button className="playlist-card cover-playlist" key={playlist.id} onClick={() => playlist.songs.length ? onOpenPlaylist(playlist.id) : onOpenRemotePlaylist(playlist)} disabled={opening}>
             <img src={playlist.cover || "/assets/icon.png"} alt="" />
-            <span><strong>{playlist.name}</strong><small>{opening ? "打开中..." : `${playlist.trackCount || playlist.songs.length} 首${playlist.creatorNickname ? ` · ${playlist.creatorNickname}` : ""}`}</small></span>
+            <span><strong>{playlist.name}</strong><small>{opening ? "打开中..." : `${playlistDisplayCount(playlist)} 首${playlist.creatorNickname ? ` · ${playlist.creatorNickname}` : ""}`}</small></span>
           </button>
           );
         })}
@@ -2073,9 +2082,9 @@ function MineScreen({ playlists, history, downloadHistory, onPlay, onDeleteDownl
       </div>
       <SectionTitle icon={<Library />} title="我的歌单" />
       <div className="playlist-list">
-        {playlists.map((playlist) => (
+            {playlists.map((playlist) => (
           <div className="playlist-row" key={playlist.id}>
-            <button onClick={() => onOpenPlaylist(playlist.id)}><img src={playlist.cover || "/assets/icon.png"} alt="" /><span><strong>{playlist.name}</strong><small>{playlist.songs.length} 首歌曲</small></span></button>
+            <button onClick={() => onOpenPlaylist(playlist.id)}><img src={playlist.cover || "/assets/icon.png"} alt="" /><span><strong>{playlist.name}</strong><small>{playlistDisplayCount(playlist)} 首歌曲</small></span></button>
             <button className="icon-button danger" onClick={() => onDelete(playlist)} aria-label="删除歌单"><Trash2 /></button>
           </div>
         ))}
@@ -2124,7 +2133,7 @@ function PlaylistDetail({ playlist, saved, favoriteKeys, selected, onClose, onPl
         <header className="detail-head">
           <button className="plain-button" onClick={onClose}>返回</button>
           <img src={playlist.cover || "/assets/icon.png"} alt="" />
-          <div><h2>{playlist.name}</h2><p>{playlist.songs.length} 首歌曲 · {playlist.source === "netease" ? "网易云公开歌单" : "本地歌单"}</p></div>
+          <div><h2>{playlist.name}</h2><p>{playlistDisplayCount(playlist)} 首歌曲 · {playlist.source === "netease" ? "网易云公开歌单" : "本地歌单"}</p></div>
         </header>
         <form className="search-box compact-search" onSubmit={(event) => event.preventDefault()}>
           <Search />

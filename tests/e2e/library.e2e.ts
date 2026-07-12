@@ -97,6 +97,69 @@ test("playlist detail play all button starts the full playlist queue", async ({ 
   });
 });
 
+test("switching playlists ignores a stale playback resolve from the previous playlist", async ({ page }) => {
+  const song = (id: string, name: string) => ({
+    id: `netease_${id}`,
+    name,
+    artist: "竞态测试",
+    cover: "/assets/icon.png",
+    url: "",
+    source: "netease",
+    remotePlayable: true
+  });
+  const first = song("playlist_a_song", "歌单 A 歌曲");
+  const second = song("playlist_b_song", "歌单 B 歌曲");
+  const state = {
+    ...testState(),
+    playlists: [
+      { id: "favorites", name: "我喜欢的音乐", cover: "/assets/icon.png", songs: [], source: "local" },
+      { id: "playlist_a", name: "歌单 A", cover: "/assets/icon.png", songs: [first], source: "local" },
+      { id: "playlist_b", name: "歌单 B", cover: "/assets/icon.png", songs: [second], source: "local" }
+    ]
+  };
+  await page.route("**/api/netease/song/*", async (route) => {
+    const id = new URL(route.request().url()).pathname.split("/").pop();
+    await new Promise((resolve) => setTimeout(resolve, id === "playlist_a_song" ? 800 : 40));
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ url: "/assets/full-song-65s.wav", durationMs: 65000, verifiedPlayable: true, quality: "exhigh" })
+    });
+  });
+  await page.request.post("/api/state", { data: { state } });
+  await page.addInitScript(({ key, value }) => localStorage.setItem(key, JSON.stringify(value)), { key: storageKey, value: state });
+  await page.reload();
+
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await page.getByRole("button", { name: "歌单 A 1 首歌曲" }).click();
+  await page.getByRole("dialog", { name: "歌单 A" }).getByRole("button", { name: /歌单 A 歌曲/ }).click();
+  await page.getByRole("dialog", { name: "歌单 A" }).getByRole("button", { name: "返回" }).click();
+  await page.getByRole("button", { name: "歌单 B 1 首歌曲" }).click();
+  await page.getByRole("dialog", { name: "歌单 B" }).getByRole("button", { name: /歌单 B 歌曲/ }).click();
+
+  await page.waitForTimeout(1000);
+  await expect.poll(async () => (await storedState(page)).queue.map((item: { name: string }) => item.name)).toEqual(["歌单 B 歌曲"]);
+  await expect.poll(async () => (await storedState(page)).queueIndex).toBe(0);
+});
+
+test("playlist card and detail use the same total track count", async ({ page }) => {
+  const song = { ...testSongs[0], id: "counted_song", name: "已加载歌曲" };
+  const state = {
+    ...testState(),
+    playlists: [
+      { id: "favorites", name: "我喜欢的音乐", cover: "/assets/icon.png", songs: [], source: "local" },
+      { id: "counted_playlist", name: "总数歌单", cover: "/assets/icon.png", songs: [song], trackCount: 8, source: "netease" }
+    ]
+  };
+  await page.request.post("/api/state", { data: { state } });
+  await page.addInitScript(({ key, value }) => localStorage.setItem(key, JSON.stringify(value)), { key: storageKey, value: state });
+  await page.reload();
+
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await expect(page.getByRole("button", { name: "总数歌单 8 首歌曲" })).toBeVisible();
+  await page.getByRole("button", { name: "总数歌单 8 首歌曲" }).click();
+  await expect(page.getByRole("dialog", { name: "总数歌单" })).toContainText("8 首歌曲");
+});
+
 test("playlist detail selects only visible songs after filtering", async ({ page }) => {
   await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
   await page.getByRole("button", { name: "热歌推荐 3 首歌曲" }).click();
