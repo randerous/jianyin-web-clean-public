@@ -901,6 +901,38 @@ h3 {
   color: var(--text);
 }
 
+.update-notes {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.update-notes article {
+  display: grid;
+  gap: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.update-notes h3,
+.update-notes p {
+  margin: 0;
+}
+
+.update-notes h3 {
+  font-size: 13px;
+}
+
+.update-notes p {
+  white-space: pre-wrap;
+  color: var(--muted);
+}
+
 .switch-line {
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;

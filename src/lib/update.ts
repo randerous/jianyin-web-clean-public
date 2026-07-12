@@ -11,6 +11,13 @@ export type UpdateAsset = {
   size: number | null;
 };
 
+export type UpdateReleaseNote = {
+  version: string;
+  tag: string;
+  publishedAt: string | null;
+  notes: string;
+};
+
 export type LatestUpdate = {
   currentVersion: string;
   latestVersion: string;
@@ -19,6 +26,7 @@ export type LatestUpdate = {
   releaseUrl: string;
   publishedAt: string | null;
   notes: string;
+  releaseNotes: UpdateReleaseNote[];
   canApply: boolean;
   assets: {
     apk: UpdateAsset | null;
