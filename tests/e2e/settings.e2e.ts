@@ -30,6 +30,7 @@ test("settings modal changes persist after reload", async ({ page }) => {
       autoCacheEnabled: state.autoCacheEnabled,
       keepQueueOnExit: state.keepQueueOnExit,
       autoPlayOnStart: state.autoPlayOnStart,
+      autoUpdateEnabled: state.autoUpdateEnabled,
       androidStatusNotificationEnabled: state.androidStatusNotificationEnabled
     };
   }).toEqual({
@@ -42,6 +43,7 @@ test("settings modal changes persist after reload", async ({ page }) => {
     autoCacheEnabled: true,
     keepQueueOnExit: true,
     autoPlayOnStart: true,
+    autoUpdateEnabled: false,
     androidStatusNotificationEnabled: true
   });
   await expect.poll(() => page.evaluate(() => document.documentElement.dataset.theme)).toBe("dark");
@@ -57,8 +59,87 @@ test("settings modal changes persist after reload", async ({ page }) => {
   await expect(dialog.getByLabel("自动缓存")).toBeChecked();
   await expect(dialog.getByLabel("离开后保留列表")).toBeChecked();
   await expect(dialog.getByLabel("启动时播放")).toBeChecked();
+  await expect(dialog.getByLabel("自动检查更新")).not.toBeChecked();
   await expect(dialog.getByLabel("显示既见状态栏通知")).toBeChecked();
   await expect.poll(() => page.evaluate(() => document.documentElement.dataset.theme)).toBe("dark");
+});
+
+test("automatic update checks only run after the switch is enabled", async ({ page }) => {
+  let updateCalls = 0;
+  await page.route("**/api/update/latest", async (route) => {
+    updateCalls += 1;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        currentVersion: "1.0.19",
+        latestVersion: "1.0.20",
+        tag: "v1.0.20",
+        available: true,
+        releaseUrl: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.20",
+        publishedAt: null,
+        notes: "",
+        canApply: false,
+        assets: { apk: null, windowsLauncher: null }
+      })
+    });
+  });
+  const settings = await openSettings(page);
+  await page.waitForTimeout(300);
+  expect(updateCalls).toBe(0);
+  await settings.getByLabel("自动检查更新").setChecked(true);
+  await expect.poll(() => updateCalls).toBe(1);
+  await expect(settings).toContainText("发现 v1.0.20");
+  await expect.poll(async () => (await storedState(page)).autoUpdateEnabled).toBe(true);
+
+  await page.reload();
+  const reloadedSettings = await openSettings(page);
+  await expect(reloadedSettings.getByLabel("自动检查更新")).toBeChecked();
+});
+
+test("Android update bridge receives only a verified APK asset", async ({ page }) => {
+  const expectedSha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+  await page.addInitScript((sha256) => {
+    (window as Window & { __updateCalls?: unknown[] }).__updateCalls = [];
+    window.JianyinAndroid = {
+      downloadAndInstallUpdate: (...args: unknown[]) => {
+        (window as Window & { __updateCalls?: unknown[] }).__updateCalls?.push(args);
+      }
+    };
+  }, expectedSha256);
+  await page.route("**/api/update/latest", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        currentVersion: "1.0.19",
+        latestVersion: "1.0.20",
+        tag: "v1.0.20",
+        available: true,
+        releaseUrl: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.20",
+        publishedAt: null,
+        notes: "",
+        canApply: false,
+        assets: {
+          apk: {
+            name: "app-release.apk",
+            url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.20/app-release.apk",
+            sha256: expectedSha256,
+            size: 1
+          },
+          windowsLauncher: null
+        }
+      })
+    });
+  });
+  await page.reload();
+  const settings = await openSettings(page);
+  await settings.getByLabel("自动检查更新").setChecked(true);
+  await expect.poll(() => page.evaluate(() => (window as Window & { __updateCalls?: unknown[] }).__updateCalls?.length ?? 0)).toBe(1);
+  expect(await page.evaluate(() => (window as Window & { __updateCalls?: unknown[] }).__updateCalls?.[0])).toEqual([
+    "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.20/app-release.apk",
+    "app-release.apk",
+    expectedSha256,
+    "v1.0.20"
+  ]);
 });
 
 test("settings download quality is used for netease downloads", async ({ page }) => {

@@ -110,40 +110,54 @@ async function main() {
     return;
   }
 
-  console.log("\n==> 启动既见本地服务");
-  const child = spawn(process.execPath, ["server.mjs", "--port", String(port)], {
-    cwd: root,
-    env: process.env,
-    stdio: "inherit"
-  });
-
+  process.env.JIANYIN_ENABLE_UPDATE = "1";
+  process.env.JIANYIN_UPDATE_ROOT = root;
+  let opened = false;
+  let stopping = false;
+  let child = null;
   const stop = () => {
-    if (child.exitCode === null) child.kill("SIGTERM");
+    stopping = true;
+    if (child?.exitCode === null) child.kill("SIGTERM");
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   process.once("exit", stop);
 
-  try {
-    await waitForServer(child);
-    console.log(`\n既见已打开：${url}`);
-    console.log("保持此窗口开启；关闭窗口即可停止本地服务。");
-    openBrowser();
-    if (process.env.JIANYIN_EXIT_AFTER_READY === "1") {
-      stop();
-      await new Promise((resolvePromise) => child.once("exit", resolvePromise));
-      return;
-    }
-    await new Promise((resolvePromise, reject) => {
-      child.once("error", reject);
-      child.once("exit", (code, signal) => {
-        if (code === 0 || signal === "SIGTERM" || signal === "SIGINT") resolvePromise();
-        else reject(new Error(`本地服务异常退出：${code ?? signal}`));
-      });
+  while (!stopping) {
+    console.log("\n==> 启动既见本地服务");
+    child = spawn(process.execPath, ["server.mjs", "--port", String(port)], {
+      cwd: root,
+      env: process.env,
+      stdio: "inherit"
     });
-  } catch (error) {
-    stop();
-    throw error;
+    try {
+      await waitForServer(child);
+      if (!opened) {
+        console.log(`\n既见已打开：${url}`);
+        console.log("保持此窗口开启；关闭窗口即可停止本地服务。");
+        openBrowser();
+        opened = true;
+      }
+      if (process.env.JIANYIN_EXIT_AFTER_READY === "1") {
+        child.kill("SIGTERM");
+        await new Promise((resolvePromise) => child.once("exit", resolvePromise));
+        return;
+      }
+      const exit = await new Promise((resolvePromise, reject) => {
+        child.once("error", reject);
+        child.once("exit", (code, signal) => resolvePromise({ code, signal }));
+      });
+      if (stopping || exit.signal === "SIGTERM" || exit.signal === "SIGINT" || exit.code === 0) return;
+      if (exit.code === 75) {
+        run(npmCommand, ["run", "build"], "应用更新后重新构建");
+        cleanGeneratedAppleDoubleFiles();
+        continue;
+      }
+      throw new Error(`本地服务异常退出：${exit.code ?? exit.signal}`);
+    } catch (error) {
+      if (child.exitCode === null) child.kill("SIGTERM");
+      throw error;
+    }
   }
 }
 

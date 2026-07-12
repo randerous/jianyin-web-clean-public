@@ -89,6 +89,7 @@ export function testState() {
     autoCacheEnabled: false,
     keepQueueOnExit: true,
     autoPlayOnStart: false,
+    autoUpdateEnabled: false,
     androidStatusNotificationEnabled: false
   };
 }

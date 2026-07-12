@@ -205,6 +205,66 @@ test("song resolve rejects no-url, trial, and 30-second playback data", async ()
 	  assert.equal(exact.body.reason, "too_short");
 });
 
+test("update endpoint exposes only the fixed GitHub release metadata", async () => {
+  let releaseCalls = 0;
+  const fetchImpl = async (url) => {
+    assert.equal(url, "https://api.github.com/repos/randerous/jianyin-web-clean-public/releases/latest");
+    releaseCalls += 1;
+    return new Response(JSON.stringify({
+      tag_name: "v1.0.20",
+      html_url: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.20",
+      published_at: "2026-07-12T00:00:00Z",
+      body: "Automatic update",
+      assets: [
+        {
+          name: "app-release.apk",
+          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.20/app-release.apk",
+          digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          size: 123
+        },
+        {
+          name: "jianyin-windows-launcher.exe",
+          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.20/jianyin-windows-launcher.exe",
+          digest: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+          size: 456
+        },
+        {
+          name: "evil.apk",
+          browser_download_url: "https://example.test/evil.apk",
+          digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        }
+      ]
+    }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const baseUrl = await startTestServer({ fetchImpl });
+
+  const first = await getJson(`${baseUrl}/api/update/latest`);
+  const second = await getJson(`${baseUrl}/api/update/latest`);
+  assert.equal(first.response.status, 200);
+  assert.equal(first.body.currentVersion, "1.0.19");
+  assert.equal(first.body.latestVersion, "1.0.20");
+  assert.equal(first.body.available, true);
+  assert.equal(first.body.canApply, false);
+  assert.equal(first.body.assets.apk.sha256, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+  assert.equal(first.body.assets.apk.size, 123);
+  assert.equal(first.body.assets.windowsLauncher.sha256, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
+  assert.equal(second.body.tag, "v1.0.20");
+  assert.equal(releaseCalls, 1);
+});
+
+test("update apply is disabled unless the local launcher explicitly enables it", async () => {
+  const baseUrl = await startTestServer({ fetchImpl: async () => {
+    throw new Error("GitHub should not be queried when apply is disabled");
+  } });
+  const result = await getJson(`${baseUrl}/api/update/apply`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ tag: "v1.0.19" })
+  });
+  assert.equal(result.response.status, 403);
+  assert.equal(result.body.error, "update_apply_disabled");
+});
+
 test("lyrics endpoint finds Netease lyric by song title and artist", async () => {
   const neteaseClient = {
     async cloudsearch({ keywords }) {

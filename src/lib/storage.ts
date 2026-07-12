@@ -130,6 +130,7 @@ function serializeState(state: PersistedState): PersistedState {
     autoCacheEnabled: state.autoCacheEnabled,
     keepQueueOnExit: state.keepQueueOnExit,
     autoPlayOnStart: state.autoPlayOnStart,
+    autoUpdateEnabled: state.autoUpdateEnabled,
     androidStatusNotificationEnabled: state.androidStatusNotificationEnabled,
     updatedAt: state.updatedAt
   };
@@ -193,6 +194,7 @@ export function normalizeState(value: unknown): PersistedState {
     autoCacheEnabled: Boolean(raw.autoCacheEnabled),
     keepQueueOnExit: raw.keepQueueOnExit !== false,
     autoPlayOnStart: Boolean(raw.autoPlayOnStart),
+    autoUpdateEnabled: Boolean(raw.autoUpdateEnabled),
     androidStatusNotificationEnabled: Boolean(raw.androidStatusNotificationEnabled),
     updatedAt
   };
@@ -274,6 +276,7 @@ export function mergeStates(local: PersistedState, remote: PersistedState): Pers
       autoCacheEnabled: remote.autoCacheEnabled,
       keepQueueOnExit: remote.keepQueueOnExit,
       autoPlayOnStart: remote.autoPlayOnStart,
+      autoUpdateEnabled: remote.autoUpdateEnabled,
       androidStatusNotificationEnabled: remote.androidStatusNotificationEnabled
     } : {}),
     ...(updatedAt > 0 ? { updatedAt } : {})

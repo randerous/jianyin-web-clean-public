@@ -151,7 +151,7 @@ function emptyState() {
     searchHistory: [], theme: "light", playQuality: "exhigh", downloadQuality: "exhigh",
     progressStyle: "default", lyricSource: "network", autoLyricsEnabled: true,
     playbackSpeed: 1, fadeEnabled: false, autoCacheEnabled: false,
-    keepQueueOnExit: true, autoPlayOnStart: false, androidStatusNotificationEnabled: false,
+    keepQueueOnExit: true, autoPlayOnStart: false, autoUpdateEnabled: false, androidStatusNotificationEnabled: false,
   };
 }
 
