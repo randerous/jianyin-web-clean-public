@@ -1,0 +1,32 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { test } from "node:test";
+
+const root = resolve(import.meta.dirname, "..");
+
+test("release Android networking permits cleartext only for the embedded loopback backend", async () => {
+  const [capacitor, networkConfig, manifest] = await Promise.all([
+    readFile(resolve(root, "capacitor.config.ts"), "utf8"),
+    readFile(resolve(root, "android/app/src/main/res/xml/network_security_config.xml"), "utf8"),
+    readFile(resolve(root, "android/app/src/main/AndroidManifest.xml"), "utf8")
+  ]);
+
+  assert.doesNotMatch(capacitor, /allowMixedContent\s*:\s*true/);
+  assert.match(networkConfig, /<base-config cleartextTrafficPermitted="false">/);
+  assert.match(networkConfig, /<domain[^>]*>localhost<\/domain>/);
+  assert.match(networkConfig, /<domain[^>]*>127\.0\.0\.1<\/domain>/);
+  assert.doesNotMatch(networkConfig, /10\.0\.2\.2/);
+  assert.match(manifest, /android:usesCleartextTraffic="false"/);
+});
+
+test("v1.0.21 release metadata is synchronized across web and Android", async () => {
+  const [packageJson, gradle] = await Promise.all([
+    readFile(resolve(root, "package.json"), "utf8"),
+    readFile(resolve(root, "android/app/build.gradle"), "utf8")
+  ]);
+
+  assert.equal(JSON.parse(packageJson).version, "1.0.21");
+  assert.match(gradle, /versionCode 22/);
+  assert.match(gradle, /versionName "1\.0\.21"/);
+});

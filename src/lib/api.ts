@@ -1,31 +1,21 @@
 import { cover } from "../data/seed";
 import type { AccountState, PlayQuality, Playlist, Song } from "../types";
 
-const API_BASE_STORAGE_KEY = "jianyin_api_base_url";
+const LEGACY_API_BASE_STORAGE_KEY = "jianyin_api_base_url";
 
-function cleanApiBaseUrl(value: string) {
-  return value.trim().replace(/\/+$/, "");
-}
-
-export function getApiBaseUrl() {
-  if (typeof window !== "undefined" && ["127.0.0.1", "localhost"].includes(window.location.hostname) && window.location.port === "5188") {
-    return "";
+function clearLegacyApiBaseUrl() {
+  if (typeof window === "undefined") return;
+  try {
+    localStorage.removeItem(LEGACY_API_BASE_STORAGE_KEY);
+  } catch {
+    // Storage can be unavailable in privacy-restricted browser contexts.
   }
-  const configured = cleanApiBaseUrl(import.meta.env.VITE_API_BASE_URL || localStorage.getItem(API_BASE_STORAGE_KEY) || "");
-  return configured;
-}
-
-export function setApiBaseUrl(value: string) {
-  const cleaned = cleanApiBaseUrl(value);
-  if (cleaned) localStorage.setItem(API_BASE_STORAGE_KEY, cleaned);
-  else localStorage.removeItem(API_BASE_STORAGE_KEY);
-  return cleaned;
 }
 
 export function apiUrl(path: string) {
+  clearLegacyApiBaseUrl();
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
-  const baseUrl = getApiBaseUrl();
-  return baseUrl ? `${baseUrl}${normalizedPath}` : normalizedPath;
+  return normalizedPath;
 }
 
 type RemoteSong = {
@@ -488,7 +478,7 @@ export async function getBiliAccountStatus() {
 }
 
 export async function syncBiliAccountPlaylists() {
-  const data = await fetchJson<{ playlists?: RemotePlaylist[] }>("/api/bili/account/playlists?limit=8");
+  const data = await fetchJson<{ playlists?: RemotePlaylist[] }>("/api/bili/account/playlists");
   return (data.playlists ?? []).map(normalizeRemotePlaylist).filter((playlist): playlist is Playlist => Boolean(playlist));
 }
 

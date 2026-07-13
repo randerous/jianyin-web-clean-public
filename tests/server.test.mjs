@@ -212,8 +212,8 @@ test("update endpoint exposes only the fixed GitHub release metadata", async () 
     if (url === "https://api.github.com/repos/randerous/jianyin-web-clean-public/releases?per_page=100") {
       return new Response(JSON.stringify([
         { tag_name: "v1.0.22", published_at: "2026-07-14T00:00:00Z", body: "Latest release" },
-        { tag_name: "v1.0.20", published_at: "2026-07-11T00:00:00Z", body: "Current release" },
-        { tag_name: "v1.0.21", published_at: "2026-07-12T00:00:00Z", body: "Intermediate release" },
+        { tag_name: "v1.0.21", published_at: "2026-07-12T00:00:00Z", body: "Current release" },
+        { tag_name: "v1.0.20", published_at: "2026-07-11T00:00:00Z", body: "Older release" },
         { tag_name: "v1.0.23", published_at: "2026-07-15T00:00:00Z", body: "Future release" },
         { tag_name: "v1.0.24", draft: true, published_at: "2026-07-16T00:00:00Z", body: "Draft release" },
         { tag_name: "v1.0.25", prerelease: true, published_at: "2026-07-17T00:00:00Z", body: "Pre-release" }
@@ -251,11 +251,11 @@ test("update endpoint exposes only the fixed GitHub release metadata", async () 
   const first = await getJson(`${baseUrl}/api/update/latest`);
   const second = await getJson(`${baseUrl}/api/update/latest`);
   assert.equal(first.response.status, 200);
-  assert.equal(first.body.currentVersion, "1.0.20");
+  assert.equal(first.body.currentVersion, "1.0.21");
   assert.equal(first.body.latestVersion, "1.0.22");
   assert.equal(first.body.available, true);
-  assert.deepEqual(first.body.releaseNotes.map((note) => note.tag), ["v1.0.21", "v1.0.22"]);
-  assert.deepEqual(first.body.releaseNotes.map((note) => note.notes), ["Intermediate release", "Latest release"]);
+  assert.deepEqual(first.body.releaseNotes.map((note) => note.tag), ["v1.0.22"]);
+  assert.deepEqual(first.body.releaseNotes.map((note) => note.notes), ["Latest release"]);
   assert.equal(first.body.canApply, false);
   assert.equal(first.body.assets.apk.sha256, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
   assert.equal(first.body.assets.apk.size, 123);
@@ -1512,6 +1512,69 @@ test("bili search, account sync, song resolve, and stream proxy use verified ful
   assert.ok(calls.some((call) => call.pathname === "/x/player/wbi/playurl"));
   assert.ok(calls.some((call) => call.pathname === "/x/web-interface/wbi/search/type"));
   assert.ok(calls.some((call) => call.pathname === "/x/web-interface/view"));
+});
+
+test("bili account sync fetches every favorite folder and every media page", async () => {
+  const folderRequests = [];
+  const mediaRequests = [];
+  const json = (body) => new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+  const folders = Array.from({ length: 9 }, (_, index) => ({
+    id: index + 1,
+    title: `Folder ${index + 1}`,
+    cover: `/folder-${index + 1}.jpg`,
+    media_count: index === 0 ? 61 : 1
+  }));
+  const fullMedia = (folderId, index) => ({
+    bvid: `BV${folderId}_${index}`,
+    cid: folderId * 1000 + index,
+    title: `Folder ${folderId} Track ${index}`,
+    cover: `/cover-${folderId}-${index}.jpg`,
+    upper: { name: "UP" },
+    duration: 200
+  });
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/x/web-interface/nav") {
+      return json({ code: 0, data: { isLogin: true, uname: "BiliUser", mid: 456 } });
+    }
+    if (parsed.pathname === "/x/v3/fav/folder/created/list-all") {
+      folderRequests.push(parsed);
+      return json({ code: 0, data: { list: folders } });
+    }
+    if (parsed.pathname === "/x/v3/fav/resource/list") {
+      const folderId = Number(parsed.searchParams.get("media_id"));
+      const page = Number(parsed.searchParams.get("pn"));
+      mediaRequests.push({ folderId, page });
+      const all = folderId === 1
+        ? Array.from({ length: 61 }, (_, index) => fullMedia(folderId, index + 1))
+        : [fullMedia(folderId, 1)];
+      const start = (page - 1) * 60;
+      return json({
+        code: 0,
+        data: {
+          info: { media_count: all.length },
+          medias: all.slice(start, start + 60)
+        }
+      });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const baseUrl = await startTestServer({ neteaseClient: {}, fetchImpl });
+
+  const login = await getJson(`${baseUrl}/api/bili/account/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ cookie: "SESSDATA=valid; DedeUserID=456; bili_jct=csrf" })
+  });
+  const synced = await getJson(`${baseUrl}/api/bili/account/playlists`);
+
+  assert.equal(login.response.status, 200);
+  assert.equal(synced.response.status, 200);
+  assert.equal(synced.body.playlists.length, 9);
+  assert.equal(synced.body.playlists[0].songs.length, 61);
+  assert.equal(synced.body.playlists[0].trackCount, 61);
+  assert.deepEqual(mediaRequests.filter((request) => request.folderId === 1).map((request) => request.page), [1, 2]);
+  assert.equal(folderRequests.length, 1);
 });
 
 test("bili search signs WBI request and does not expose invalid json on upstream html", async () => {

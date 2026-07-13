@@ -85,3 +85,13 @@ export type LocalFileBackup = {
   type: string;
   dataUrl: string;
 };
+
+export type BackupPreview = {
+  state: PersistedState;
+  localFiles: LocalFileBackup[];
+  exportedAt: string;
+  playlistCount: number;
+  songCount: number;
+  localFileCount: number;
+  localFileBytes: number;
+};

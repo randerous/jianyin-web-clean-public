@@ -1,5 +1,5 @@
 import { FAVORITES_ID, LOCAL_DB_NAME, LOCAL_STORE_NAME, RECENT_HISTORY_LIMIT, STORAGE_KEY, cover } from "../data/seed";
-import type { BackupPayload, LocalFileBackup, PersistedState, Playlist, Song } from "../types";
+import type { BackupPayload, BackupPreview, LocalFileBackup, PersistedState, Playlist, Song } from "../types";
 import { apiUrl } from "./api";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -412,6 +412,78 @@ function dataUrlToBlob(dataUrl: string) {
   return new Blob([bytes], { type: mime });
 }
 
+export const MAX_BACKUP_LOCAL_FILES = 200;
+export const MAX_BACKUP_LOCAL_FILE_BYTES = 64 * 1024 * 1024;
+export const MAX_BACKUP_LOCAL_BYTES = 256 * 1024 * 1024;
+const MAX_BACKUP_LOCAL_KEY_LENGTH = 240;
+const BACKUP_DATA_URL_PATTERN = /^data:([^;,]+);base64,([A-Za-z0-9+/]*={0,2})$/i;
+
+function stateLocalFileKeys(state: PersistedState) {
+  const songs = [...state.playlists.flatMap((playlist) => playlist.songs), ...state.favorites, ...state.history, ...state.downloadHistory, ...state.queue];
+  return new Set(songs.flatMap((song) => [song.localKey, song.coverKey]).filter((key): key is string => Boolean(key)));
+}
+
+function isSupportedBackupMimeType(value: string) {
+  return /^audio\/[a-z0-9.+-]+$/i.test(value) || /^image\/[a-z0-9.+-]+$/i.test(value) || value === "application/octet-stream";
+}
+
+function base64ByteLength(value: string) {
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return value.length / 4 * 3 - padding;
+}
+
+function validateBackupState(raw: Record<string, unknown>) {
+  const requiredArrayFields = ["playlists", "favorites", "history", "downloadHistory", "queue", "searchHistory"];
+  if (raw.app !== "jianyin-web-clean") throw new Error("不是既见备份文件");
+  if (typeof raw.exportedAt !== "string" || !Number.isFinite(Date.parse(raw.exportedAt))) throw new Error("备份导出时间无效");
+  if (requiredArrayFields.some((field) => !Array.isArray(raw[field]))) throw new Error("备份状态结构不完整");
+  return normalizeState(raw);
+}
+
+export function validateBackup(data: unknown): BackupPreview {
+  if (!isRecord(data)) throw new Error("备份内容不是 JSON 对象");
+  const state = validateBackupState(data);
+  const rawFiles = data.localFiles === undefined ? [] : data.localFiles;
+  if (!Array.isArray(rawFiles)) throw new Error("本地文件列表无效");
+  if (rawFiles.length > MAX_BACKUP_LOCAL_FILES) throw new Error(`本地文件数量超过 ${MAX_BACKUP_LOCAL_FILES} 个上限`);
+
+  const referencedKeys = stateLocalFileKeys(state);
+  const seenKeys = new Set<string>();
+  const localFiles: LocalFileBackup[] = [];
+  let localFileBytes = 0;
+  for (const rawFile of rawFiles) {
+    if (!isRecord(rawFile)) throw new Error("本地文件条目无效");
+    const key = asString(rawFile.key);
+    const type = asString(rawFile.type);
+    const dataUrl = asString(rawFile.dataUrl);
+    if (!key || key.length > MAX_BACKUP_LOCAL_KEY_LENGTH || /[\u0000-\u001f]/.test(key)) throw new Error("本地文件键无效");
+    if (!referencedKeys.has(key)) throw new Error("备份包含未引用的本地文件");
+    if (seenKeys.has(key)) throw new Error("备份包含重复的本地文件");
+    const dataUrlMatch = dataUrl.match(BACKUP_DATA_URL_PATTERN);
+    if (!dataUrlMatch) throw new Error("本地文件编码无效");
+    const mime = dataUrlMatch[1].toLowerCase();
+    const encoded = dataUrlMatch[2];
+    if (!isSupportedBackupMimeType(mime) || type.toLowerCase() !== mime) throw new Error("本地文件类型不受支持");
+    if (encoded.length % 4 !== 0) throw new Error("本地文件编码无效");
+    const byteLength = base64ByteLength(encoded);
+    if (!Number.isFinite(byteLength) || byteLength < 0 || byteLength > MAX_BACKUP_LOCAL_FILE_BYTES) throw new Error("单个本地文件超过大小上限");
+    localFileBytes += byteLength;
+    if (localFileBytes > MAX_BACKUP_LOCAL_BYTES) throw new Error("本地文件总大小超过上限");
+    seenKeys.add(key);
+    localFiles.push({ key, type: mime, dataUrl });
+  }
+
+  return {
+    state,
+    localFiles,
+    exportedAt: asString(data.exportedAt),
+    playlistCount: state.playlists.length,
+    songCount: state.playlists.reduce((count, playlist) => count + playlist.songs.length, 0),
+    localFileCount: localFiles.length,
+    localFileBytes
+  };
+}
+
 async function collectLocalFileBackups(songs: Song[]): Promise<LocalFileBackup[]> {
   const keys = Array.from(new Set(songs.flatMap((song) => [song.localKey, song.coverKey]).filter((key): key is string => Boolean(key))));
   const backups: LocalFileBackup[] = [];
@@ -431,17 +503,11 @@ export async function makeBackup(state: PersistedState): Promise<BackupPayload> 
   };
 }
 
-export async function restoreBackup(data: unknown) {
-  const raw = isRecord(data) ? data : {};
-  if (Array.isArray(raw.localFiles)) {
-    for (const item of raw.localFiles) {
-      if (!isRecord(item)) continue;
-      const key = asString(item.key);
-      const dataUrl = asString(item.dataUrl);
-      if (key && dataUrl.startsWith("data:")) await saveLocalFile(key, dataUrlToBlob(dataUrl));
-    }
+export async function restoreBackup(backup: BackupPreview) {
+  for (const item of backup.localFiles) {
+    await saveLocalFile(item.key, dataUrlToBlob(item.dataUrl));
   }
-  return normalizeState(data);
+  return backup.state;
 }
 
 export function downloadJson(name: string, data: unknown) {

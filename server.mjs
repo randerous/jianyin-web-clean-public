@@ -1297,15 +1297,26 @@ function playableRejectReason(data) {
 	}
 
 	async function getBiliFavItems(mediaId, pageSize = 60) {
-	  const url = new URL(BILI_FAV_RESOURCE_URL);
-	  url.searchParams.set("media_id", String(mediaId));
-	  url.searchParams.set("pn", "1");
-	  url.searchParams.set("ps", String(pageSize));
-	  url.searchParams.set("order", "mtime");
-	  url.searchParams.set("type", "0");
-	  const body = await fetchJsonUrl(url.toString(), apiHeaders(biliAccountCookie));
-	  if (body.code !== 0) throw new Error(body.message || "Bili favorite folder unavailable");
-	  return body.data?.medias ?? [];
+	  const items = [];
+	  let page = 1;
+	  let expectedCount = 0;
+	  while (true) {
+	    const url = new URL(BILI_FAV_RESOURCE_URL);
+	    url.searchParams.set("media_id", String(mediaId));
+	    url.searchParams.set("pn", String(page));
+	    url.searchParams.set("ps", String(pageSize));
+	    url.searchParams.set("order", "mtime");
+	    url.searchParams.set("type", "0");
+	    const body = await fetchJsonUrl(url.toString(), apiHeaders(biliAccountCookie));
+	    if (body.code !== 0) throw new Error(body.message || "Bili favorite folder unavailable");
+	    const medias = Array.isArray(body.data?.medias) ? body.data.medias : [];
+	    const reportedCount = Number(body.data?.info?.media_count ?? body.data?.media_count ?? 0);
+	    if (Number.isFinite(reportedCount) && reportedCount > 0) expectedCount = Math.max(expectedCount, reportedCount);
+	    items.push(...medias);
+	    if (!medias.length || medias.length < pageSize || (expectedCount > 0 && items.length >= expectedCount)) return items;
+	    if (page >= 200) throw new Error("Bili 收藏夹分页异常，已拒绝返回不完整结果");
+	    page += 1;
+	  }
 	}
 
 	function mapBiliResourceItem(item) {
@@ -1943,12 +1954,11 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 	      res.status(401).json({ error: "bili_login_required", message: "请先导入并验证 Bili Cookie" });
 	      return;
 	    }
-	    const limit = parseLimit(req.query.limit, 8, 20);
 	    const url = new URL(BILI_FAV_FOLDER_URL);
 	    url.searchParams.set("up_mid", status.userId);
 	    const body = await fetchJsonUrl(url.toString(), apiHeaders(biliAccountCookie));
 	    if (body.code !== 0) throw new Error(body.message || "Bili favorite folders unavailable");
-	    const folders = (body.data?.list ?? []).slice(0, limit);
+	    const folders = Array.isArray(body.data?.list) ? body.data.list : [];
 	    const playlists = [];
 	    for (const folder of folders) {
 	      const items = await getBiliFavItems(folder.id, 60);
@@ -1961,7 +1971,7 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 	        coverPic: cleanText(folder.cover, songs[0]?.cover ?? ""),
 	        songs,
 	        source: "bili",
-	        trackCount: Number(folder.media_count ?? songs.length) || songs.length,
+	        trackCount: songs.length,
 	        creatorNickname: status.nickname
 	      });
 	    }

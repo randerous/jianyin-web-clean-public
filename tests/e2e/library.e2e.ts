@@ -316,11 +316,107 @@ test("backup restores local audio in a clean context", async ({ page, browser })
   await cleanPage.getByRole("button", { name: "恢复备份" }).click();
   const chooser = await chooserPromise;
   await chooser.setFiles(backupPath!);
+  const preview = cleanPage.getByRole("dialog", { name: "恢复备份预览" });
+  await expect(preview).toContainText("本地音频");
+  await preview.getByRole("button", { name: "合并恢复（推荐）" }).click();
   await expect(cleanPage.getByRole("button", { name: "本地歌单_1首" })).toBeVisible();
   await cleanPage.getByRole("button", { name: "本地歌单_1首" }).click();
   await cleanPage.getByRole("button", { name: /demo-tone/ }).click();
   await expectAudioPlaying(cleanPage);
   await clean.close();
+});
+
+test("backup restore validates and previews data before explicit merge or overwrite", async ({ page }) => {
+  const restoredSong = {
+    ...testSongs[0],
+    id: "restore_local_song",
+    name: "Restored Local Song",
+    source: "local",
+    localKey: "local_restore_audio",
+    url: "local-file:local_restore_audio"
+  };
+  const mergeBackup = {
+    ...testState(),
+    app: "jianyin-web-clean",
+    exportedAt: "2026-07-13T00:00:00.000Z",
+    playlists: [
+      { id: "favorites", name: "我喜欢的音乐", cover: "/assets/icon.png", songs: [], source: "local" },
+      { id: "restored_playlist", name: "Restored Playlist", cover: "/assets/icon.png", songs: [restoredSong], source: "local" }
+    ],
+    localFiles: [{ key: "local_restore_audio", type: "audio/wav", dataUrl: "data:audio/wav;base64,UklGRg==" }]
+  };
+  const idbHas = (key: string) => page.evaluate(async (fileKey) => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("jianyin-web-clean-audio", 1);
+      request.onupgradeneeded = () => request.result.createObjectStore("files");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    const found = await new Promise<boolean>((resolve, reject) => {
+      const request = db.transaction("files", "readonly").objectStore("files").get(fileKey);
+      request.onsuccess = () => resolve(Boolean(request.result));
+      request.onerror = () => reject(request.error);
+    });
+    db.close();
+    return found;
+  }, key);
+
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  const chooserPromise = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "恢复备份" }).click();
+  const chooser = await chooserPromise;
+  await chooser.setFiles({ name: "merge-backup.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(mergeBackup)) });
+
+  const preview = page.getByRole("dialog", { name: "恢复备份预览" });
+  await expect(preview).toContainText("Restored Playlist");
+  await expect(preview).toContainText("1 个本地音频");
+  expect(await idbHas("local_restore_audio")).toBe(false);
+  expect((await storedState(page)).playlists.some((playlist: { id: string }) => playlist.id === "restored_playlist")).toBe(false);
+
+  await preview.getByRole("button", { name: "合并恢复（推荐）" }).click();
+  await expect.poll(async () => (await storedState(page)).playlists.map((playlist: { id: string }) => playlist.id)).toContain("restored_playlist");
+  await expect.poll(() => idbHas("local_restore_audio")).toBe(true);
+  await expect.poll(async () => (await storedState(page)).playlists.map((playlist: { id: string }) => playlist.id)).toContain("test_hot");
+
+  const overwriteBackup = {
+    ...mergeBackup,
+    playlists: [
+      { id: "favorites", name: "我喜欢的音乐", cover: "/assets/icon.png", songs: [], source: "local" },
+      { id: "overwrite_playlist", name: "Overwrite Playlist", cover: "/assets/icon.png", songs: [], source: "local" }
+    ],
+    localFiles: []
+  };
+  const overwriteChooserPromise = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "恢复备份" }).click();
+  const overwriteChooser = await overwriteChooserPromise;
+  await overwriteChooser.setFiles({ name: "overwrite-backup.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(overwriteBackup)) });
+  const overwritePreview = page.getByRole("dialog", { name: "恢复备份预览" });
+  await overwritePreview.getByRole("button", { name: "覆盖本机数据" }).click();
+  await expect.poll(async () => (await storedState(page)).playlists.map((playlist: { id: string }) => playlist.id)).toContain("overwrite_playlist");
+  await expect.poll(async () => (await storedState(page)).playlists.map((playlist: { id: string }) => playlist.id)).not.toContain("test_hot");
+});
+
+test("backup restore refuses foreign and over-limit local-file payloads without changing state", async ({ page }) => {
+  const before = await storedState(page);
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  const foreignChooserPromise = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "恢复备份" }).click();
+  const foreignChooser = await foreignChooserPromise;
+  await foreignChooser.setFiles({ name: "foreign.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ ...testState(), app: "other-app", exportedAt: "2026-07-13T00:00:00.000Z" })) });
+  await expect(page.locator(".toast")).toContainText("备份文件无效");
+  await expect(page.getByRole("dialog", { name: "恢复备份预览" })).toHaveCount(0);
+
+  const overLimitChooserPromise = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "恢复备份" }).click();
+  const overLimitChooser = await overLimitChooserPromise;
+  const overLimitFiles = Array.from({ length: 201 }, (_, index) => ({ key: `local_over_limit_${index}`, type: "audio/wav", dataUrl: "data:audio/wav;base64,UklGRg==" }));
+  await overLimitChooser.setFiles({
+    name: "over-limit.json",
+    mimeType: "application/json",
+    buffer: Buffer.from(JSON.stringify({ ...testState(), app: "jianyin-web-clean", exportedAt: "2026-07-13T00:00:00.000Z", localFiles: overLimitFiles }))
+  });
+  await expect(page.locator(".toast")).toContainText("备份文件无效");
+  expect((await storedState(page)).playlists.map((playlist: { id: string }) => playlist.id)).toEqual(before.playlists.map((playlist: { id: string }) => playlist.id));
 });
 
 test("local audio shared metadata in clean context requires reimport", async ({ page, browser }) => {
@@ -633,11 +729,24 @@ test("download manager removes uncached download history entries", async ({ page
   };
   const state = { ...testState(), downloadHistory: [song] };
   page.on("dialog", (dialog) => void dialog.accept());
+  let forwardStateWrites = false;
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state }) });
+      return;
+    }
+    if (forwardStateWrites) {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
   await page.request.post("/api/state", { data: { state } });
-  await page.evaluate(({ key, value }) => {
+  const stateScript = await page.addInitScript(({ key, value }) => {
     localStorage.setItem(key, JSON.stringify(value));
   }, { key: storageKey, value: state });
   await page.reload();
+  await stateScript.dispose();
 
   await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
   await expect(page.getByRole("button", { name: "删除下载" })).toBeVisible();
@@ -646,6 +755,7 @@ test("download manager removes uncached download history entries", async ({ page
   const row = manager.locator(".song-row", { hasText: "Uncached Download History" });
   await expect(row).toHaveCount(1);
   await expect(row.getByRole("button", { name: "删除下载" })).toBeVisible();
+  forwardStateWrites = true;
   await row.getByRole("button", { name: "删除下载" }).click();
   await expect(row).toHaveCount(0);
   await expect.poll(() => page.evaluate((key) => {

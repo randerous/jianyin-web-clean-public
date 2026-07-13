@@ -107,6 +107,45 @@ test("empty keyword sends no search request", async ({ page }) => {
   await expect(page.getByText("should not search blank keyword")).toHaveCount(0);
 });
 
+test("failed online search keeps matching local-library results visible", async ({ page }) => {
+  const localSong = {
+    ...testSongs[0],
+    id: "offline_library_song",
+    name: "Offline Library Match",
+    artist: "Offline Artist"
+  };
+  const state = {
+    ...testState(),
+    playlists: [
+      { id: "favorites", name: "我喜欢的音乐", cover: "/assets/icon.png", songs: [], source: "local" },
+      { id: "offline_library", name: "Offline Library", cover: "/assets/icon.png", songs: [localSong], source: "local" }
+    ],
+    history: [localSong]
+  };
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state }) });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+  const stateScript = await page.addInitScript(({ key, value }) => localStorage.setItem(key, JSON.stringify(value)), { key: storageKey, value: state });
+  await page.reload();
+  await stateScript.dispose();
+  await expect.poll(async () => (await storedState(page)).playlists.map((playlist: { id: string }) => playlist.id)).toContain("offline_library");
+  await page.route("**/api/flac/search**", async (route) => {
+    await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ message: "测试源暂不可用" }) });
+  });
+
+  await page.getByRole("navigation").getByRole("button", { name: "搜索" }).click();
+  await page.getByPlaceholder("搜索音乐/歌手").fill("offline library");
+  await page.keyboard.press("Enter");
+
+  await expect(page.getByRole("button", { name: "Offline Library Match Offline Artist · 本地" })).toBeVisible();
+  await expect(page.getByText("离线本地结果 · 1 首")).toBeVisible();
+  await expect(page.getByText("没有找到结果")).toHaveCount(0);
+});
+
 test("toast stays readable above mobile search pagination", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.route("**/api/flac/search**", async (route) => {

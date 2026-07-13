@@ -104,7 +104,7 @@ test("automatic update checks only run after the switch is enabled", async ({ pa
   await expect(reloadedSettings.getByLabel("自动检查更新")).toBeChecked();
 });
 
-test("Android update bridge receives only a verified APK asset", async ({ page }) => {
+test("verified Android update is installed only after an explicit user action", async ({ page }) => {
   const expectedSha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
   await page.addInitScript((sha256) => {
     (window as Window & { __updateCalls?: unknown[] }).__updateCalls = [];
@@ -145,6 +145,9 @@ test("Android update bridge receives only a verified APK asset", async ({ page }
   await page.reload();
   const settings = await openSettings(page);
   await settings.getByLabel("自动检查更新").setChecked(true);
+  await expect(settings).toContainText("发现 v1.0.22");
+  await expect.poll(() => page.evaluate(() => (window as Window & { __updateCalls?: unknown[] }).__updateCalls?.length ?? 0)).toBe(0);
+  await settings.getByRole("button", { name: "下载并安装 APK" }).click();
   await expect.poll(() => page.evaluate(() => (window as Window & { __updateCalls?: unknown[] }).__updateCalls?.length ?? 0)).toBe(1);
   expect(await page.evaluate(() => (window as Window & { __updateCalls?: unknown[] }).__updateCalls?.[0])).toEqual([
     "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.22/app-release.apk",
@@ -152,6 +155,130 @@ test("Android update bridge receives only a verified APK asset", async ({ page }
     expectedSha256,
     "v1.0.22"
   ]);
+});
+
+test("desktop update is applied only after the explicit update button is pressed", async ({ page }) => {
+  let applyCalls = 0;
+  await page.route("**/api/update/latest", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        currentVersion: "1.0.20",
+        latestVersion: "1.0.22",
+        tag: "v1.0.22",
+        available: true,
+        releaseUrl: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.22",
+        publishedAt: null,
+        notes: "桌面更新",
+        releaseNotes: [],
+        canApply: true,
+        assets: { apk: null, windowsLauncher: null }
+      })
+    });
+  });
+  await page.route("**/api/update/apply", async (route) => {
+    applyCalls += 1;
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, updated: false, message: "测试更新" }) });
+  });
+
+  const settings = await openSettings(page);
+  await settings.getByLabel("自动检查更新").setChecked(true);
+  await expect(settings).toContainText("发现 v1.0.22");
+  expect(applyCalls).toBe(0);
+  await settings.getByRole("button", { name: "更新桌面版" }).click();
+  await expect.poll(() => applyCalls).toBe(1);
+});
+
+test("lyric source honors embedded priority and network priority", async ({ page }) => {
+  let lyricCalls = 0;
+  const remoteSong = {
+    ...testSongs[0],
+    id: "netease_lyrics_priority",
+    name: "Lyrics Priority Song",
+    artist: "Lyrics Artist",
+    source: "netease",
+    remotePlayable: true,
+    lrc: "[00:00.00]embedded lyrics"
+  };
+  const state = {
+    ...testState(),
+    queue: [remoteSong],
+    queueIndex: 0,
+    lyricSource: "embedded",
+    autoLyricsEnabled: false
+  };
+  await page.route("**/api/lyrics**", async (route) => {
+    lyricCalls += 1;
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ lrc: "[00:00.00]network lyrics" }) });
+  });
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state }) });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+  const stateScript = await page.addInitScript(({ key, value }) => localStorage.setItem(key, JSON.stringify(value)), { key: storageKey, value: state });
+  await page.reload();
+  await stateScript.dispose();
+
+  const settings = await openSettings(page);
+  await settings.getByLabel("歌词来源").selectOption("embedded");
+  await settings.getByLabel("自动获取歌词").setChecked(true);
+  await page.waitForTimeout(300);
+  expect(lyricCalls).toBe(0);
+  await settings.getByLabel("歌词来源").selectOption("network");
+  await expect.poll(() => lyricCalls).toBe(1);
+  await expect.poll(async () => (await storedState(page)).queue[0].lrc).toBe("[00:00.00]network lyrics");
+});
+
+test("enabled fade animates volume while switching active songs", async ({ page }) => {
+  const fadeSongs = [
+    { ...testSongs[0], id: "fade_first", name: "Fade First", url: "/assets/full-song-65s.wav" },
+    { ...testSongs[1], id: "fade_second", name: "Fade Second", url: "/assets/demo-tone.wav" }
+  ];
+  const state = {
+    ...testState(),
+    playlists: [
+      { id: "favorites", name: "我喜欢的音乐", cover: "/assets/icon.png", songs: [], source: "local" },
+      { id: "fade_playlist", name: "Fade Playlist", cover: "/assets/icon.png", songs: fadeSongs, source: "local" }
+    ],
+    fadeEnabled: true,
+    autoLyricsEnabled: false
+  };
+  const stateScript = await page.addInitScript(({ key, value }) => localStorage.setItem(key, JSON.stringify(value)), { key: storageKey, value: state });
+  await page.reload();
+  await stateScript.dispose();
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await page.getByRole("button", { name: "Fade Playlist 2 首歌曲" }).click();
+  const playlist = page.getByRole("dialog", { name: "Fade Playlist" });
+  await playlist.getByRole("button", { name: "Fade First 测试曲库 · 本地" }).click();
+  await expectAudioPlaying(page);
+  await page.locator("audio").evaluate((audio: HTMLAudioElement) => {
+    (window as Window & { __fadeVolumes?: number[] }).__fadeVolumes = [];
+    audio.addEventListener("volumechange", () => (window as Window & { __fadeVolumes?: number[] }).__fadeVolumes?.push(audio.volume));
+  });
+
+  await playlist.getByRole("button", { name: "Fade Second 测试曲库 · 本地" }).click();
+  await expect.poll(() => page.evaluate(() => (window as Window & { __fadeVolumes?: number[] }).__fadeVolumes ?? [])).toEqual(expect.arrayContaining([expect.any(Number)]));
+  await expect.poll(() => page.evaluate(() => ((window as Window & { __fadeVolumes?: number[] }).__fadeVolumes ?? []).some((value) => value < 0.99))).toBe(true);
+  await expectAudioPlaying(page);
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.volume)).toBe(1);
+});
+
+test("legacy custom backend settings are discarded and cannot receive API traffic", async ({ page }) => {
+  const legacyBase = "http://192.168.1.10:5188";
+  const legacyRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.url().startsWith(legacyBase)) legacyRequests.push(request.url());
+  });
+  await page.evaluate((value) => localStorage.setItem("jianyin_api_base_url", value), legacyBase);
+  await page.reload();
+
+  await expect.poll(() => page.evaluate(() => localStorage.getItem("jianyin_api_base_url"))).toBeNull();
+  expect(legacyRequests).toEqual([]);
+  const settings = await openSettings(page);
+  await expect(settings.getByLabel("API backend URL")).toHaveCount(0);
 });
 
 test("settings download quality is used for netease downloads", async ({ page }) => {

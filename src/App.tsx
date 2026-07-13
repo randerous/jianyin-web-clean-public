@@ -34,7 +34,6 @@ import {
   fetchNeteaseHome,
   fetchLyricsForSong,
   getBiliAccountStatus,
-  getApiBaseUrl,
   getNeteaseAccountStatus,
   importNeteasePlaylist,
   loginBiliCookie,
@@ -47,7 +46,6 @@ import {
   resolveFlacSong,
   resolveNeteaseSong,
   searchFlac,
-  setApiBaseUrl,
   syncBiliAccountPlaylists,
   syncNeteaseAccountPlaylists
 } from "./lib/api";
@@ -68,10 +66,11 @@ import {
   saveLocalFile,
   saveSharedState,
   saveState,
-  songKey
+  songKey,
+  validateBackup
 } from "./lib/storage";
 import { FAVORITES_ID, RECENT_HISTORY_LIMIT, cover, recommendedKeywords } from "./data/seed";
-import type { AccountState, LyricSource, PersistedState, PlayQuality, Playlist, ProgressStyle, Song, Theme } from "./types";
+import type { AccountState, BackupPreview, LyricSource, PersistedState, PlayQuality, Playlist, ProgressStyle, Song, Theme } from "./types";
 
 type Tab = "home" | "search" | "mine";
 type PlayMode = "sequence" | "repeat" | "shuffle";
@@ -82,6 +81,7 @@ type HomeData = {
 };
 
 const FLAC_PAUSED_REFRESH_MS = 6 * 60 * 1000;
+const AUDIO_FADE_DURATION_MS = 180;
 
 declare global {
   interface Window {
@@ -152,6 +152,12 @@ function uniqueSongs(songs: Song[]) {
 
 function playlistDisplayCount(playlist: Playlist) {
   return Number(playlist.trackCount) > 0 ? Number(playlist.trackCount) : playlist.songs.length;
+}
+
+function formatFileSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function recentSongsWith(song: Song, songs: Song[]) {
@@ -262,6 +268,7 @@ export default function App() {
   const [homeRefreshIndex, setHomeRefreshIndex] = useState(0);
   const [query, setQuery] = useState("");
   const [remoteResults, setRemoteResults] = useState<Song[]>([]);
+  const [searchOfflineResults, setSearchOfflineResults] = useState(false);
   const [searchPageInfo, setSearchPageInfo] = useState({ page: 1, pageSize: FLAC_SEARCH_PAGE_SIZE, total: null as number | null, hasMore: false });
   const [searching, setSearching] = useState(false);
   const [proxyOnline, setProxyOnline] = useState(false);
@@ -288,9 +295,10 @@ export default function App() {
   const [accountProvider, setAccountProvider] = useState<"netease" | "bili">("netease");
   const [accountBusy, setAccountBusy] = useState(false);
   const [accountError, setAccountError] = useState("");
-  const [apiBaseInput, setApiBaseInput] = useState(() => getApiBaseUrl());
   const [updateStatus, setUpdateStatus] = useState("");
   const [updateInfo, setUpdateInfo] = useState<LatestUpdate | null>(null);
+  const [restorePreview, setRestorePreview] = useState<BackupPreview | null>(null);
+  const [restoreBusy, setRestoreBusy] = useState(false);
   const [stateHydrated, setStateHydrated] = useState(false);
   const [objectUrls, setObjectUrls] = useState<string[]>([]);
   const [floatingLyric, setFloatingLyric] = useState(false);
@@ -322,7 +330,8 @@ export default function App() {
   const autoPlayCheckedRef = useRef(false);
   const cacheInFlightRef = useRef(new Map<string, Promise<Song>>());
   const updateCheckRef = useRef<AbortController | null>(null);
-  const updateOfferRef = useRef("");
+  const lyricsAutoFetchRef = useRef(new Set<string>());
+  const audioFadeRef = useRef<{ frame: number; resolve: () => void } | null>(null);
 
   const currentSong = queue[queueIndex] ?? null;
   if (!sharedStateWriterRef.current) {
@@ -355,29 +364,7 @@ export default function App() {
         if (manual) setUpdateStatus(`当前已是最新版本 ${latest.currentVersion}`);
         return;
       }
-      if (!manual && updateOfferRef.current === latest.tag) return;
-      updateOfferRef.current = latest.tag;
-
-      const apk = latest.assets.apk;
-      if (window.JianyinAndroid?.downloadAndInstallUpdate && apk?.url && apk.sha256) {
-        setUpdateStatus(`发现 ${latest.tag}，正在下载 APK`);
-        window.JianyinAndroid.downloadAndInstallUpdate(apk.url, apk.name, apk.sha256, latest.tag);
-        return;
-      }
-      if (window.JianyinAndroid && apk?.url && !apk.sha256) {
-        setUpdateStatus(`发现 ${latest.tag}，但 APK 缺少 SHA-256 校验值`);
-        return;
-      }
-      if (latest.canApply) {
-        setUpdateStatus(`发现 ${latest.tag}，正在更新桌面服务`);
-        const result = await applyDesktopUpdate(latest.tag, controller.signal);
-        if (result.updated) {
-          setToast("桌面版正在更新，服务重启后会自动刷新");
-          window.setTimeout(() => window.location.reload(), 1500);
-          return;
-        }
-      }
-      setUpdateStatus(`发现 ${latest.tag}，请重启启动器完成更新`);
+      setUpdateStatus(`发现 ${latest.tag}，请查看更新说明后手动更新`);
       if (manual) setToast(`发现新版本 ${latest.tag}`);
     } catch (error) {
       if (controller.signal.aborted) return;
@@ -387,6 +374,42 @@ export default function App() {
       if (updateCheckRef.current === controller) updateCheckRef.current = null;
     }
   }, []);
+
+  const applyAvailableUpdate = useCallback(async () => {
+    const latest = updateInfo;
+    if (!latest?.available) {
+      await checkForUpdates(true);
+      return;
+    }
+    const apk = latest.assets.apk;
+    if (window.JianyinAndroid?.downloadAndInstallUpdate) {
+      if (!apk?.url || !apk.sha256) {
+        setUpdateStatus(`发现 ${latest.tag}，但 APK 缺少 SHA-256 校验值`);
+        return;
+      }
+      setUpdateStatus(`发现 ${latest.tag}，正在下载 APK`);
+      window.JianyinAndroid.downloadAndInstallUpdate(apk.url, apk.name, apk.sha256, latest.tag);
+      return;
+    }
+    if (!latest.canApply) {
+      setUpdateStatus(`发现 ${latest.tag}，请重启启动器完成更新`);
+      return;
+    }
+    try {
+      setUpdateStatus(`发现 ${latest.tag}，正在更新桌面服务`);
+      const result = await applyDesktopUpdate(latest.tag);
+      if (result.updated) {
+        setToast("桌面版正在更新，服务重启后会自动刷新");
+        window.setTimeout(() => window.location.reload(), 1500);
+        return;
+      }
+      setUpdateStatus(result.message || `发现 ${latest.tag}，请重启启动器完成更新`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "桌面版更新失败";
+      setUpdateStatus(message);
+      setToast(message);
+    }
+  }, [checkForUpdates, updateInfo]);
 
   useEffect(() => {
     if (!stateHydrated || !autoUpdateEnabled) return;
@@ -736,6 +759,47 @@ export default function App() {
     throw new Error("当前歌曲没有可播放链接");
   }, [playQuality]);
 
+  const cancelAudioFade = useCallback((audio: HTMLAudioElement | null = audioRef.current) => {
+    const active = audioFadeRef.current;
+    if (active) {
+      window.cancelAnimationFrame(active.frame);
+      audioFadeRef.current = null;
+      active.resolve();
+    }
+    if (audio) audio.volume = 1;
+  }, []);
+
+  const fadeAudioVolume = useCallback((audio: HTMLAudioElement, target: number) => {
+    cancelAudioFade();
+    const start = audio.volume;
+    if (Math.abs(start - target) < 0.01) {
+      audio.volume = target;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      const startedAt = performance.now();
+      const active = { frame: 0, resolve };
+      const finish = () => {
+        if (audioFadeRef.current === active) audioFadeRef.current = null;
+        resolve();
+      };
+      const step = (now: number) => {
+        if (audioFadeRef.current !== active) return;
+        const progress = Math.min(1, (now - startedAt) / AUDIO_FADE_DURATION_MS);
+        audio.volume = start + (target - start) * progress;
+        if (progress >= 1) {
+          finish();
+          return;
+        }
+        active.frame = window.requestAnimationFrame(step);
+      };
+      audioFadeRef.current = active;
+      active.frame = window.requestAnimationFrame(step);
+    });
+  }, [cancelAudioFade]);
+
+  useEffect(() => () => cancelAudioFade(), [cancelAudioFade]);
+
   const playSong = useCallback(async (song: Song, source?: Song[], options: { quiet?: boolean; startAt?: number; refresh?: boolean; fallbackToMp3?: boolean } = {}) => {
     const requestId = playRequestRef.current + 1;
     playRequestRef.current = requestId;
@@ -748,6 +812,13 @@ export default function App() {
       const replaceResolved = (item: Song) => songKey(item) === originalKey ? preserveDownloadedCache(item, playable) : item;
       const nextQueue = playableSongs((source?.length ? source : [playable]).map((item) => songKey(item) === songKey(song) ? playable : item));
       const nextIndex = Math.max(0, nextQueue.findIndex((item) => songKey(item) === songKey(playable)));
+      const audio = audioRef.current;
+      const targetSrc = playable.url ? new URL(playable.url, window.location.href).href : "";
+      const shouldFade = Boolean(fadeEnabled && audio && !audio.paused && targetSrc && (audio.currentSrc || audio.src) !== targetSrc);
+      if (audio && shouldFade) {
+        await fadeAudioVolume(audio, 0);
+        if (requestId !== playRequestRef.current) return false;
+      }
       setRemoteResults((items) => items.map(replaceResolved));
       setFavorites((items) => items.map(replaceResolved));
       setPlaylists((items) => items.map((playlist) => {
@@ -775,19 +846,22 @@ export default function App() {
       })].slice(0, RECENT_HISTORY_LIMIT));
       setPlaying(true);
       audioAttemptRef.current = { song: playable, source: nextQueue };
-      if (audioRef.current) {
+      if (audio) {
         const startAt = Math.max(0, options.startAt ?? 0);
-        audioRef.current.src = playable.url;
-        audioRef.current.playbackRate = playbackSpeed;
-        audioRef.current.currentTime = startAt;
+        audio.volume = shouldFade ? 0 : 1;
+        audio.src = playable.url;
+        audio.playbackRate = playbackSpeed;
+        audio.currentTime = startAt;
         positionRef.current = startAt;
         setPosition(startAt);
-        await audioRef.current.play();
+        await audio.play();
+        if (shouldFade) void fadeAudioVolume(audio, 1);
       }
       pausedPlaybackRef.current = null;
       return true;
     } catch (error) {
       if (requestId !== playRequestRef.current) return false;
+      cancelAudioFade();
       setPlaying(false);
       if (!options.quiet) {
         const details = error instanceof Error ? `${error.name} ${error.message}` : String(error);
@@ -798,7 +872,7 @@ export default function App() {
       }
       return false;
     }
-  }, [playbackSpeed, resolvePlayable]);
+  }, [cancelAudioFade, fadeAudioVolume, fadeEnabled, playbackSpeed, resolvePlayable]);
 
   useEffect(() => {
     if (!stateHydrated || autoPlayCheckedRef.current || !autoPlayOnStart || !currentSong) return;
@@ -1082,14 +1156,19 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!autoLyricsEnabled || !currentSong || currentSong.lrc || currentSong.source === "local") return;
+    if (!autoLyricsEnabled || !currentSong || currentSong.source === "local") return;
+    if (lyricSource === "embedded" && currentSong.lrc) return;
     const key = songKey(currentSong);
+    const requestKey = `${key}:${lyricSource}`;
+    if (lyricsAutoFetchRef.current.has(requestKey)) return;
+    if (lyricsAutoFetchRef.current.size >= 256) lyricsAutoFetchRef.current.clear();
+    lyricsAutoFetchRef.current.add(requestKey);
     let cancelled = false;
     setLyricsLoadingKey(key);
     void fetchLyricsForSong(currentSong)
       .then((lrc) => {
         if (cancelled || !lrc.trim()) return;
-        updateSongEverywhere(currentSong, (song) => song.lrc ? song : { ...song, lrc });
+        updateSongEverywhere(currentSong, (song) => lyricSource === "network" ? { ...song, lrc } : song.lrc ? song : { ...song, lrc });
       })
       .catch(() => {
         // Lyrics are best-effort; playback should never be blocked by lyric lookup.
@@ -1100,7 +1179,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [autoLyricsEnabled, currentSong, updateSongEverywhere]);
+  }, [autoLyricsEnabled, currentSong, lyricSource, updateSongEverywhere]);
 
   const fetchLyricsForCurrentSong = useCallback(async (force = false) => {
     if (!currentSong) return;
@@ -1309,17 +1388,21 @@ export default function App() {
       if (searchRunRef.current !== runId) return;
       setRemoteResults(result.songs);
       setSearchPageInfo({ page: result.page, pageSize: result.pageSize, total: result.total, hasMore: result.hasMore });
+      setSearchOfflineResults(false);
       setProxyOnline(true);
-    } catch (error) {
+    } catch {
       if (searchRunRef.current !== runId) return;
-      setRemoteResults([]);
-      setSearchPageInfo({ page: 1, pageSize: FLAC_SEARCH_PAGE_SIZE, total: null, hasMore: false });
+      const normalized = text.toLocaleLowerCase();
+      const localMatches = allLibrarySongs(playlists, history).filter((song) => [song.name, song.artist].some((value) => value.toLocaleLowerCase().includes(normalized)));
+      setRemoteResults(localMatches);
+      setSearchPageInfo({ page: 1, pageSize: FLAC_SEARCH_PAGE_SIZE, total: localMatches.length, hasMore: false });
+      setSearchOfflineResults(true);
       setProxyOnline(false);
-      setToast(error instanceof Error ? error.message : "搜索接口不可用，当前显示本地曲库结果");
+      setToast(`在线搜索失败，当前显示本地曲库 ${localMatches.length} 首`);
     } finally {
       if (searchRunRef.current === runId) setSearching(false);
     }
-  }, [query]);
+  }, [history, playlists, query]);
 
   const importFiles = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []).filter((file) => file.type.startsWith("audio/"));
@@ -1350,42 +1433,91 @@ export default function App() {
     setToast(payload.localFiles?.length ? `已导出备份，包含 ${payload.localFiles.length} 个本地音频` : "已导出备份");
   }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
 
+  const applyHydratedRestore = useCallback((hydrated: { state: PersistedState; urls: string[] }) => {
+    setPlaylists(hydrated.state.playlists);
+    setFavorites(hydrated.state.favorites);
+    setHistory(hydrated.state.history);
+    setDownloadHistory(hydrated.state.downloadHistory);
+    setQueue(hydrated.state.queue);
+    setQueueIndex(hydrated.state.queueIndex);
+    setSearchHistory(hydrated.state.searchHistory);
+    setTheme(hydrated.state.theme);
+    setPlayQuality(hydrated.state.playQuality);
+    setDownloadQuality(hydrated.state.downloadQuality);
+    setProgressStyle(hydrated.state.progressStyle);
+    setLyricSource(hydrated.state.lyricSource);
+    setAutoLyricsEnabled(hydrated.state.autoLyricsEnabled);
+    setPlaybackSpeed(hydrated.state.playbackSpeed);
+    setFadeEnabled(hydrated.state.fadeEnabled);
+    setAutoCacheEnabled(hydrated.state.autoCacheEnabled);
+    setKeepQueueOnExit(hydrated.state.keepQueueOnExit);
+    setAutoPlayOnStart(hydrated.state.autoPlayOnStart);
+    setAutoUpdateEnabled(hydrated.state.autoUpdateEnabled);
+    setAndroidStatusNotificationEnabled(hydrated.state.androidStatusNotificationEnabled);
+    setActivePlaylistId(null);
+    setPreviewPlaylist(null);
+    setSelected(new Set());
+    setObjectUrls((items) => {
+      items.forEach(URL.revokeObjectURL);
+      return hydrated.urls;
+    });
+  }, []);
+
   const restore = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = async () => {
-      try {
-        const restored = await restoreBackup(JSON.parse(String(reader.result)));
-        const hydrated = await hydrateLocalSongs(restored);
-        setPlaylists(hydrated.state.playlists);
-        setFavorites(hydrated.state.favorites);
-        setHistory(hydrated.state.history);
-        setDownloadHistory(hydrated.state.downloadHistory);
-        setQueue(hydrated.state.queue);
-        setQueueIndex(hydrated.state.queueIndex);
-        setSearchHistory(hydrated.state.searchHistory);
-        setTheme(hydrated.state.theme);
-        setPlayQuality(hydrated.state.playQuality);
-        setDownloadQuality(hydrated.state.downloadQuality);
-        setProgressStyle(hydrated.state.progressStyle);
-        setLyricSource(hydrated.state.lyricSource);
-        setAutoLyricsEnabled(hydrated.state.autoLyricsEnabled);
-        setPlaybackSpeed(hydrated.state.playbackSpeed);
-        setFadeEnabled(hydrated.state.fadeEnabled);
-        setAutoCacheEnabled(hydrated.state.autoCacheEnabled);
-        setKeepQueueOnExit(hydrated.state.keepQueueOnExit);
-        setAutoPlayOnStart(hydrated.state.autoPlayOnStart);
-        setAutoUpdateEnabled(hydrated.state.autoUpdateEnabled);
-        setAndroidStatusNotificationEnabled(hydrated.state.androidStatusNotificationEnabled);
-        setToast("备份已恢复");
-      } catch {
-        setToast("备份文件无法解析");
-      }
-    };
-    reader.readAsText(file);
     event.target.value = "";
+    if (!file) return;
+    void file.text()
+      .then((text) => validateBackup(JSON.parse(text)))
+      .then((preview) => {
+        setRestorePreview(preview);
+        setToast("备份已校验，请选择恢复方式");
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : "备份文件无法解析";
+        setToast(`备份文件无效：${message}`);
+      });
   }, []);
+
+  const applyBackupRestore = useCallback(async (mode: "merge" | "overwrite") => {
+    if (!restorePreview || restoreBusy) return;
+    setRestoreBusy(true);
+    try {
+      const restored = await restoreBackup(restorePreview);
+      const localState: PersistedState = {
+        playlists,
+        favorites,
+        history,
+        downloadHistory,
+        queue,
+        queueIndex,
+        searchHistory,
+        theme,
+        playQuality,
+        downloadQuality,
+        progressStyle,
+        lyricSource,
+        autoLyricsEnabled,
+        playbackSpeed,
+        fadeEnabled,
+        autoCacheEnabled,
+        keepQueueOnExit,
+        autoPlayOnStart,
+        autoUpdateEnabled,
+        androidStatusNotificationEnabled,
+        updatedAt: Date.now()
+      };
+      const next = mode === "merge" ? mergeStates(localState, restored) : restored;
+      const hydrated = await hydrateLocalSongs(next);
+      applyHydratedRestore(hydrated);
+      setRestorePreview(null);
+      setToast(mode === "merge" ? "备份已合并恢复" : "备份已覆盖恢复");
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : "备份恢复失败");
+    } finally {
+      setRestoreBusy(false);
+    }
+  }, [androidStatusNotificationEnabled, applyHydratedRestore, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playbackSpeed, playlists, progressStyle, queue, queueIndex, restoreBusy, restorePreview, searchHistory, theme]);
 
   const resolveDownloadable = useCallback(async (song: Song) => {
     if (song.localKey) return resolvePlayable(song);
@@ -1512,13 +1644,6 @@ export default function App() {
     }
   }, []);
 
-  const saveApiBase = useCallback(() => {
-    const saved = setApiBaseUrl(apiBaseInput);
-    setApiBaseInput(saved);
-    void checkProxy().then(setProxyOnline);
-    setToast(saved ? "API backend saved" : "API backend reset");
-  }, [apiBaseInput]);
-
   useEffect(() => {
     window.JianyinAndroidBack = () => {
       if (playerOpen) {
@@ -1633,6 +1758,7 @@ export default function App() {
             searchPageSize={searchPageInfo.pageSize}
             searchTotal={searchPageInfo.total}
             searchHasMore={searchPageInfo.hasMore}
+            offlineResults={searchOfflineResults}
             proxyOnline={proxyOnline}
             playlists={playlists}
             selected={selected}
@@ -1855,15 +1981,6 @@ export default function App() {
                 <option value="dark">深色</option>
               </select>
             </label>
-            <label>
-              API backend URL
-              <input value={apiBaseInput} onChange={(event) => setApiBaseInput(event.target.value)} placeholder="http://192.168.1.10:5188" />
-            </label>
-            <div className="account-actions">
-              <button onClick={saveApiBase}>Save backend</button>
-              <button onClick={() => { setApiBaseInput(""); setApiBaseUrl(""); void checkProxy().then(setProxyOnline); }}>Use same origin</button>
-            </div>
-            <p className="muted">Android builds load the UI from the app. Set this to your Node proxy, for example http://192.168.1.10:5188, when using Netease/Bili/FLAC APIs.</p>
             <label className="switch-line"><span>歌曲淡入淡出</span><input type="checkbox" checked={fadeEnabled} onChange={(event) => setFadeEnabled(event.target.checked)} /></label>
             <label className="switch-line"><span>自动缓存</span><input type="checkbox" checked={autoCacheEnabled} onChange={(event) => setAutoCacheEnabled(event.target.checked)} /></label>
             <label className="switch-line"><span>离开后保留列表</span><input type="checkbox" checked={keepQueueOnExit} onChange={(event) => setKeepQueueOnExit(event.target.checked)} /></label>
@@ -1873,6 +1990,12 @@ export default function App() {
               <button onClick={() => void checkForUpdates(true)}>检查更新</button>
               <span className="muted">当前版本 {CURRENT_VERSION}{updateStatus ? ` · ${updateStatus}` : ""}</span>
             </div>
+            {updateInfo?.available && (window.JianyinAndroid?.downloadAndInstallUpdate || updateInfo.canApply) && (
+              <div className="account-actions">
+                <button onClick={() => void applyAvailableUpdate()}>{window.JianyinAndroid?.downloadAndInstallUpdate ? "下载并安装 APK" : "更新桌面版"}</button>
+                <span className="muted">更新仅在你点击后开始</span>
+              </div>
+            )}
             {updateInfo?.available && releaseNotes.length > 0 && (
               <section className="update-notes" aria-label="更新说明">
                 <strong>更新到 {updateInfo.latestVersion} 的说明</strong>
@@ -1889,6 +2012,22 @@ export default function App() {
             <button className="wide-action" onClick={backup}><Download /> 备份数据</button>
             <button className="wide-action" onClick={() => restoreInputRef.current?.click()}><ArchiveRestore /> 恢复备份</button>
             <p className="muted">默认音乐打开方式、蓝牙监听和 Android 系统悬浮窗属于系统能力；Web 端已用页面内浮动歌词与 MediaSession 覆盖可复刻部分。</p>
+          </div>
+        </Modal>
+      )}
+
+      {restorePreview && (
+        <Modal title="恢复备份预览" onClose={() => { if (!restoreBusy) setRestorePreview(null); }}>
+          <div className="form-stack">
+            <strong>备份已校验，尚未写入本机数据</strong>
+            <p>导出时间：{new Date(restorePreview.exportedAt).toLocaleString()}</p>
+            <p>包含 {restorePreview.playlistCount} 个歌单 · {restorePreview.songCount} 首歌曲 · {restorePreview.localFileCount} 个本地音频（{formatFileSize(restorePreview.localFileBytes)}）</p>
+            {restorePreview.state.playlists.length > 0 && <p className="muted">歌单：{restorePreview.state.playlists.map((playlist) => playlist.name).join("、")}</p>}
+            <p className="muted">合并会保留本机已有数据；覆盖会以备份替换本机歌单、历史、队列和设置。</p>
+            <div className="account-actions">
+              <button className="primary-button" disabled={restoreBusy} onClick={() => void applyBackupRestore("merge")}>合并恢复（推荐）</button>
+              <button className="danger-button" disabled={restoreBusy} onClick={() => void applyBackupRestore("overwrite")}>覆盖本机数据</button>
+            </div>
           </div>
         </Modal>
       )}
@@ -2042,6 +2181,7 @@ function SearchScreen(props: {
   searchPageSize: number;
   searchTotal: number | null;
   searchHasMore: boolean;
+  offlineResults: boolean;
   proxyOnline: boolean;
   playlists: Playlist[];
   selected: Set<string>;
@@ -2090,7 +2230,7 @@ function SearchScreen(props: {
         <input name="keyword" value={props.query} onChange={(event) => props.setQuery(event.target.value)} placeholder="搜索音乐/歌手" />
         <button className="primary-button" type="submit">{props.searching ? "搜索中" : "搜索"}</button>
       </form>
-      <p className="network-line">{props.proxyOnline ? "测试源接口已连接；默认优先 FLAC，失败自动回退 320k。" : "测试源暂不可用，请稍后再试。"}</p>
+      <p className="network-line">{props.offlineResults ? `离线本地结果 · ${props.results.length} 首` : props.proxyOnline ? "测试源接口已连接；默认优先 FLAC，失败自动回退 320k。" : "测试源暂不可用，请稍后再试。"}</p>
       <div className="chips">
         {recommendedKeywords.map((item) => <button key={item} onClick={() => { props.setQuery(item); props.onSearch(item); }}>{item}</button>)}
         {props.history.map((item) => <button key={`h-${item}`} onClick={() => { props.setQuery(item); props.onSearch(item); }}>{item}</button>)}

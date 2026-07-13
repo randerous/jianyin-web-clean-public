@@ -16,7 +16,8 @@ const args = [
   "--test-reporter=junit",
   `--test-reporter-destination=${reportPath}`,
   ...process.argv.slice(2),
-  "tests/server.test.mjs"
+  "tests/server.test.mjs",
+  "tests/release-config.test.mjs"
 ];
 
 const exitCode = await new Promise((resolve, reject) => {
