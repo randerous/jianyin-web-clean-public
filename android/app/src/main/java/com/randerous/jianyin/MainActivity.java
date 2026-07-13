@@ -221,7 +221,8 @@ public class MainActivity extends BridgeActivity {
             request.setAllowedOverMetered(true);
             request.setAllowedOverRoaming(false);
             request.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, fileName);
-            request.addRequestHeader("User-Agent", "既见 Android updater");
+            // DownloadManager requires HTTP header values to be ASCII on some Android releases.
+            request.addRequestHeader("User-Agent", "Jianyin Android updater");
             updateExpectedSha256 = expectedSha256;
             updateDownloadId = manager.enqueue(request);
             Toast.makeText(this, "已开始下载更新", Toast.LENGTH_SHORT).show();

@@ -20,13 +20,23 @@ test("release Android networking permits cleartext only for the embedded loopbac
   assert.match(manifest, /android:usesCleartextTraffic="false"/);
 });
 
-test("v1.0.21 release metadata is synchronized across web and Android", async () => {
+test("v1.0.22 release metadata is synchronized across web and Android", async () => {
   const [packageJson, gradle] = await Promise.all([
     readFile(resolve(root, "package.json"), "utf8"),
     readFile(resolve(root, "android/app/build.gradle"), "utf8")
   ]);
 
-  assert.equal(JSON.parse(packageJson).version, "1.0.21");
-  assert.match(gradle, /versionCode 22/);
-  assert.match(gradle, /versionName "1\.0\.21"/);
+  assert.equal(JSON.parse(packageJson).version, "1.0.22");
+  assert.match(gradle, /versionCode 23/);
+  assert.match(gradle, /versionName "1\.0\.22"/);
+});
+
+test("Android updater uses an ASCII User-Agent accepted by DownloadManager", async () => {
+  const mainActivity = await readFile(
+    resolve(root, "android/app/src/main/java/com/randerous/jianyin/MainActivity.java"),
+    "utf8"
+  );
+
+  assert.match(mainActivity, /request\.addRequestHeader\("User-Agent", "Jianyin Android updater"\)/);
+  assert.doesNotMatch(mainActivity, /request\.addRequestHeader\("User-Agent", "既见 Android updater"\)/);
 });
