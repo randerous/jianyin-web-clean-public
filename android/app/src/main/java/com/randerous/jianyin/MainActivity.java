@@ -2,10 +2,13 @@ package com.randerous.jianyin;
 
 import android.app.DownloadManager;
 import android.Manifest;
+import android.content.ActivityNotFoundException;
+import android.content.ClipData;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.BroadcastReceiver;
+import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
@@ -27,12 +30,17 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.activity.EdgeToEdge;
 import androidx.activity.OnBackPressedCallback;
 import androidx.core.content.ContextCompat;
+import androidx.core.content.FileProvider;
 import com.getcapacitor.BridgeActivity;
+import java.io.File;
 import java.io.InputStream;
 import java.security.MessageDigest;
 import java.util.Locale;
 
 public class MainActivity extends BridgeActivity {
+    private static final String UPDATE_PREFS = "update_download";
+    private static final String UPDATE_ID_KEY = "download_id";
+    private static final String UPDATE_SHA256_KEY = "expected_sha256";
     private ActivityResultLauncher<String> notificationPermissionLauncher;
     private long updateDownloadId = -1L;
     private String updateExpectedSha256 = "";
@@ -67,6 +75,7 @@ public class MainActivity extends BridgeActivity {
                 new ActivityResultContracts.RequestPermission(),
                 granted -> {});
         super.onCreate(savedInstanceState);
+        restorePendingUpdate();
         configureSystemBars();
         configureMediaPlayback();
         configureDownloads();
@@ -75,6 +84,13 @@ public class MainActivity extends BridgeActivity {
         requestNotificationPermission();
         registerMediaActionReceiver();
         registerUpdateDownloadReceiver();
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        restorePendingUpdate();
+        resumeCompletedUpdate();
     }
 
     @Override
@@ -225,10 +241,10 @@ public class MainActivity extends BridgeActivity {
             request.addRequestHeader("User-Agent", "Jianyin Android updater");
             updateExpectedSha256 = expectedSha256;
             updateDownloadId = manager.enqueue(request);
+            persistPendingUpdate();
             Toast.makeText(this, "已开始下载更新", Toast.LENGTH_SHORT).show();
         } catch (Exception error) {
-            updateDownloadId = -1L;
-            updateExpectedSha256 = "";
+            clearPendingUpdate();
             Toast.makeText(this, "更新下载失败", Toast.LENGTH_SHORT).show();
         }
     }
@@ -247,6 +263,12 @@ public class MainActivity extends BridgeActivity {
     }
 
     private void handleUpdateDownload(long id) {
+        if (updateDownloadId != id) {
+            restorePendingUpdate();
+        }
+        if (updateDownloadId != id || updateExpectedSha256.isEmpty()) {
+            return;
+        }
         DownloadManager manager = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
         if (manager == null) return;
         Cursor cursor = manager.query(new DownloadManager.Query().setFilterById(id));
@@ -261,33 +283,112 @@ public class MainActivity extends BridgeActivity {
         }
         if (status != DownloadManager.STATUS_SUCCESSFUL) {
             Toast.makeText(this, "更新下载失败", Toast.LENGTH_SHORT).show();
-            updateDownloadId = -1L;
+            clearPendingUpdate();
             return;
         }
         if (!verifyDownloadedSha256(manager, id, updateExpectedSha256)) {
             manager.remove(id);
             Toast.makeText(this, "更新包校验失败，已取消安装", Toast.LENGTH_LONG).show();
-            updateDownloadId = -1L;
-            updateExpectedSha256 = "";
+            clearPendingUpdate();
             return;
         }
         Uri uri = manager.getUriForDownloadedFile(id);
         if (uri == null) {
             Toast.makeText(this, "找不到更新包", Toast.LENGTH_SHORT).show();
-            updateDownloadId = -1L;
+            clearPendingUpdate();
             return;
         }
         try {
-            Intent install = new Intent(Intent.ACTION_VIEW);
-            install.setDataAndType(uri, "application/vnd.android.package-archive");
+            Uri installUri = fileProviderUri(manager, id, uri);
+            Intent install = new Intent(Intent.ACTION_INSTALL_PACKAGE);
+            install.setDataAndType(installUri, "application/vnd.android.package-archive");
             install.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
-            startActivity(install);
-            Toast.makeText(this, "请在系统安装器中确认更新", Toast.LENGTH_LONG).show();
+            install.setClipData(ClipData.newRawUri("既见更新包", installUri));
+            grantInstallUri(install, installUri);
+            try {
+                startActivity(install);
+            } catch (ActivityNotFoundException ignored) {
+                Intent fallback = new Intent(Intent.ACTION_VIEW);
+                fallback.setDataAndType(installUri, "application/vnd.android.package-archive");
+                fallback.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+                fallback.setClipData(ClipData.newRawUri("既见更新包", installUri));
+                grantInstallUri(fallback, installUri);
+                startActivity(fallback);
+            }
+            Toast.makeText(this, "正在打开系统安装器，请确认更新", Toast.LENGTH_LONG).show();
         } catch (Exception error) {
             Toast.makeText(this, "无法打开系统安装器", Toast.LENGTH_LONG).show();
         } finally {
-            updateDownloadId = -1L;
-            updateExpectedSha256 = "";
+            clearPendingUpdate();
+        }
+    }
+
+    private void resumeCompletedUpdate() {
+        if (updateDownloadId <= 0L) return;
+        DownloadManager manager = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
+        if (manager == null) return;
+        Cursor cursor = manager.query(new DownloadManager.Query().setFilterById(updateDownloadId));
+        if (cursor == null) return;
+        int status = DownloadManager.STATUS_PENDING;
+        try {
+            if (cursor.moveToFirst()) {
+                status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
+            }
+        } finally {
+            cursor.close();
+        }
+        if (status == DownloadManager.STATUS_SUCCESSFUL || status == DownloadManager.STATUS_FAILED) {
+            handleUpdateDownload(updateDownloadId);
+        }
+    }
+
+    private void persistPendingUpdate() {
+        getSharedPreferences(UPDATE_PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .putLong(UPDATE_ID_KEY, updateDownloadId)
+                .putString(UPDATE_SHA256_KEY, updateExpectedSha256)
+                .apply();
+    }
+
+    private void restorePendingUpdate() {
+        SharedPreferences preferences = getSharedPreferences(UPDATE_PREFS, Context.MODE_PRIVATE);
+        long id = preferences.getLong(UPDATE_ID_KEY, -1L);
+        String sha256 = preferences.getString(UPDATE_SHA256_KEY, "");
+        if (id > 0L && sha256 != null && sha256.matches("[0-9a-f]{64}")) {
+            updateDownloadId = id;
+            updateExpectedSha256 = sha256;
+        }
+    }
+
+    private void clearPendingUpdate() {
+        updateDownloadId = -1L;
+        updateExpectedSha256 = "";
+        getSharedPreferences(UPDATE_PREFS, Context.MODE_PRIVATE).edit().clear().apply();
+    }
+
+    private Uri fileProviderUri(DownloadManager manager, long id, Uri fallback) {
+        Cursor cursor = manager.query(new DownloadManager.Query().setFilterById(id));
+        if (cursor == null) return fallback;
+        try {
+            if (!cursor.moveToFirst()) return fallback;
+            int filenameIndex = cursor.getColumnIndex(DownloadManager.COLUMN_LOCAL_FILENAME);
+            if (filenameIndex < 0) return fallback;
+            String filename = cursor.getString(filenameIndex);
+            if (filename == null || filename.isEmpty()) return fallback;
+            File file = new File(filename);
+            if (!file.isFile()) return fallback;
+            return FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", file);
+        } catch (Exception ignored) {
+            return fallback;
+        } finally {
+            cursor.close();
+        }
+    }
+
+    private void grantInstallUri(Intent intent, Uri uri) {
+        PackageManager packageManager = getPackageManager();
+        for (android.content.pm.ResolveInfo info : packageManager.queryIntentActivities(intent, PackageManager.MATCH_DEFAULT_ONLY)) {
+            grantUriPermission(info.activityInfo.packageName, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
         }
     }
 

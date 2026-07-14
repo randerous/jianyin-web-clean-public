@@ -10,7 +10,7 @@
 
 1. 前端请求同源 `/api/update/latest`，Node 服务代理 GitHub Release API，避免浏览器和 APK 直接依赖 GitHub API 的跨域行为。
 2. 服务返回当前版本、最新版本、Release 地址、APK 资产及 GitHub 提供的 SHA-256 digest。
-3. Android 仅在 URL、资产名和 SHA-256 均有效时通过原生 DownloadManager 下载，完成后再次计算 SHA-256，再交给系统安装器。安装器负责签名一致性和用户确认；应用不卸载、不清数据。
+3. Android 仅在 URL、资产名和 SHA-256 均有效时通过原生 DownloadManager 下载，完成后再次计算 SHA-256，再通过 FileProvider/临时 URI 授权交给系统安装器。下载任务 ID 和校验值持久化，广播遗漏时在应用回到前台继续处理。安装器负责签名一致性和用户确认；应用不卸载、不清数据。
 4. 桌面本地服务只有在启动脚本/Windows launcher 显式设置 `JIANYIN_ENABLE_UPDATE=1`、Git 工作区干净时才允许 `/api/update/apply`。服务执行 `git pull --ff-only`，返回成功后退出码 75，由父启动器重新构建并重启。普通远程网页或脏工作区只显示提示。
 
 ## 安全和失败处理
@@ -24,3 +24,4 @@
 - API：固定仓库、版本比较、资产 digest、缓存和 apply 禁用门禁。
 - E2E：开关关闭不请求，打开后请求并持久化，重载后开关保持。
 - APK：release 构建编译原生 bridge，安装包保持现有签名和 arm64-v8a 限制。
+- APK 更新：验证 DownloadManager 完成广播、前台恢复检查、FileProvider 路径、安装 Intent 授权和 SHA-256 校验后才打开系统安装器。
