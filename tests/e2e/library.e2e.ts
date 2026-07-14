@@ -693,6 +693,8 @@ test("download history reattaches orphaned cached audio", async ({ page }) => {
   await page.reload();
 
   await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await expect(page.getByRole("heading", { name: "下载管理" })).toBeVisible();
+  await expect(page.locator(".section-title .section-action").first()).toBeVisible();
   await page.locator(".section-title .section-action").first().click();
   await page.locator(".detail .song-row", { hasText: "Cached Refresh Song" }).click();
   await expectAudioPlaying(page);

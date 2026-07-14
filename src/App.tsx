@@ -771,9 +771,11 @@ export default function App() {
 
   const fadeAudioVolume = useCallback((audio: HTMLAudioElement, target: number) => {
     cancelAudioFade();
-    const start = audio.volume;
-    if (Math.abs(start - target) < 0.01) {
-      audio.volume = target;
+    const clampVolume = (value: number) => Math.min(1, Math.max(0, Number.isFinite(value) ? value : 1));
+    const start = clampVolume(audio.volume);
+    const safeTarget = clampVolume(target);
+    if (Math.abs(start - safeTarget) < 0.01) {
+      audio.volume = safeTarget;
       return Promise.resolve();
     }
     return new Promise<void>((resolve) => {
@@ -786,7 +788,7 @@ export default function App() {
       const step = (now: number) => {
         if (audioFadeRef.current !== active) return;
         const progress = Math.min(1, (now - startedAt) / AUDIO_FADE_DURATION_MS);
-        audio.volume = start + (target - start) * progress;
+        audio.volume = clampVolume(start + (safeTarget - start) * progress);
         if (progress >= 1) {
           finish();
           return;
