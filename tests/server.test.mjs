@@ -211,30 +211,30 @@ test("update endpoint exposes only the fixed GitHub release metadata", async () 
     releaseCalls += 1;
     if (url === "https://api.github.com/repos/randerous/jianyin-web-clean-public/releases?per_page=100") {
       return new Response(JSON.stringify([
-        { tag_name: "v1.0.25", published_at: "2026-07-15T00:00:00Z", body: "Latest release" },
-        { tag_name: "v1.0.24", published_at: "2026-07-14T00:00:00Z", body: "Current release" },
-        { tag_name: "v1.0.23", published_at: "2026-07-13T00:00:00Z", body: "Older release" },
-        { tag_name: "v1.0.26", published_at: "2026-07-16T00:00:00Z", body: "Future release" },
-        { tag_name: "v1.0.27", draft: true, published_at: "2026-07-17T00:00:00Z", body: "Draft release" },
-        { tag_name: "v1.0.28", prerelease: true, published_at: "2026-07-18T00:00:00Z", body: "Pre-release" }
+        { tag_name: "v1.0.26", published_at: "2026-07-15T00:00:00Z", body: "Latest release" },
+        { tag_name: "v1.0.25", published_at: "2026-07-14T00:00:00Z", body: "Current release" },
+        { tag_name: "v1.0.24", published_at: "2026-07-13T00:00:00Z", body: "Older release" },
+        { tag_name: "v1.0.27", published_at: "2026-07-16T00:00:00Z", body: "Future release" },
+        { tag_name: "v1.0.28", draft: true, published_at: "2026-07-17T00:00:00Z", body: "Draft release" },
+        { tag_name: "v1.0.29", prerelease: true, published_at: "2026-07-18T00:00:00Z", body: "Pre-release" }
       ]), { status: 200, headers: { "content-type": "application/json" } });
     }
     assert.equal(url, "https://api.github.com/repos/randerous/jianyin-web-clean-public/releases/latest");
     return new Response(JSON.stringify({
-      tag_name: "v1.0.25",
-      html_url: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.25",
+      tag_name: "v1.0.26",
+      html_url: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.26",
       published_at: "2026-07-15T00:00:00Z",
       body: "Latest release",
       assets: [
         {
           name: "app-release.apk",
-          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.25/app-release.apk",
+          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.26/app-release.apk",
           digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
           size: 123
         },
         {
           name: "jianyin-windows-launcher.exe",
-          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.25/jianyin-windows-launcher.exe",
+          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.26/jianyin-windows-launcher.exe",
           digest: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
           size: 456
         },
@@ -251,16 +251,16 @@ test("update endpoint exposes only the fixed GitHub release metadata", async () 
   const first = await getJson(`${baseUrl}/api/update/latest`);
   const second = await getJson(`${baseUrl}/api/update/latest`);
   assert.equal(first.response.status, 200);
-  assert.equal(first.body.currentVersion, "1.0.24");
-  assert.equal(first.body.latestVersion, "1.0.25");
+  assert.equal(first.body.currentVersion, "1.0.25");
+  assert.equal(first.body.latestVersion, "1.0.26");
   assert.equal(first.body.available, true);
-  assert.deepEqual(first.body.releaseNotes.map((note) => note.tag), ["v1.0.25"]);
+  assert.deepEqual(first.body.releaseNotes.map((note) => note.tag), ["v1.0.26"]);
   assert.deepEqual(first.body.releaseNotes.map((note) => note.notes), ["Latest release"]);
   assert.equal(first.body.canApply, false);
   assert.equal(first.body.assets.apk.sha256, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
   assert.equal(first.body.assets.apk.size, 123);
   assert.equal(first.body.assets.windowsLauncher.sha256, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
-  assert.equal(second.body.tag, "v1.0.25");
+  assert.equal(second.body.tag, "v1.0.26");
   assert.equal(releaseCalls, 2);
 });
 

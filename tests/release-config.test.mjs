@@ -20,15 +20,15 @@ test("release Android networking permits cleartext only for the embedded loopbac
   assert.match(manifest, /android:usesCleartextTraffic="false"/);
 });
 
-test("v1.0.24 release metadata is synchronized across web and Android", async () => {
+test("v1.0.25 release metadata is synchronized across web and Android", async () => {
   const [packageJson, gradle] = await Promise.all([
     readFile(resolve(root, "package.json"), "utf8"),
     readFile(resolve(root, "android/app/build.gradle"), "utf8")
   ]);
 
-  assert.equal(JSON.parse(packageJson).version, "1.0.24");
-  assert.match(gradle, /versionCode 25/);
-  assert.match(gradle, /versionName "1\.0\.24"/);
+  assert.equal(JSON.parse(packageJson).version, "1.0.25");
+  assert.match(gradle, /versionCode 26/);
+  assert.match(gradle, /versionName "1\.0\.25"/);
 });
 
 test("Android updater uses an ASCII User-Agent accepted by DownloadManager", async () => {
@@ -55,4 +55,13 @@ test("Android updater resumes completed downloads and grants the installer a rea
   assert.match(mainActivity, /ClipData\.newRawUri/);
   assert.match(mainActivity, /FLAG_GRANT_READ_URI_PERMISSION/);
   assert.match(filePaths, /<external-files-path name="update_files" path="Download\/"\s*\/>/);
+});
+
+test("Android updater receives the system DownloadManager completion broadcast", async () => {
+  const mainActivity = await readFile(
+    resolve(root, "android/app/src/main/java/com/randerous/jianyin/MainActivity.java"),
+    "utf8"
+  );
+
+  assert.match(mainActivity, /registerReceiver\(updateDownloadReceiver, filter, Context\.RECEIVER_EXPORTED\)/);
 });

@@ -192,7 +192,10 @@ public class MainActivity extends BridgeActivity {
     private void registerUpdateDownloadReceiver() {
         IntentFilter filter = new IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(updateDownloadReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            // DownloadManager is a system process. The completion broadcast must be
+            // delivered across the application boundary so the APK can be handed to
+            // the system installer immediately after verification.
+            registerReceiver(updateDownloadReceiver, filter, Context.RECEIVER_EXPORTED);
         } else {
             registerReceiver(updateDownloadReceiver, filter);
         }
