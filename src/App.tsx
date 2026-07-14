@@ -2132,6 +2132,23 @@ function HomeScreen({ data, loading, openingPlaylistId, error, onPlay, onOpenPla
         </div>
       </header>
       {error && <p className="field-error">{error}</p>}
+      <div className="home-intro" aria-label="聆听概览">
+        <div className="home-intro-copy">
+          <span className="home-intro-kicker">PERSONAL LISTENING ROOM</span>
+          <strong>让每一次播放，都有一点仪式感。</strong>
+          <p>本地音乐、在线搜索和歌单，在一个安静的空间里流动。</p>
+          <div className="home-intro-meta">
+            <span><Music /> {data.radarSongs.length ? `${data.radarSongs.length} 首今日推荐` : "今日推荐待加载"}</span>
+            <span><Cloud /> {proxyOnline ? "在线曲库已连接" : "本地优先模式"}</span>
+          </div>
+        </div>
+        <div className="home-intro-art" aria-hidden="true">
+          <span className="home-intro-orbit orbit-one" />
+          <span className="home-intro-orbit orbit-two" />
+          <span className="home-intro-orbit orbit-three" />
+          <Music className="home-intro-glyph" />
+        </div>
+      </div>
       <SectionTitle icon={<Music />} title="今日推荐" />
       <div className="shelf-row today-shelf">
         {data.radarSongs.map((song) => <CoverSong key={songKey(song)} song={song} songs={data.radarSongs} onPlay={onPlay} />)}
