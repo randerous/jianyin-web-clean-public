@@ -2455,14 +2455,15 @@ function PlaylistDetail({ playlist, saved, favoriteKeys, selected, onClose, onPl
 function NowPlaying({ song, playing, position, duration, onOpen, onToggle, onNext }: { song: Song | null; playing: boolean; position: number; duration: number; onOpen: () => void; onToggle: (event: MouseEvent) => void; onNext: (event: MouseEvent) => void }) {
   if (!song) return null;
   return (
-    <div className="now-playing" onClick={onOpen} role="button" tabIndex={0} onKeyDown={(event) => {
+    <div className="now-playing" onClick={onOpen} role="button" aria-label={`正在播放 ${song.name}`} tabIndex={0} onKeyDown={(event) => {
       if (event.key === "Enter" || event.key === " ") onOpen();
     }}>
       <img src={song.cover || "/assets/icon.png"} alt="" />
-      <span><strong>{song.name}</strong><small>{song.artist} · {formatTime(position)} / {formatTime(duration)}</small></span>
-      <span className="mini-progress"><i style={{ width: `${duration ? Math.min(100, position / duration * 100) : 0}%` }} /></span>
+      <span className="now-playing-copy"><strong>{song.name}</strong><small>{song.artist}</small></span>
+      <span className="now-playing-time" aria-label="播放时间">{formatTime(position)} / {formatTime(duration)}</span>
       <button className="icon-button" onClick={(event) => { event.stopPropagation(); onToggle(event); }} aria-label={playing ? "暂停" : "播放"} aria-pressed={playing}>{playing ? <Pause /> : <Play />}</button>
       <button className="icon-button" onClick={(event) => { event.stopPropagation(); onNext(event); }} aria-label="下一首"><SkipForward /></button>
+      <span className="mini-progress" aria-hidden="true"><i style={{ width: `${duration ? Math.min(100, position / duration * 100) : 0}%` }} /></span>
     </div>
   );
 }

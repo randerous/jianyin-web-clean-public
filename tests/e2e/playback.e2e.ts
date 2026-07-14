@@ -88,6 +88,18 @@ test("mobile playback controls do not push page content down", async ({ page }) 
   expect(metrics.workspace?.paddingTop ?? 0).toBeLessThan(80);
   expect(Math.abs(metrics.topbar?.marginTop ?? 0)).toBeLessThan(80);
   expect(metrics.heading?.top ?? 999).toBeLessThan(130);
+
+  const miniPlayer = await page.locator(".now-playing").evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      height: element.getBoundingClientRect().height,
+      gridRows: style.gridTemplateRows.split(" ").filter(Boolean),
+      progressPosition: getComputedStyle(element.querySelector(".mini-progress")!).position
+    };
+  });
+  expect(miniPlayer.height).toBeLessThanOrEqual(68);
+  expect(miniPlayer.gridRows).toHaveLength(1);
+  expect(miniPlayer.progressPosition).toBe("absolute");
 });
 
 test("recent playback is newest-first and replay moves a song to the top", async ({ page }) => {

@@ -21,3 +21,14 @@ Use an editorial listening-room aesthetic: warm paper-like light surfaces, ink t
 - Search: idle, loading, result list, selection bar, pagination, and empty result states retain their current controls.
 - Mine/detail/player/modal: existing actions remain reachable on desktop and mobile widths.
 - Verify with production build, existing E2E tests, and a browser screenshot at desktop and narrow mobile viewports.
+
+## Follow-up: compact mini-player
+
+The first visual pass kept the mini-player progress bar in the mobile grid flow, which made the control surface read as two stacked rows. The follow-up keeps artwork, title/artist, time (desktop), play, and next controls on one horizontal rail. Progress remains visible as a 2px edge cue anchored to the bottom of the rail, so it does not increase the player height or compete with the mobile navigation.
+
+Acceptance criteria:
+
+- Desktop mini-player height is 68px and mobile height is 64px.
+- The computed mobile grid has one row; the progress cue is absolutely positioned.
+- Existing play, next, open-player, keyboard, and accessibility labels remain unchanged.
+- Verify with the playback E2E suite, full desktop E2E, production build, and 390px/1440px screenshots.
