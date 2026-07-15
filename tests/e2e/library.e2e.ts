@@ -265,6 +265,64 @@ test("mine page shows recent, downloads, favorites, actions, and playlists", asy
   }
 });
 
+test("mine playlist rows keep responsive text space across mobile and tablet widths", async ({ page }) => {
+  for (const width of [320, 360, 390, 430, 768]) {
+    await page.setViewportSize({ width, height: 844 });
+    await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+
+    const metrics = await page.locator(".playlist-row").first().evaluate((row) => {
+      const content = row.querySelector("button:first-child") as HTMLElement;
+      const copy = content.querySelector("span") as HTMLElement;
+      const count = copy.querySelector("small") as HTMLElement;
+      const remove = row.querySelector("button:last-child") as HTMLElement;
+      const topNavigation = document.querySelector(".mobile-top-nav") as HTMLElement;
+      const topbar = document.querySelector(".topbar") as HTMLElement;
+      const actionGrid = document.querySelector(".action-grid") as HTMLElement;
+      const rowRect = row.getBoundingClientRect();
+      const contentRect = content.getBoundingClientRect();
+      const copyRect = copy.getBoundingClientRect();
+      const removeRect = remove.getBoundingClientRect();
+      const countStyle = getComputedStyle(count);
+      const actionGridRect = actionGrid.getBoundingClientRect();
+      return {
+        rowLeft: rowRect.left,
+        rowRight: rowRect.right,
+        rowWidth: rowRect.width,
+        rowClientWidth: row.clientWidth,
+        rowScrollWidth: row.scrollWidth,
+        contentWidth: contentRect.width,
+        copyWidth: copyRect.width,
+        removeWidth: removeRect.width,
+        countHeight: count.getBoundingClientRect().height,
+        countLineHeight: Number.isFinite(parseFloat(countStyle.lineHeight)) ? parseFloat(countStyle.lineHeight) : parseFloat(countStyle.fontSize) * 1.5,
+        countWhiteSpace: countStyle.whiteSpace,
+        navigationLeft: topNavigation.getBoundingClientRect().left,
+        navigationRight: topNavigation.getBoundingClientRect().right,
+        navigationBottom: topNavigation.getBoundingClientRect().bottom,
+        topbarTop: topbar.getBoundingClientRect().top,
+        actionGridLeft: actionGridRect.left,
+        actionGridRight: actionGridRect.right,
+        documentScrollWidth: document.documentElement.scrollWidth,
+        viewportWidth: window.innerWidth
+      };
+    });
+
+    expect(metrics.contentWidth).toBeGreaterThan(metrics.rowWidth - metrics.removeWidth - 48);
+    expect(metrics.copyWidth).toBeGreaterThan(Math.min(120, metrics.rowWidth * 0.35));
+    expect(metrics.countWhiteSpace).toBe("nowrap");
+    expect(metrics.countHeight).toBeLessThanOrEqual(metrics.countLineHeight * 1.25);
+    expect(metrics.rowScrollWidth).toBeLessThanOrEqual(metrics.rowClientWidth + 1);
+    expect(metrics.navigationLeft).toBeGreaterThanOrEqual(0);
+    expect(metrics.navigationRight).toBeLessThanOrEqual(metrics.viewportWidth);
+    expect(metrics.topbarTop).toBeGreaterThanOrEqual(metrics.navigationBottom - 1);
+    expect(metrics.rowLeft).toBeGreaterThanOrEqual(0);
+    expect(metrics.rowRight).toBeLessThanOrEqual(metrics.viewportWidth);
+    expect(metrics.actionGridLeft).toBeGreaterThanOrEqual(0);
+    expect(metrics.actionGridRight).toBeLessThanOrEqual(metrics.viewportWidth);
+    expect(metrics.documentScrollWidth).toBeLessThanOrEqual(metrics.viewportWidth);
+  }
+});
+
 test("mine page deletes a local playlist without removing favorites", async ({ page }) => {
   page.on("dialog", (dialog) => void dialog.accept());
 

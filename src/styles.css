@@ -4563,3 +4563,87 @@ textarea:focus-visible {
     flex: 1;
   }
 }
+
+/* Responsive layout contracts: fluid content columns, fixed controls only. */
+:root {
+  --playlist-row-cover-size: clamp(52px, 12vw, 64px);
+}
+
+.playlist-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.playlist-row > button:first-child {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: var(--playlist-row-cover-size) minmax(0, 1fr);
+  align-items: center;
+  gap: clamp(10px, 3vw, 14px);
+  padding: 0;
+}
+
+.playlist-row img {
+  width: var(--playlist-row-cover-size);
+  height: var(--playlist-row-cover-size);
+}
+
+.playlist-row span {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  overflow: hidden;
+}
+
+.playlist-row small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 940px) {
+  :root {
+    --mobile-gutter: clamp(12px, 4vw, 24px);
+  }
+
+  .workspace,
+  .app-shell.has-mini-player .workspace {
+    padding-right: calc(var(--mobile-gutter) + env(safe-area-inset-right, 0px));
+    padding-left: calc(var(--mobile-gutter) + env(safe-area-inset-left, 0px));
+  }
+
+  .mobile-top-nav {
+    gap: clamp(8px, 3vw, 14px);
+    margin-right: calc(var(--mobile-gutter) * -1);
+    margin-left: calc(var(--mobile-gutter) * -1);
+    padding-right: var(--mobile-gutter);
+    padding-left: var(--mobile-gutter);
+  }
+
+  .mobile-top-nav nav {
+    min-width: 0;
+    max-width: min(68vw, 320px);
+    flex: 1 1 auto;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .mobile-top-nav .nav-button {
+    min-width: 0;
+    padding-right: clamp(6px, 2.4vw, 10px);
+    padding-left: clamp(6px, 2.4vw, 10px);
+    white-space: nowrap;
+  }
+
+  .topbar {
+    margin-right: calc(var(--mobile-gutter) * -1);
+    margin-left: calc(var(--mobile-gutter) * -1);
+    padding-right: var(--mobile-gutter);
+    padding-left: var(--mobile-gutter);
+  }
+
+  .playlist-row {
+    gap: clamp(8px, 2.5vw, 12px);
+    padding: clamp(10px, 3.5vw, 14px);
+  }
+}
