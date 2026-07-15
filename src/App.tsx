@@ -1732,6 +1732,7 @@ export default function App() {
       </aside>
 
       <main className="workspace">
+        <MobileTopNav tab={tab} setTab={setTab} />
         {tab === "home" && (
           <HomeScreen
             data={homeData}
@@ -1835,7 +1836,6 @@ export default function App() {
       </main>
 
       <NowPlaying song={currentSong} playing={playing} position={position} duration={duration} onOpen={() => setPlayerOpen(true)} onToggle={togglePlayback} onNext={nextSongFromUserGesture} />
-      <MobileNav tab={tab} setTab={setTab} />
 
       {activePlaylist && (
         <PlaylistDetail
@@ -2109,8 +2109,20 @@ function NavButton({ active, icon, label, onClick }: { active: boolean; icon: Re
   return <button className={`nav-button ${active ? "active" : ""}`} onClick={onClick}>{icon}<span>{label}</span></button>;
 }
 
-function MobileNav({ tab, setTab }: { tab: Tab; setTab: (tab: Tab) => void }) {
-  return <nav className="mobile-nav"><NavButton active={tab === "home"} icon={<Home />} label="首页" onClick={() => setTab("home")} /><NavButton active={tab === "search"} icon={<Search />} label="搜索" onClick={() => setTab("search")} /><NavButton active={tab === "mine"} icon={<Library />} label="我的" onClick={() => setTab("mine")} /></nav>;
+function MobileTopNav({ tab, setTab }: { tab: Tab; setTab: (tab: Tab) => void }) {
+  return (
+    <header className="mobile-top-nav">
+      <button className="mobile-brand" onClick={() => setTab("home")} aria-label="打开首页">
+        <img src="/assets/icon.png" alt="" />
+        <span>既见</span>
+      </button>
+      <nav aria-label="主导航">
+        <NavButton active={tab === "home"} icon={<Home />} label="首页" onClick={() => setTab("home")} />
+        <NavButton active={tab === "search"} icon={<Search />} label="搜索" onClick={() => setTab("search")} />
+        <NavButton active={tab === "mine"} icon={<Library />} label="我的" onClick={() => setTab("mine")} />
+      </nav>
+    </header>
+  );
 }
 
 function HomeScreen({ data, loading, openingPlaylistId, error, onPlay, onOpenPlaylist, onOpenRemotePlaylist, onRefresh, proxyOnline }: {

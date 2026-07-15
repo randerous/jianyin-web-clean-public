@@ -102,6 +102,36 @@ test("mobile playback controls do not push page content down", async ({ page }) 
   expect(miniPlayer.progressPosition).toBe("absolute");
 });
 
+test("mobile navigation stays at the top and playback is the only bottom bar", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await playFirstHomeSong(page);
+  await expectAudioPlaying(page);
+
+  const topNavigation = page.locator(".mobile-top-nav");
+  const player = page.locator(".now-playing");
+  await expect(topNavigation).toBeVisible();
+  await expect(player).toBeVisible();
+  await expect(page.locator(".mobile-nav")).toHaveCount(0);
+
+  const layout = await page.evaluate(() => {
+    const navigationRect = document.querySelector(".mobile-top-nav")!.getBoundingClientRect();
+    const playerRect = document.querySelector(".now-playing")!.getBoundingClientRect();
+    return {
+      navigationTop: navigationRect.top,
+      playerBottom: playerRect.bottom,
+      viewportHeight: window.innerHeight
+    };
+  });
+
+  expect(layout.navigationTop).toBeLessThan(24);
+  expect(layout.playerBottom).toBeGreaterThan(layout.viewportHeight - 24);
+
+  await topNavigation.getByRole("button", { name: "搜索" }).click();
+  await expect(page.getByRole("heading", { name: "搜索" })).toBeVisible();
+  await topNavigation.getByRole("button", { name: "我的" }).click();
+  await expect(page.getByRole("heading", { name: "我的音乐" })).toBeVisible();
+});
+
 test("recent playback is newest-first and replay moves a song to the top", async ({ page }) => {
   await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
   await page.getByRole("button", { name: "热歌推荐 3 首歌曲" }).click();
