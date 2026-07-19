@@ -6,15 +6,20 @@ using System.IO.Compression;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
+using System.Runtime.Serialization;
+using System.Runtime.Serialization.Json;
 using System.Security.Cryptography;
+using System.Text;
 using System.Threading;
 using System.Windows.Forms;
 
 internal static class Launcher
 {
-    private const string RuntimeVersion = "1.0.30";
+    private const string RuntimeVersion = "1.0.31";
     private const string NodeVersion = "22.17.0";
     private const string NodeSha256 = "721ab118a3aac8584348b132767eadf51379e0616f0db802cc1e66d7f0d98f85";
+    private const string LatestReleaseUrl = "https://api.github.com/repos/randerous/jianyin-web-clean-public/releases/latest";
+    private const int UpdateRestartExitCode = 75;
     private static readonly string DataDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Jianyin");
     private static readonly string PortFile = Path.Combine(DataDir, "active-port.txt");
 
@@ -52,6 +57,7 @@ internal static class Launcher
         private readonly NotifyIcon tray;
         private Process server;
         private int port;
+        private bool launcherUpdateRequested;
 
         internal TrayApplicationContext()
         {
@@ -75,6 +81,17 @@ internal static class Launcher
         {
             try
             {
+                if (launcherUpdateRequested)
+                {
+                    launcherUpdateRequested = false;
+                    var updateResult = TryStageLauncherUpdate();
+                    if (updateResult == LauncherUpdateResult.RestartScheduled)
+                    {
+                        ExitThread();
+                        return;
+                    }
+                    if (updateResult == LauncherUpdateResult.Failed) Log("桌面版自动更新失败；继续启动当前版本");
+                }
                 TryFastForwardUpdate();
                 var runtimeDir = EnsureRuntime();
                 var nodeExe = EnsureNode();
@@ -148,12 +165,14 @@ internal static class Launcher
             info.EnvironmentVariables["JIANYIN_STATE_PATH"] = Path.Combine(DataDir, "state.json");
             info.EnvironmentVariables["JIANYIN_ENABLE_UPDATE"] = "1";
             info.EnvironmentVariables["JIANYIN_UPDATE_ROOT"] = AppDomain.CurrentDomain.BaseDirectory;
+            info.EnvironmentVariables["JIANYIN_PACKAGED_LAUNCHER"] = "1";
             server = Process.Start(info);
             var launchedServer = server;
             launchedServer.EnableRaisingEvents = true;
             launchedServer.Exited += delegate
             {
-                if (launchedServer.ExitCode != 75 || server != launchedServer) return;
+                if (launchedServer.ExitCode != UpdateRestartExitCode || server != launchedServer) return;
+                launcherUpdateRequested = true;
                 server = null;
                 ThreadPool.QueueUserWorkItem(delegate
                 {
@@ -209,7 +228,168 @@ internal static class Launcher
 
         private void UpdateAndNotify()
         {
-            ShowMessage(TryFastForwardUpdate() ? "代码已更新；重启后生效" : "当前无需更新或已跳过更新", ToolTipIcon.Info);
+            var result = TryStageLauncherUpdate();
+            if (result == LauncherUpdateResult.RestartScheduled)
+            {
+                ShowMessage("桌面版正在更新，启动器将自动重启", ToolTipIcon.Info);
+                ExitThread();
+                return;
+            }
+            ShowMessage(result == LauncherUpdateResult.UpToDate ? "当前已是最新版本" : "桌面版更新失败，请查看日志", result == LauncherUpdateResult.UpToDate ? ToolTipIcon.Info : ToolTipIcon.Error);
+        }
+
+        private enum LauncherUpdateResult
+        {
+            UpToDate,
+            RestartScheduled,
+            Failed
+        }
+
+        [DataContract]
+        private sealed class GithubRelease
+        {
+            [DataMember(Name = "tag_name")]
+            public string TagName;
+
+            [DataMember(Name = "assets")]
+            public GithubAsset[] Assets;
+        }
+
+        [DataContract]
+        private sealed class GithubAsset
+        {
+            [DataMember(Name = "name")]
+            public string Name;
+
+            [DataMember(Name = "browser_download_url")]
+            public string BrowserDownloadUrl;
+
+            [DataMember(Name = "digest")]
+            public string Digest;
+        }
+
+        private static LauncherUpdateResult TryStageLauncherUpdate()
+        {
+            try
+            {
+                GithubRelease release;
+                using (var client = new WebClient())
+                {
+                    client.Headers[HttpRequestHeader.Accept] = "application/vnd.github+json";
+                    client.Headers[HttpRequestHeader.UserAgent] = "jianyin-windows-updater";
+                    var serializer = new DataContractJsonSerializer(typeof(GithubRelease));
+                    using (var json = new MemoryStream(Encoding.UTF8.GetBytes(client.DownloadString(LatestReleaseUrl))))
+                    {
+                        release = (GithubRelease)serializer.ReadObject(json);
+                    }
+                }
+
+                var latestVersion = NormalizeReleaseVersion(release == null ? null : release.TagName);
+                if (latestVersion == null || CompareVersions(latestVersion, RuntimeVersion) <= 0) return LauncherUpdateResult.UpToDate;
+                var asset = FindLauncherAsset(release.Assets);
+                var digest = NormalizeSha256(asset == null ? null : asset.Digest);
+                if (asset == null || digest == null || !IsAllowedReleaseUrl(asset.BrowserDownloadUrl)) return LauncherUpdateResult.Failed;
+
+                var updateDir = Path.Combine(DataDir, "updates");
+                Directory.CreateDirectory(updateDir);
+                var staged = Path.Combine(updateDir, "jianyin-windows-launcher-" + latestVersion + ".exe");
+                using (var client = new WebClient())
+                {
+                    client.Headers[HttpRequestHeader.UserAgent] = "jianyin-windows-updater";
+                    client.DownloadFile(asset.BrowserDownloadUrl, staged);
+                }
+                if (!string.Equals(HashFile(staged), digest, StringComparison.OrdinalIgnoreCase))
+                {
+                    File.Delete(staged);
+                    Log("Windows launcher 更新包 SHA-256 校验失败");
+                    return LauncherUpdateResult.Failed;
+                }
+
+                var script = Path.Combine(updateDir, "apply-launcher-update.cmd");
+                var scriptText = "@echo off\r\n"
+                    + "setlocal\r\n"
+                    + "timeout /t 2 /nobreak >nul\r\n"
+                    + "copy /y \"%JIANYIN_UPDATE_SOURCE%\" \"%JIANYIN_UPDATE_TARGET%\" >nul\r\n"
+                    + "if not errorlevel 1 goto updated\r\n"
+                    + "start \"\" \"%JIANYIN_UPDATE_TARGET%\"\r\n"
+                    + "exit /b 1\r\n"
+                    + ":updated\r\n"
+                    + "del /q \"%JIANYIN_UPDATE_SOURCE%\" >nul 2>&1\r\n"
+                    + "start \"\" \"%JIANYIN_UPDATE_TARGET%\"\r\n"
+                    + "del /q \"%~f0\" >nul 2>&1\r\n";
+                File.WriteAllText(script, scriptText, Encoding.ASCII);
+                var updater = new ProcessStartInfo("cmd.exe", "/d /c \"" + script + "\"")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                updater.EnvironmentVariables["JIANYIN_UPDATE_SOURCE"] = staged;
+                updater.EnvironmentVariables["JIANYIN_UPDATE_TARGET"] = Application.ExecutablePath;
+                Process.Start(updater);
+                return LauncherUpdateResult.RestartScheduled;
+            }
+            catch (Exception error)
+            {
+                Log("Windows launcher 更新失败：" + error.Message);
+                return LauncherUpdateResult.Failed;
+            }
+        }
+
+        private static GithubAsset FindLauncherAsset(GithubAsset[] assets)
+        {
+            if (assets == null) return null;
+            foreach (var asset in assets)
+            {
+                if (asset != null && string.Equals(asset.Name, "jianyin-windows-launcher.exe", StringComparison.Ordinal)) return asset;
+            }
+            return null;
+        }
+
+        private static string NormalizeReleaseVersion(string tag)
+        {
+            if (string.IsNullOrEmpty(tag) || !tag.StartsWith("v", StringComparison.Ordinal)) return null;
+            var version = tag.Substring(1);
+            Version parsed;
+            return Version.TryParse(version, out parsed) && parsed.Build >= 0 && parsed.Revision < 0 ? version : null;
+        }
+
+        private static int CompareVersions(string left, string right)
+        {
+            Version leftVersion;
+            Version rightVersion;
+            if (!Version.TryParse(left, out leftVersion) || !Version.TryParse(right, out rightVersion)) return -1;
+            return leftVersion.CompareTo(rightVersion);
+        }
+
+        private static string NormalizeSha256(string digest)
+        {
+            if (string.IsNullOrEmpty(digest)) return null;
+            var normalized = digest.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase) ? digest.Substring(7) : digest;
+            if (normalized.Length != 64) return null;
+            foreach (var character in normalized)
+            {
+                if (!Uri.IsHexDigit(character)) return null;
+            }
+            return normalized.ToLowerInvariant();
+        }
+
+        private static bool IsAllowedReleaseUrl(string value)
+        {
+            Uri uri;
+            if (!Uri.TryCreate(value, UriKind.Absolute, out uri) || uri.Scheme != Uri.UriSchemeHttps) return false;
+            return string.Equals(uri.Host, "github.com", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(uri.Host, "objects.githubusercontent.com", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(uri.Host, "release-assets.githubusercontent.com", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static string HashFile(string path)
+        {
+            using (var stream = File.OpenRead(path))
+            using (var sha = SHA256.Create())
+            {
+                return BitConverter.ToString(sha.ComputeHash(stream)).Replace("-", "").ToLowerInvariant();
+            }
         }
 
         private static bool TryFastForwardUpdate()

@@ -28,6 +28,7 @@ try {
         /reference:System.Drawing.dll `
         /reference:System.IO.Compression.dll `
         /reference:System.IO.Compression.FileSystem.dll `
+        /reference:System.Runtime.Serialization.dll `
         "/resource:$RuntimeZip,JianyinRuntime" `
         "/out:$IntermediateOutput" `
         "windows\Launcher.cs"

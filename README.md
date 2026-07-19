@@ -20,12 +20,12 @@
 
 Windows EXE 会自动完成以下操作：
 
-1. 安全执行 `git pull --ff-only`；存在本地修改或无法更新时保留当前版本继续运行。
+1. 设置页或系统托盘检查固定 GitHub Release；用户点击更新后下载并校验 Windows EXE 的 SHA-256，再替换启动器并自动重启。
 2. 从 EXE 内置生产运行包启动，不执行 `npm install`；缺少 Node.js 时从 Node.js 官方站点下载并校验 SHA-256。
 3. 优先使用 `5188`，被占用时自动选择空闲端口。
 4. 自动打开默认浏览器；服务在系统托盘后台运行，从托盘退出即可停止服务。
 
-用户状态和日志保存在 Windows 用户数据目录 `%LOCALAPPDATA%\\Jianyin`。
+用户状态和日志保存在 Windows 用户数据目录 `%LOCALAPPDATA%\\Jianyin`；启动器更新不会删除或覆盖该目录中的状态文件。
 
 也可以在终端中启动：
 

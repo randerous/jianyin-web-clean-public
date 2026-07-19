@@ -242,30 +242,30 @@ test("update endpoint exposes only the fixed GitHub release metadata", async () 
     releaseCalls += 1;
     if (url === "https://api.github.com/repos/randerous/jianyin-web-clean-public/releases?per_page=100") {
       return new Response(JSON.stringify([
-        { tag_name: "v1.0.31", published_at: "2026-07-20T00:00:00Z", body: "Latest release" },
+        { tag_name: "v1.0.32", published_at: "2026-07-20T00:00:00Z", body: "Latest release" },
         { tag_name: "v1.0.29", published_at: "2026-07-18T00:00:00Z", body: "Current release" },
         { tag_name: "v1.0.28", published_at: "2026-07-17T00:00:00Z", body: "Older release" },
-        { tag_name: "v1.0.32", published_at: "2026-07-21T00:00:00Z", body: "Future release" },
-        { tag_name: "v1.0.33", draft: true, published_at: "2026-07-22T00:00:00Z", body: "Draft release" },
-        { tag_name: "v1.0.34", prerelease: true, published_at: "2026-07-23T00:00:00Z", body: "Pre-release" }
+        { tag_name: "v1.0.33", published_at: "2026-07-21T00:00:00Z", body: "Future release" },
+        { tag_name: "v1.0.34", draft: true, published_at: "2026-07-22T00:00:00Z", body: "Draft release" },
+        { tag_name: "v1.0.35", prerelease: true, published_at: "2026-07-23T00:00:00Z", body: "Pre-release" }
       ]), { status: 200, headers: { "content-type": "application/json" } });
     }
     assert.equal(url, "https://api.github.com/repos/randerous/jianyin-web-clean-public/releases/latest");
     return new Response(JSON.stringify({
-      tag_name: "v1.0.31",
-      html_url: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.31",
+      tag_name: "v1.0.32",
+      html_url: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.32",
       published_at: "2026-07-20T00:00:00Z",
       body: "Latest release",
       assets: [
         {
           name: "app-release.apk",
-          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.31/app-release.apk",
+          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.32/app-release.apk",
           digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
           size: 123
         },
         {
           name: "jianyin-windows-launcher.exe",
-          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.31/jianyin-windows-launcher.exe",
+          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.32/jianyin-windows-launcher.exe",
           digest: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
           size: 456
         },
@@ -282,17 +282,56 @@ test("update endpoint exposes only the fixed GitHub release metadata", async () 
   const first = await getJson(`${baseUrl}/api/update/latest`);
   const second = await getJson(`${baseUrl}/api/update/latest`);
   assert.equal(first.response.status, 200);
-  assert.equal(first.body.currentVersion, "1.0.30");
-  assert.equal(first.body.latestVersion, "1.0.31");
+  assert.equal(first.body.currentVersion, "1.0.31");
+  assert.equal(first.body.latestVersion, "1.0.32");
   assert.equal(first.body.available, true);
-  assert.deepEqual(first.body.releaseNotes.map((note) => note.tag), ["v1.0.31"]);
+  assert.deepEqual(first.body.releaseNotes.map((note) => note.tag), ["v1.0.32"]);
   assert.deepEqual(first.body.releaseNotes.map((note) => note.notes), ["Latest release"]);
   assert.equal(first.body.canApply, false);
   assert.equal(first.body.assets.apk.sha256, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
   assert.equal(first.body.assets.apk.size, 123);
   assert.equal(first.body.assets.windowsLauncher.sha256, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
-  assert.equal(second.body.tag, "v1.0.31");
+  assert.equal(second.body.tag, "v1.0.32");
   assert.equal(releaseCalls, 2);
+});
+
+test("packaged Windows server advertises update apply without a git checkout", async (t) => {
+  const environment = {
+    JIANYIN_ENABLE_UPDATE: process.env.JIANYIN_ENABLE_UPDATE,
+    JIANYIN_PACKAGED_LAUNCHER: process.env.JIANYIN_PACKAGED_LAUNCHER,
+    JIANYIN_UPDATE_ROOT: process.env.JIANYIN_UPDATE_ROOT
+  };
+  t.after(() => {
+    for (const [key, value] of Object.entries(environment)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+  process.env.JIANYIN_ENABLE_UPDATE = "1";
+  process.env.JIANYIN_PACKAGED_LAUNCHER = "1";
+  process.env.JIANYIN_UPDATE_ROOT = "/tmp/jianyin-packaged-launcher-without-git";
+  const fetchImpl = async (url) => {
+    if (url.endsWith("/releases/latest")) {
+      return new Response(JSON.stringify({
+        tag_name: "v1.0.32",
+        published_at: "2026-07-20T00:00:00Z",
+        body: "Windows launcher update",
+        assets: [{
+          name: "jianyin-windows-launcher.exe",
+          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.32/jianyin-windows-launcher.exe",
+          digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          size: 123
+        }]
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response(JSON.stringify([]), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const baseUrl = await startTestServer({ fetchImpl });
+  const result = await getJson(`${baseUrl}/api/update/latest`);
+  assert.equal(result.response.status, 200);
+  assert.equal(result.body.available, true);
+  assert.equal(result.body.canApply, true);
+  assert.equal(result.body.assets.windowsLauncher.name, "jianyin-windows-launcher.exe");
 });
 
 test("update apply is disabled unless the local launcher explicitly enables it", async () => {

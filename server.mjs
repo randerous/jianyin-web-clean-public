@@ -18,6 +18,9 @@ const UPDATE_REPOSITORY = "randerous/jianyin-web-clean-public";
 const UPDATE_API_URL = `https://api.github.com/repos/${UPDATE_REPOSITORY}/releases/latest`;
 const UPDATE_CACHE_TTL_MS = 5 * 60 * 1000;
 const UPDATE_RESTART_EXIT_CODE = 75;
+function isPackagedLauncher() {
+  return process.env.JIANYIN_PACKAGED_LAUNCHER === "1";
+}
 const APP_VERSION = (() => {
   try {
     const packageJson = JSON.parse(readFileSync(resolve(__dirname, "package.json"), "utf8"));
@@ -1680,7 +1683,7 @@ async function getLatestUpdate() {
       publishedAt: typeof body?.published_at === "string" ? body.published_at : null,
       notes: latestNote.notes,
       releaseNotes,
-      canApply: process.env.JIANYIN_ENABLE_UPDATE === "1" && existsSync(resolve(updateRoot, ".git")),
+      canApply: process.env.JIANYIN_ENABLE_UPDATE === "1" && (isPackagedLauncher() || existsSync(resolve(updateRoot, ".git"))),
       assets: {
         apk: assets.find((asset) => asset.name === "app-release.apk") ?? null,
         windowsLauncher: assets.find((asset) => asset.name === "jianyin-windows-launcher.exe") ?? null
@@ -1716,7 +1719,7 @@ app.get("/api/update/latest", async (_req, res) => {
 });
 
 app.post("/api/update/apply", async (req, res) => {
-  if (process.env.JIANYIN_ENABLE_UPDATE !== "1" || !existsSync(resolve(updateRoot, ".git"))) {
+  if (process.env.JIANYIN_ENABLE_UPDATE !== "1" || (!isPackagedLauncher() && !existsSync(resolve(updateRoot, ".git")))) {
     res.status(403).json({ error: "update_apply_disabled", message: "当前服务不支持自动更新" });
     return;
   }
@@ -1729,6 +1732,15 @@ app.post("/api/update/apply", async (req, res) => {
     }
     if (!latest.available) {
       res.json({ ok: true, updated: false, tag: latest.tag, message: "当前已是最新版本" });
+      return;
+    }
+    if (isPackagedLauncher()) {
+      if (!latest.assets.windowsLauncher?.url || !latest.assets.windowsLauncher.sha256) {
+        res.status(502).json({ error: "update_asset_unavailable", message: "Windows 更新包不可用或缺少校验值" });
+        return;
+      }
+      res.json({ ok: true, updated: true, tag: latest.tag });
+      setTimeout(() => process.exit(UPDATE_RESTART_EXIT_CODE), 250);
       return;
     }
     const status = await runGit(["status", "--porcelain"]);
