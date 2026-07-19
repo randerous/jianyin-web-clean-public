@@ -1,5 +1,5 @@
 import { expect, test } from "playwright/test";
-import { fs, storageKey, projectRoot, toneFile, coverFile, fullSongFile, lrcFile, testSongs, testState, mockHome, reset, expectAudioPlaying, expectAudioPaused, expectAudioLongerThan, expectReadableToast, playFirstHomeSong, openPlayer, importLocalTone, openSettings, storedState, songNamesIn } from "../helpers/app-fixture";
+import { fs, storageKey, projectRoot, toneFile, coverFile, fullSongFile, lrcFile, testSongs, testState, mockHome, reset, replaceSharedStateForTest, expectAudioPlaying, expectAudioPaused, expectAudioLongerThan, expectReadableToast, playFirstHomeSong, openPlayer, importLocalTone, openSettings, storedState, songNamesIn } from "../helpers/app-fixture";
 
 test.beforeEach(async ({ page }) => {
   await reset(page);
@@ -125,7 +125,7 @@ test("switching playlists ignores a stale playback resolve from the previous pla
       body: JSON.stringify({ url: "/assets/full-song-65s.wav", durationMs: 65000, verifiedPlayable: true, quality: "exhigh" })
     });
   });
-  await page.request.post("/api/state", { data: { state } });
+  await replaceSharedStateForTest(page, state);
   await page.addInitScript(({ key, value }) => localStorage.setItem(key, JSON.stringify(value)), { key: storageKey, value: state });
   await page.reload();
 
@@ -150,7 +150,7 @@ test("playlist card and detail use the same total track count", async ({ page })
       { id: "counted_playlist", name: "总数歌单", cover: "/assets/icon.png", songs: [song], trackCount: 8, source: "netease" }
     ]
   };
-  await page.request.post("/api/state", { data: { state } });
+  await replaceSharedStateForTest(page, state);
   await page.addInitScript(({ key, value }) => localStorage.setItem(key, JSON.stringify(value)), { key: storageKey, value: state });
   await page.reload();
 
@@ -482,8 +482,11 @@ test("local audio shared metadata in clean context requires reimport", async ({ 
   await page.getByRole("button", { name: "返回" }).click();
   await expect.poll(async () => {
     const state = await page.request.get("/api/state");
-    return JSON.stringify((await state.json()).state ?? {}).includes("local-file:");
+    const shared = JSON.stringify((await state.json()).state ?? {});
+    return shared.includes("本地歌单_1首") && shared.includes("demo-tone") && shared.includes("needsImport");
   }).toBe(true);
+  const sharedResponse = await page.request.get("/api/state");
+  expect(JSON.stringify((await sharedResponse.json()).state ?? {})).not.toMatch(/local-file:|localKey|coverKey|blob:/);
 
   const clean = await browser.newContext();
   const cleanPage = await clean.newPage();
@@ -686,6 +689,82 @@ test("download manager deletes cached songs", async ({ page }) => {
   })).toBe(false);
 });
 
+test("download deletion failure keeps cached metadata and does not report success", async ({ page }) => {
+  const localKey = "download_flac_delete-failure";
+  const cachedSong = {
+    id: "flac_delete-failure",
+    name: "Delete Failure Song",
+    artist: "Cache Artist",
+    pic: "/assets/icon.png",
+    cover: "/assets/icon.png",
+    url: `local-file:${localKey}`,
+    localKey,
+    source: "flac",
+    remotePlayable: true,
+    verifiedPlayable: true,
+    durationMs: 65000,
+    br: 320000,
+    level: "320k",
+    type: "mp3",
+    audioType: "mp3",
+    quality: "320k"
+  };
+  const state = { ...testState(), downloadHistory: [cachedSong], updatedAt: Date.now() + 60_000 };
+  page.on("dialog", (dialog) => void dialog.accept());
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state }) });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+  await page.addInitScript(() => {
+    const originalTransaction = IDBDatabase.prototype.transaction;
+    IDBDatabase.prototype.transaction = function transactionWithDeleteFailure(...args: Parameters<IDBDatabase["transaction"]>) {
+      if ((window as Window & { __failDownloadDelete?: boolean }).__failDownloadDelete && args[1] === "readwrite") {
+        throw new DOMException("mock IndexedDB delete failure", "UnknownError");
+      }
+      return Reflect.apply(originalTransaction, this, args);
+    };
+  });
+  await page.evaluate(async ({ key, value, cacheKey }) => {
+    const blob = await fetch("/assets/full-song-65s.wav").then((response) => response.blob());
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("jianyin-web-clean-audio", 1);
+      request.onupgradeneeded = () => request.result.createObjectStore("files");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction("files", "readwrite");
+      tx.objectStore("files").put(blob, cacheKey);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+    localStorage.setItem(key, JSON.stringify(value));
+  }, { key: storageKey, value: state, cacheKey: localKey });
+  await page.reload();
+
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await page.locator(".section-title .section-action").first().click();
+  const manager = page.locator(".detail");
+  const row = manager.locator(".song-row", { hasText: "Delete Failure Song" });
+  await expect(row).toHaveCount(1);
+  await page.evaluate(() => {
+    (window as Window & { __failDownloadDelete?: boolean }).__failDownloadDelete = true;
+  });
+  await row.getByRole("button", { name: "删除下载" }).click();
+
+  await expect(row).toHaveCount(1);
+  await expectReadableToast(page, "本地缓存删除失败");
+  await expect.poll(async () => {
+    const stored = await storedState(page);
+    const song = stored.downloadHistory?.find((item: { id?: string }) => item.id === "flac_delete-failure");
+    return { count: stored.downloadHistory?.length ?? 0, localKey: song?.localKey ?? "" };
+  }).toEqual({ count: 1, localKey });
+});
+
 test("download history reattaches orphaned cached audio", async ({ page }) => {
   const cachedSong = {
     id: "flac_888",
@@ -710,10 +789,11 @@ test("download history reattaches orphaned cached audio", async ({ page }) => {
       { id: "favorites", name: "我喜欢的音乐", cover: "/assets/icon.png", songs: [], source: "local" },
       { id: "cached_playlist", name: "Cached Playlist", cover: "/assets/icon.png", songs: [cachedSong], source: "local" }
     ],
-    downloadHistory: [cachedSong]
+    downloadHistory: [cachedSong],
+    updatedAt: Date.now() + 1_000_000
   };
   let resolveRequests = 0;
-  await page.request.post("/api/state", { data: { state } });
+  await replaceSharedStateForTest(page, state);
   await mockHome(page);
   await page.route("**/api/flac/song/888**", async (route) => {
     resolveRequests += 1;
@@ -731,9 +811,15 @@ test("download history reattaches orphaned cached audio", async ({ page }) => {
       })
     });
   });
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state }) });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
   await page.evaluate(async ({ key, value }) => {
     const audioBlob = await fetch("/assets/full-song-65s.wav").then((response) => response.blob());
-    localStorage.setItem(key, JSON.stringify(value));
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
       const request = indexedDB.open("jianyin-web-clean-audio", 1);
       request.onupgradeneeded = () => request.result.createObjectStore("files");
@@ -747,6 +833,7 @@ test("download history reattaches orphaned cached audio", async ({ page }) => {
       tx.onerror = () => reject(tx.error);
     });
     db.close();
+    localStorage.setItem(key, JSON.stringify(value));
   }, { key: storageKey, value: state });
   await page.reload();
 
@@ -789,19 +876,16 @@ test("download manager removes uncached download history entries", async ({ page
   };
   const state = { ...testState(), downloadHistory: [song] };
   page.on("dialog", (dialog) => void dialog.accept());
-  let forwardStateWrites = false;
+  let sharedWrites = 0;
   await page.route(/\/api\/state$/, async (route) => {
     if (route.request().method() === "GET") {
       await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state }) });
       return;
     }
-    if (forwardStateWrites) {
-      await route.continue();
-      return;
-    }
+    sharedWrites += 1;
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
   });
-  await page.request.post("/api/state", { data: { state } });
+  await replaceSharedStateForTest(page, state);
   const stateScript = await page.addInitScript(({ key, value }) => {
     localStorage.setItem(key, JSON.stringify(value));
   }, { key: storageKey, value: state });
@@ -815,16 +899,12 @@ test("download manager removes uncached download history entries", async ({ page
   const row = manager.locator(".song-row", { hasText: "Uncached Download History" });
   await expect(row).toHaveCount(1);
   await expect(row.getByRole("button", { name: "删除下载" })).toBeVisible();
-  forwardStateWrites = true;
   await row.getByRole("button", { name: "删除下载" }).click();
   await expect(row).toHaveCount(0);
   await expect.poll(() => page.evaluate((key) => {
     const raw = localStorage.getItem(key);
     return raw ? JSON.parse(raw).downloadHistory?.length ?? 0 : 0;
   }, storageKey)).toBe(0);
-  await expect.poll(async () => {
-    const response = await page.request.get("/api/state");
-    const body = await response.json();
-    return body.state?.downloadHistory?.length ?? 0;
-  }).toBe(0);
+  await page.waitForTimeout(250);
+  expect(sharedWrites).toBe(0);
 });

@@ -1,15 +1,20 @@
 // Top-level build file where you can add configuration options common to all sub-projects/modules.
 
 buildscript {
-    
     repositories {
         maven { url uri("local-maven") }
+        // The local network can terminate TLS to dl.google.com; keep Google's
+        // repository as a fallback after a public mirror.
+        maven { url "https://maven.aliyun.com/repository/google" }
+        maven { url "https://maven.aliyun.com/repository/public" }
         google()
         mavenCentral()
     }
     dependencies {
         classpath 'com.android.tools.build:gradle:8.13.0'
-        classpath 'com.google.gms:google-services:4.4.4'
+        if (file("app/google-services.json").exists()) {
+            classpath 'com.google.gms:google-services:4.4.4'
+        }
 
         // NOTE: Do not place your application dependencies here; they belong
         // in the individual module build.gradle files
@@ -35,6 +40,8 @@ if (externalGradleBuildDir) {
 allprojects {
     repositories {
         maven { url uri("${rootProject.projectDir}/local-maven") }
+        maven { url "https://maven.aliyun.com/repository/google" }
+        maven { url "https://maven.aliyun.com/repository/public" }
         google()
         mavenCentral()
     }

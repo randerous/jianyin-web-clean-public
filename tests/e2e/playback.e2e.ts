@@ -48,6 +48,23 @@ test("player controls pause, resume, seek, and move through full-length queue", 
   await expect(currentPlayer.getByRole("button", { name: "下一首" })).toBeEnabled();
 });
 
+test("the first play click resumes audio paused by the browser in the background", async ({ page }) => {
+  await playFirstHomeSong(page);
+  await expectAudioPlaying(page);
+  const before = await page.locator("audio").evaluate((audio: HTMLAudioElement) => {
+    audio.currentTime = 12;
+    audio.dispatchEvent(new Event("timeupdate"));
+    audio.pause();
+    return audio.currentTime;
+  });
+  await expectAudioPaused(page);
+
+  await page.getByRole("button", { name: "暂停", exact: true }).click();
+
+  await expectAudioPlaying(page);
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.currentTime)).toBeGreaterThan(before);
+});
+
 test("toast stays readable above mobile playback controls", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await playFirstHomeSong(page);

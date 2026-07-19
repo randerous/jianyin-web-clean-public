@@ -12,9 +12,11 @@
  */
 
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "playwright/test";
 import { armAudioPhaseCapture, armDomPhaseCapture, installPerformanceCapture, readAudioPhaseCapture, readDomPhaseCapture, readPerformanceDiagnostics } from "./helpers/performance";
+import { toSharedState } from "../src/lib/shared-state";
 
 /* ============================================================
    常量与共享辅助
@@ -168,9 +170,40 @@ async function mockHomeApi(page: Page) {
   });
 }
 
+async function replaceServerSharedState(
+  page: Page,
+  state: ReturnType<typeof emptyState> | Record<string, unknown>,
+  afterFirstRead?: (baseRevision: number) => Promise<void>
+) {
+  let currentResponse = await page.request.get("/api/state");
+  if (!currentResponse.ok()) throw new Error(`failed to read shared state: ${currentResponse.status()} ${await currentResponse.text()}`);
+  let current = await currentResponse.json();
+  const projected = toSharedState(state as never);
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const baseRevision = current?.state?.revision;
+    if (!Number.isSafeInteger(baseRevision) || baseRevision < 0) throw new Error("shared state response has no valid revision");
+    if (attempt === 0) await afterFirstRead?.(baseRevision);
+    const response = await page.request.post("/api/state", {
+      data: {
+        state: projected,
+        baseRevision,
+        writeId: `perf-${randomUUID()}`
+      }
+    });
+    if (response.ok()) return;
+    const body = await response.json().catch(() => ({}));
+    if (response.status() !== 409 || !body.state) {
+      throw new Error(`failed to replace shared state: ${response.status()} ${JSON.stringify(body)}`);
+    }
+    current = body;
+    currentResponse = response;
+  }
+  throw new Error(`failed to replace shared state after CAS retries: ${currentResponse.status()}`);
+}
+
 async function reset(page: Page) {
   const state = emptyState();
-  await page.request.post("/api/state", { data: { state } });
+  await replaceServerSharedState(page, state);
   await mockHomeApi(page);
   await page.addInitScript(({ key, value }) => {
     localStorage.setItem(key, JSON.stringify(value));
@@ -178,6 +211,35 @@ async function reset(page: Page) {
   await page.goto("/");
   await expect(page.getByRole("button", { name: "刷新推荐" })).toBeEnabled({ timeout: 15_000 });
 }
+
+test("PERF-SETUP shared-state reset retries a legitimate CAS race", async ({ page }) => {
+  const target = {
+    ...emptyState(),
+    playlists: [
+      ...emptyState().playlists,
+      { id: "perf-race-target", name: "Perf Race Target", cover: "", songs: [], source: "local" }
+    ]
+  };
+  let injectedRace = false;
+
+  await replaceServerSharedState(page, target, async (baseRevision) => {
+    injectedRace = true;
+    const response = await page.request.post("/api/state", {
+      data: {
+        state: toSharedState(emptyState() as never),
+        baseRevision,
+        writeId: `perf-race-${randomUUID()}`
+      }
+    });
+    expect(response.ok(), await response.text()).toBe(true);
+  });
+
+  expect(injectedRace).toBe(true);
+  const response = await page.request.get("/api/state");
+  expect(response.ok()).toBe(true);
+  const body = await response.json();
+  expect(body.state.playlists.some((playlist: { id: string }) => playlist.id === "perf-race-target")).toBe(true);
+});
 
 /* ============================================================
    模块 1: 首页与歌单加载性能 (PERF-HOME-*)
@@ -617,7 +679,7 @@ test.describe("PERF-PLAY 播放与切歌性能", () => {
         { id: "big_queue", name: "大队列", cover: "/assets/icon.png", songs: manySongs, source: "local" },
       ],
     };
-    await page.request.post("/api/state", { data: { state } });
+    await replaceServerSharedState(page, state);
     await page.addInitScript(({ key, value }) => {
       localStorage.setItem(key, JSON.stringify(value));
     }, { key: storageKey, value: state });
@@ -725,7 +787,7 @@ test.describe("PERF-DL 下载与本地缓存性能", () => {
       localKey: `download_flac_flac_dl_${i}`,
     }));
     const state = { ...emptyState(), downloadHistory: manyDownloads };
-    await page.request.post("/api/state", { data: { state } });
+    await replaceServerSharedState(page, state);
     await page.addInitScript(({ key, value }) => {
       localStorage.setItem(key, JSON.stringify(value));
     }, { key: storageKey, value: state });
@@ -759,7 +821,7 @@ test.describe("PERF-DATA 数据恢复与存储性能", () => {
         { id: "big_data", name: "大数据歌单", cover: "/assets/icon.png", songs: manySongs, source: "local" },
       ],
     };
-    await page.request.post("/api/state", { data: { state } });
+    await replaceServerSharedState(page, state);
     await page.addInitScript(({ key, value }) => {
       localStorage.setItem(key, JSON.stringify(value));
     }, { key: storageKey, value: state });
@@ -785,7 +847,7 @@ test.describe("PERF-DATA 数据恢复与存储性能", () => {
         { id: "huge_data", name: "海量歌单", cover: "/assets/icon.png", songs: manySongs, source: "local" },
       ],
     };
-    await page.request.post("/api/state", { data: { state } });
+    await replaceServerSharedState(page, state);
     await page.addInitScript(({ key, value }) => {
       localStorage.setItem(key, JSON.stringify(value));
     }, { key: storageKey, value: state });
@@ -811,7 +873,7 @@ test.describe("PERF-DATA 数据恢复与存储性能", () => {
       localKey: `download_flac_flac_orphan_${i}`,
     }));
     const state = { ...emptyState(), downloadHistory: orphanSongs };
-    await page.request.post("/api/state", { data: { state } });
+    await replaceServerSharedState(page, state);
     await page.addInitScript(({ key, value }) => {
       localStorage.setItem(key, JSON.stringify(value));
     }, { key: storageKey, value: state });
@@ -867,7 +929,7 @@ test.describe("PERF-DATA 数据恢复与存储性能", () => {
       localKey: `download_flac_flac_big-orphan_${i}`,
     }));
     const state = { ...emptyState(), downloadHistory: orphanSongs };
-    await page.request.post("/api/state", { data: { state } });
+    await replaceServerSharedState(page, state);
     await page.addInitScript(({ key, value }) => {
       localStorage.setItem(key, JSON.stringify(value));
     }, { key: storageKey, value: state });
@@ -932,7 +994,7 @@ test.describe("PERF-UI UI 渲染与交互响应性能", () => {
         { id: "ui_huge", name: "UI 海量歌单", cover: "/assets/icon.png", songs: manySongs, source: "local" },
       ],
     };
-    await page.request.post("/api/state", { data: { state } });
+    await replaceServerSharedState(page, state);
     await page.addInitScript(({ key, value }) => {
       localStorage.setItem(key, JSON.stringify(value));
     }, { key: storageKey, value: state });
@@ -958,7 +1020,7 @@ test.describe("PERF-UI UI 渲染与交互响应性能", () => {
         { id: "detail_huge", name: "详情海量歌单", cover: "/assets/icon.png", songs: manySongs, source: "local" },
       ],
     };
-    await page.request.post("/api/state", { data: { state } });
+    await replaceServerSharedState(page, state);
     await page.addInitScript(({ key, value }) => {
       localStorage.setItem(key, JSON.stringify(value));
     }, { key: storageKey, value: state });
@@ -996,7 +1058,7 @@ test.describe("PERF-UI UI 渲染与交互响应性能", () => {
         { id: "progress_huge", name: "进度性能歌单", cover: "/assets/icon.png", songs: manySongs, source: "local" },
       ],
     };
-    await page.request.post("/api/state", { data: { state } });
+    await replaceServerSharedState(page, state);
     await page.addInitScript(({ key, value }) => {
       localStorage.setItem(key, JSON.stringify(value));
     }, { key: storageKey, value: state });
@@ -1046,7 +1108,7 @@ test.describe("PERF-UI UI 渲染与交互响应性能", () => {
         { id: "filter_pl", name: "过滤歌单", cover: "/assets/icon.png", songs: manySongs, source: "local" },
       ],
     };
-    await page.request.post("/api/state", { data: { state } });
+    await replaceServerSharedState(page, state);
     await page.addInitScript(({ key, value }) => {
       localStorage.setItem(key, JSON.stringify(value));
     }, { key: storageKey, value: state });

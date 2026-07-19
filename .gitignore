@@ -2,13 +2,15 @@ node_modules/
 .runtime/
 dist/
 build/
+release/
 tests/.playwright-results/
 test-results/
 playwright-report/
 tests/*.broken-*
-.jianyin-shared-state.json
+.jianyin-shared-state.json*
 .jianyin-worktree.txt
 .DS_Store
+._*
 .env
 .env.*
 .github-token

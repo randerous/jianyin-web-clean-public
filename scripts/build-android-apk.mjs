@@ -1,13 +1,28 @@
 import { execFileSync, spawn } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statfsSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const androidRoot = resolve(root, "android");
 const apkPath = resolve(androidRoot, "app", "build", "outputs", "apk", "release", "app-release.apk");
-const gradleBuildRoot = resolve(process.env.TMPDIR || "/tmp", "jianyin-web-clean-public-gradle-build");
-const externalApkPath = resolve(gradleBuildRoot, "app", "outputs", "apk", "release", "app-release.apk");
+const platformCacheRoot = process.platform === "darwin"
+  ? resolve(homedir(), "Library", "Caches", "JianyinGradle")
+  : process.platform === "win32"
+    ? resolve(process.env.LOCALAPPDATA || resolve(homedir(), "AppData", "Local"), "JianyinGradle")
+    : resolve(process.env.XDG_CACHE_HOME || resolve(homedir(), ".cache"), "JianyinGradle");
+const defaultGradleUserHome = resolve(platformCacheRoot, "gradle-user-home");
+const defaultGradleBuildRoot = resolve(platformCacheRoot, "gradle-build");
+const gradleVolume = "/Volumes/JianyinGradle";
+const gradleSparseBundle = resolve(root, "..", "gradle-cache-apfs.sparsebundle");
+const APFS_FILESYSTEM_TYPE = 25;
+const aliyunMavenMarker = "// JIANYIN_ALIYUN_MAVEN_MIRRORS";
+const aliyunMavenRepositories = [
+  'maven { url "https://maven.aliyun.com/repository/google" }',
+  'maven { url "https://maven.aliyun.com/repository/public" }'
+];
+const EXPECTED_RELEASE_SIGNER_SHA256 = "09392c015136c81b1aa60be09958ba2d8218dccba822d275124f2d5dba226d92";
 const javaHomeCandidates = [
   process.env.JAVA_HOME,
   resolve(root, "..", "jdk-21"),
@@ -20,10 +35,7 @@ const androidHomeCandidates = [
   resolve(root, "..", "android-sdk"),
   "/opt/homebrew/share/android-commandlinetools"
 ].filter(Boolean);
-const releaseKeystoreCandidates = [
-  process.env.JIANYIN_RELEASE_KEYSTORE,
-  resolve(root, "..", "old", "debug.keystore")
-].filter(Boolean);
+const defaultReleaseKeystore = resolve(root, "..", "old", "debug.keystore");
 const ndkVersion = "28.2.13676358";
 
 function commandName(name) {
@@ -39,8 +51,9 @@ function findAndroidHome() {
   return androidHomeCandidates.find((path) => existsSync(resolve(path, "platforms")) && existsSync(resolve(path, "build-tools")));
 }
 
-function findReleaseKeystore() {
-  return releaseKeystoreCandidates.find((path) => existsSync(path));
+function findReleaseKeystore(env) {
+  if (env.JIANYIN_RELEASE_KEYSTORE) return env.JIANYIN_RELEASE_KEYSTORE;
+  return existsSync(defaultReleaseKeystore) ? defaultReleaseKeystore : undefined;
 }
 
 function isAndroidNdkHome(path) {
@@ -91,8 +104,66 @@ function writeAndroidLocalProperties(env) {
   writeFileSync(resolve(androidRoot, "local.properties"), `${lines.join("\n")}\n`);
 }
 
-function configureEnv() {
-  const env = { ...process.env };
+export function resolveGradleUserHome(env = {}) {
+  return env.GRADLE_USER_HOME || defaultGradleUserHome;
+}
+
+function isUsableGradleDirectory(path) {
+  try {
+    const filesystem = statfsSync(path);
+    return process.platform !== "darwin" || filesystem.type === APFS_FILESYSTEM_TYPE;
+  } catch (error) {
+    if (error?.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+function ensureGradleDirectory(path, label) {
+  mkdirSync(path, { recursive: true });
+  if (!isUsableGradleDirectory(path)) {
+    const requirement = process.platform === "darwin" ? "APFS" : "a supported local filesystem";
+    throw new Error(`${label} must be on ${requirement}; refusing to use ${path}.`);
+  }
+  return path;
+}
+
+function attachGradleSparseBundle() {
+  if (process.platform !== "darwin" || !existsSync(gradleSparseBundle)) return false;
+  try {
+    execFileSync("hdiutil", ["attach", "-nobrowse", gradleSparseBundle], { stdio: "ignore" });
+  } catch {
+    return false;
+  }
+  return isUsableGradleDirectory(gradleVolume);
+}
+
+export function prepareGradleStorage(sourceEnv = process.env) {
+  const env = { ...sourceEnv };
+  const requestedUserHome = env.GRADLE_USER_HOME;
+  const requestedBuildRoot = env.JIANYIN_ANDROID_GRADLE_BUILD_DIR;
+  if (requestedUserHome || requestedBuildRoot) {
+    return {
+      gradleUserHome: ensureGradleDirectory(requestedUserHome || defaultGradleUserHome, "GRADLE_USER_HOME"),
+      gradleBuildRoot: ensureGradleDirectory(requestedBuildRoot || defaultGradleBuildRoot, "JIANYIN_ANDROID_GRADLE_BUILD_DIR")
+    };
+  }
+
+  if (process.platform === "darwin" && !isUsableGradleDirectory(gradleVolume)) attachGradleSparseBundle();
+  if (process.platform === "darwin" && isUsableGradleDirectory(gradleVolume)) {
+    return {
+      gradleUserHome: ensureGradleDirectory(resolve(gradleVolume, "gradle-user-home"), "Gradle user home"),
+      gradleBuildRoot: ensureGradleDirectory(resolve(gradleVolume, "gradle-build"), "Gradle build directory")
+    };
+  }
+
+  return {
+    gradleUserHome: ensureGradleDirectory(defaultGradleUserHome, "Fallback Gradle user home"),
+    gradleBuildRoot: ensureGradleDirectory(defaultGradleBuildRoot, "Fallback Gradle build directory")
+  };
+}
+
+export function configureEnv(sourceEnv = process.env) {
+  const env = { ...sourceEnv };
   env.COPYFILE_DISABLE = "1";
   env.COPY_EXTENDED_ATTRIBUTES_DISABLE = "1";
   env.JIANYIN_ANDROID_RELEASE = "1";
@@ -102,8 +173,9 @@ function configureEnv() {
   env.JIANYIN_ANDROID_NDK_PATH = findAndroidNdkHome(env.ANDROID_HOME) ?? env.JIANYIN_ANDROID_NDK_PATH;
   env.ANDROID_NDK_HOME = env.JIANYIN_ANDROID_NDK_PATH ?? env.ANDROID_NDK_HOME;
   env.ANDROID_NDK_ROOT = env.JIANYIN_ANDROID_NDK_PATH ?? env.ANDROID_NDK_ROOT;
-  env.JIANYIN_ANDROID_GRADLE_BUILD_DIR = gradleBuildRoot;
-  env.JIANYIN_RELEASE_KEYSTORE = findReleaseKeystore() ?? env.JIANYIN_RELEASE_KEYSTORE;
+  env.GRADLE_USER_HOME = resolveGradleUserHome(env);
+  env.JIANYIN_ANDROID_GRADLE_BUILD_DIR = env.JIANYIN_ANDROID_GRADLE_BUILD_DIR || defaultGradleBuildRoot;
+  env.JIANYIN_RELEASE_KEYSTORE = findReleaseKeystore(env);
   env.JIANYIN_RELEASE_KEYSTORE_PASSWORD = env.JIANYIN_RELEASE_KEYSTORE_PASSWORD || "android";
   env.JIANYIN_RELEASE_KEY_ALIAS = env.JIANYIN_RELEASE_KEY_ALIAS || "androiddebugkey";
   env.JIANYIN_RELEASE_KEY_PASSWORD = env.JIANYIN_RELEASE_KEY_PASSWORD || "android";
@@ -146,6 +218,89 @@ function runStreaming(label, command, args, options = {}) {
       }
     });
   });
+}
+
+function runForOutput(command, args, env) {
+  const useCmd = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
+  return execFileSync(command, args, {
+    cwd: root,
+    env,
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    shell: useCmd
+  });
+}
+
+function javaTool(env, name) {
+  const executable = process.platform === "win32" ? `${name}.exe` : name;
+  const command = env.JAVA_HOME ? resolve(env.JAVA_HOME, "bin", executable) : "";
+  if (!command || !existsSync(command)) throw new Error(`${name} was not found under JAVA_HOME.`);
+  return command;
+}
+
+function findAndroidBuildTool(env, name) {
+  const buildToolsRoot = env.ANDROID_HOME ? resolve(env.ANDROID_HOME, "build-tools") : "";
+  if (!buildToolsRoot || !existsSync(buildToolsRoot)) throw new Error("Android build-tools directory was not found.");
+  const executable = process.platform === "win32" ? `${name}.bat` : name;
+  const versions = readdirSync(buildToolsRoot)
+    .filter((version) => {
+      const path = resolve(buildToolsRoot, version);
+      return statIfPresent(path)?.isDirectory();
+    })
+    .sort((left, right) => right.localeCompare(left, undefined, { numeric: true }));
+  for (const version of versions) {
+    const command = resolve(buildToolsRoot, version, executable);
+    if (existsSync(command)) return command;
+  }
+  throw new Error(`${name} was not found in Android build-tools.`);
+}
+
+function normalizeSha256(value) {
+  return String(value ?? "").replace(/[^0-9a-f]/gi, "").toLowerCase();
+}
+
+export function extractKeytoolCertificateSha256(output) {
+  const match = String(output ?? "").match(/^\s*SHA256:\s*([0-9a-f:]+)\s*$/im);
+  return normalizeSha256(match?.[1]);
+}
+
+export function extractApkSignerSha256s(output) {
+  return [...String(output ?? "").matchAll(/Signer #\d+ certificate SHA-256 digest:\s*([0-9a-f:]+)/gi)]
+    .map((match) => normalizeSha256(match[1]));
+}
+
+export function assertExpectedReleaseSigner(signers, label) {
+  const normalized = signers.map(normalizeSha256);
+  if (normalized.length !== 1 || !/^[0-9a-f]{64}$/.test(normalized[0])) {
+    throw new Error(`${label} must contain exactly one verifiable signer; found ${normalized.length}.`);
+  }
+  if (normalized[0] !== EXPECTED_RELEASE_SIGNER_SHA256) {
+    throw new Error(`${label} signer SHA-256 ${normalized[0]} does not match required ${EXPECTED_RELEASE_SIGNER_SHA256}.`);
+  }
+  return normalized[0];
+}
+
+export function verifyReleaseKeystore(env) {
+  const output = runForOutput(javaTool(env, "keytool"), [
+    "-J-Duser.language=en",
+    "-J-Duser.country=US",
+    "-list",
+    "-v",
+    "-keystore",
+    env.JIANYIN_RELEASE_KEYSTORE,
+    "-storepass:env",
+    "JIANYIN_RELEASE_KEYSTORE_PASSWORD",
+    "-alias",
+    env.JIANYIN_RELEASE_KEY_ALIAS
+  ], env);
+  const signer = assertExpectedReleaseSigner([extractKeytoolCertificateSha256(output)], "Release keystore");
+  console.log(`Verified release keystore signer SHA-256: ${signer}`);
+}
+
+export function verifyApkSignature(env) {
+  const output = runForOutput(findAndroidBuildTool(env, "apksigner"), ["verify", "--verbose", "--print-certs", apkPath], env);
+  const signer = assertExpectedReleaseSigner(extractApkSignerSha256s(output), "Release APK");
+  console.log(`Verified release APK signer SHA-256: ${signer}`);
 }
 
 function statIfPresent(path) {
@@ -220,6 +375,8 @@ async function assembleRelease(env) {
   const command = process.platform === "win32" ? resolve(androidRoot, "gradlew.bat") : resolve(androidRoot, "gradlew");
   const cleaner = setInterval(removeGeneratedAppleDoubleFiles, 750);
   try {
+    const gradleBuildRoot = env.JIANYIN_ANDROID_GRADLE_BUILD_DIR;
+    const externalApkPath = resolve(gradleBuildRoot, "app", "outputs", "apk", "release", "app-release.apk");
     rmSync(gradleBuildRoot, { recursive: true, force: true });
     removeGeneratedAppleDoubleFiles();
     await runStreaming("Assemble Android release APK", command, ["assembleRelease"], { cwd: androidRoot, env });
@@ -243,6 +400,26 @@ async function assembleRelease(env) {
   }
 }
 
+export function injectAliyunMavenMirrors(gradleFiles = [
+    resolve(androidRoot, "build.gradle"),
+    resolve(root, "node_modules", "@capacitor", "android", "capacitor", "build.gradle"),
+    resolve(androidRoot, "capacitor-cordova-android-plugins", "build.gradle")
+]) {
+  let changed = 0;
+  for (const path of gradleFiles) {
+    if (!existsSync(path)) throw new Error(`Generated Gradle file not found after Capacitor sync: ${path}`);
+    const source = readFileSync(path, "utf8");
+    if (aliyunMavenRepositories.every((repository) => source.includes(repository))) continue;
+    const updated = source.replace(/^(\s*)repositories\s*\{/gm, (match, indentation) => (
+      `${match}\n${indentation}    ${aliyunMavenMarker}\n${aliyunMavenRepositories.map((repository) => `${indentation}    ${repository}`).join("\n")}`
+    ));
+    if (updated === source) throw new Error(`No repositories block found in generated Gradle file: ${path}`);
+    writeFileSync(path, updated);
+    changed += 1;
+  }
+  return changed;
+}
+
 function newestJsAssetName() {
   const assetsDir = resolve(root, "dist", "assets");
   const candidates = readdirSync(assetsDir)
@@ -261,6 +438,7 @@ function listApkEntries(env) {
 
 function verifyApk(env) {
   if (!existsSync(apkPath)) throw new Error(`APK was not generated: ${apkPath}`);
+  verifyApkSignature(env);
   const entries = new Set(listApkEntries(env));
   const jsAsset = newestJsAssetName();
   const required = [
@@ -297,16 +475,28 @@ function verifyApk(env) {
   console.log("Verified native ABI: arm64-v8a only.");
 }
 
-const env = configureEnv();
+export async function main() {
+  const gradleStorage = prepareGradleStorage();
+  const env = configureEnv({
+    ...process.env,
+    GRADLE_USER_HOME: gradleStorage.gradleUserHome,
+    JIANYIN_ANDROID_GRADLE_BUILD_DIR: gradleStorage.gradleBuildRoot
+  });
+  if (!env.JIANYIN_RELEASE_KEYSTORE || !existsSync(env.JIANYIN_RELEASE_KEYSTORE)) {
+    throw new Error("Release keystore not found. Refusing to build an unsigned APK.");
+  }
+  verifyReleaseKeystore(env);
+  console.log(`Gradle user home: ${env.GRADLE_USER_HOME}`);
 
-if (!env.JIANYIN_RELEASE_KEYSTORE || !existsSync(env.JIANYIN_RELEASE_KEYSTORE)) {
-  throw new Error("Release keystore not found. Refusing to build an unsigned APK.");
+  writeAndroidLocalProperties(env);
+  run("Build desktop/web assets", commandName("npm"), ["run", "build"], { env });
+  run("Sync Capacitor Android project", commandName("npx"), ["cap", "sync", "android"], { env });
+  const mirrorFilesUpdated = injectAliyunMavenMirrors();
+  console.log(`Aliyun Maven mirror present in generated Gradle files (${mirrorFilesUpdated} updated).`);
+  run("Prepare embedded Android Node backend", process.execPath, [resolve(root, "scripts", "prepare-android-embedded-backend.mjs")], { env });
+  removeGeneratedAppleDoubleFiles();
+  await assembleRelease(env);
+  verifyApk(env);
 }
 
-writeAndroidLocalProperties(env);
-run("Build desktop/web assets", commandName("npm"), ["run", "build"], { env });
-run("Sync Capacitor Android project", commandName("npx"), ["cap", "sync", "android"], { env });
-run("Prepare embedded Android Node backend", process.execPath, [resolve(root, "scripts", "prepare-android-embedded-backend.mjs")], { env });
-removeGeneratedAppleDoubleFiles();
-await assembleRelease(env);
-verifyApk(env);
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();

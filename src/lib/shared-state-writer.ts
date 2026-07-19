@@ -1,42 +1,43 @@
-import type { PersistedState } from "../types";
-
 export type SharedStateWriteOptions = {
   keepalive?: boolean;
 };
 
-type PendingWrite = {
-  state: PersistedState;
+type PendingWrite<T> = {
+  state: T;
   options: SharedStateWriteOptions;
 };
 
-export function createSharedStateWriter(
-  write: (state: PersistedState, options?: SharedStateWriteOptions) => Promise<void>,
-  onError: () => void
+export function createSharedStateWriter<T>(
+  write: (state: T, options?: SharedStateWriteOptions) => Promise<void>,
+  onError: (error: unknown, state: T, options: SharedStateWriteOptions) => void
 ) {
   let inFlight: Promise<void> | null = null;
-  let pending: PendingWrite | null = null;
+  let active: PendingWrite<T> | null = null;
+  let pending: PendingWrite<T> | null = null;
 
   const pump = () => {
     if (inFlight || !pending) return;
     const next = pending;
     pending = null;
+    active = next;
     inFlight = write(next.state, next.options)
-      .catch(() => onError())
+      .catch((error) => onError(error, next.state, next.options))
       .finally(() => {
         inFlight = null;
+        active = null;
         pump();
       });
   };
 
   return {
-    enqueue(state: PersistedState) {
+    enqueue(state: T) {
       pending = { state, options: {} };
       pump();
     },
-    flush(state: PersistedState) {
+    flush(state: T) {
       if (inFlight) {
-        pending = null;
-        void write(state, { keepalive: true }).catch(() => onError());
+        if (active?.state === state) return;
+        pending = { state, options: { keepalive: true } };
         return;
       }
       pending = { state, options: { keepalive: true } };

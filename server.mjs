@@ -1,8 +1,8 @@
 import express from "express";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, resolve } from "node:path";
 import { Readable } from "node:stream";
@@ -33,12 +33,14 @@ const port = portArgIndex >= 0 ? Number(args[portArgIndex + 1]) || 5188 : Number
 const sharedStatePath = process.env.JIANYIN_STATE_PATH
   ? resolve(process.env.JIANYIN_STATE_PATH)
   : resolve(__dirname, ".jianyin-shared-state.json");
+const sharedStateLockTails = new Map();
 
 export async function createApp({ neteaseClient = defaultNetease, fetchImpl = globalThis.fetch, dev = false, hmrPort = port + 10000, statePath = sharedStatePath } = {}) {
 const app = express();
 const netease = neteaseClient;
 const updateRoot = resolve(process.env.JIANYIN_UPDATE_ROOT || __dirname);
-let sharedStateWriteTail = Promise.resolve();
+statePath = resolve(statePath);
+app.use("/api/state", express.json({ limit: "4mb" }));
 app.use(express.json({ limit: "512kb" }));
 	const MIN_FULL_SONG_MS = 60_000;
 	const SEARCH_CANDIDATE_LIMIT = 180;
@@ -111,6 +113,27 @@ function errorMessage(error) {
   return redactSensitiveText(error instanceof Error ? error.message : String(error));
 }
 
+function reportSharedStateFailure(res, statePath, operation, error) {
+  const diagnosticMessage = errorMessage(error)
+    .replaceAll(statePath, "<shared-state-file>")
+    .replaceAll(dirname(statePath), "<shared-state-directory>");
+  console.error(`[shared-state] ${operation} failed`, {
+    name: error instanceof Error ? error.name : typeof error,
+    code: typeof error?.code === "string" ? error.code : "",
+    syscall: typeof error?.syscall === "string" ? error.syscall : "",
+    message: diagnosticMessage
+  });
+  const messages = {
+    read: "共享歌单读取失败，请稍后重试",
+    write: "共享歌单保存失败，请稍后重试",
+    delete: "共享歌单删除失败，请稍后重试"
+  };
+  res.status(500).json({
+    error: `state_${operation}_failed`,
+    message: messages[operation] ?? "共享状态操作失败，请稍后重试"
+  });
+}
+
 function releaseVersion(value) {
   const match = String(value ?? "").trim().match(/^v?(\d+)\.(\d+)\.(\d+)$/);
   if (!match) return null;
@@ -178,46 +201,293 @@ function upstreamJsonError(url, response, text) {
   return new Error(sample ? `${message} ${sample}` : message);
 }
 
-function redactSharedState(value, key = "") {
-  const secretKey = /cookie|credential|token|music_u|sessdata|bili_jct|csrf/i.test(key);
-  if (secretKey) return undefined;
-  if (Array.isArray(value)) {
-    return value
-      .map((item) => redactSharedState(item))
-      .filter((item) => item !== undefined);
-  }
-  if (value && typeof value === "object") {
-    const sanitized = {};
-    for (const [entryKey, entryValue] of Object.entries(value)) {
-      const next = redactSharedState(entryValue, entryKey);
-      if (next !== undefined) sanitized[entryKey] = next;
-    }
-    return sanitized;
-  }
-  if (typeof value === "string" && /(MUSIC_U=|SESSDATA=|bili_jct=)/i.test(value)) return undefined;
-  return value;
+function sharedCover(value) {
+  const cover = boundedSharedString(value, 2_048);
+  return /^(blob:|data:|local-file:)/i.test(cover) ? "" : cover;
 }
 
-async function readSharedState() {
+const MAX_SHARED_PLAYLISTS = 1_000;
+const MAX_SHARED_SONGS = 5_000;
+const MAX_SHARED_TOMBSTONES = 10_000;
+const MAX_SHARED_ID_LENGTH = 512;
+
+function boundedSharedString(value, maxLength = 512) {
+  if (typeof value !== "string") return "";
+  const bounded = value.trim().slice(0, maxLength);
+  return /(MUSIC_U=|SESSDATA=|bili_jct=)/i.test(bounded) ? "" : bounded;
+}
+
+function finiteSharedNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function stableLegacySharedId(prefix, value) {
+  let first = 2166136261;
+  let second = 2654435769;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    first = Math.imul(first ^ code, 16777619);
+    second = Math.imul(second ^ code, 2246822519);
+  }
+  const suffix = `${(first >>> 0).toString(16).padStart(8, "0")}${(second >>> 0).toString(16).padStart(8, "0")}`;
+  return `${prefix}_legacy_${suffix}`;
+}
+
+function stableFlacSharedId(name, artist) {
+  const identity = `flac\u0000${typeof name === "string" ? name.trim() : ""}\u0000${typeof artist === "string" ? artist.trim() : ""}`;
+  return identity.length > MAX_SHARED_ID_LENGTH ? stableLegacySharedId("shared_song", identity) : identity;
+}
+
+function canonicalFlacSharedIdentity(value) {
+  if (!value.startsWith("flac\u0000")) return value;
+  const artistSeparator = value.indexOf("\u0000", 5);
+  if (artistSeparator < 0) return value;
+  return stableFlacSharedId(value.slice(5, artistSeparator), value.slice(artistSeparator + 1));
+}
+
+function boundedSharedIds(value, prefix, ids, limit = MAX_SHARED_TOMBSTONES) {
+  if (!Array.isArray(value)) return [];
+  const strings = [];
+  const seen = new Set();
+  let inspected = 0;
+  for (const item of value) {
+    if (inspected >= limit) break;
+    inspected += 1;
+    const string = opaqueSharedId(item, prefix, ids);
+    if (!string || seen.has(string)) continue;
+    seen.add(string);
+    strings.push(string);
+    if (strings.length >= limit) break;
+  }
+  return strings;
+}
+
+function opaqueSharedId(value, prefix, ids) {
+  if (typeof value !== "string") return "";
+  const rawId = value;
+  const trimmedId = rawId.trim();
+  if (!trimmedId) return "";
+  const id = rawId.startsWith("local_")
+    ? rawId
+    : prefix === "shared_song" ? canonicalFlacSharedIdentity(trimmedId) : trimmedId;
+  if (!id.startsWith("local_") && id.length <= MAX_SHARED_ID_LENGTH) return boundedSharedString(id);
+  if (!ids.has(id)) {
+    ids.set(id, stableLegacySharedId(prefix, id));
+  }
+  return ids.get(id);
+}
+
+function sanitizeSharedSong(value, ids) {
+  if (!value || typeof value !== "object") return null;
+  const legacyLocal = typeof value.id === "string" && value.id.startsWith("local_");
+  const source = legacyLocal ? "local" : ["local", "netease", "bili", "flac"].includes(value.source) ? value.source : "local";
+  const id = source === "local" ? opaqueSharedId(value.id, "shared_song", ids.songIds) : boundedSharedString(value.id);
+  if (!id) return null;
+  const durationMs = finiteSharedNumber(value.durationMs);
+  const cid = finiteSharedNumber(value.cid);
+  const name = boundedSharedString(value.name) || "未知歌曲";
+  const artist = boundedSharedString(value.artist) || "未知歌手";
+  const identityName = typeof value.name === "string" ? value.name : "未知歌曲";
+  const identityArtist = typeof value.artist === "string" ? value.artist : "未知歌手";
+  const explicitSharedId = source === "flac" ? opaqueSharedId(value.sharedId, "shared_song", ids.songIds) : "";
+  const sharedId = source === "flac" ? explicitSharedId || stableFlacSharedId(identityName, identityArtist) : "";
+  return {
+    id,
+    ...(sharedId ? { sharedId } : {}),
+    name,
+    artist,
+    url: "",
+    cover: sharedCover(value.cover),
+    source,
+    remotePlayable: source !== "local",
+    verifiedPlayable: false,
+    ...(Number.isFinite(durationMs) && durationMs >= 0 ? { durationMs } : {}),
+    ...(source === "bili" && boundedSharedString(value.bvid) ? { bvid: boundedSharedString(value.bvid) } : {}),
+    ...(source === "bili" && Number.isFinite(cid) ? { cid } : {}),
+    ...(source === "local" ? { needsImport: true } : {})
+  };
+}
+
+function sanitizeSharedPlaylist(value, ids) {
+  if (!value || typeof value !== "object") return null;
+  const legacyLocal = typeof value.id === "string" && value.id.startsWith("local_");
+  const source = legacyLocal ? "local" : ["local", "netease", "bili", "flac"].includes(value.source) ? value.source : "local";
+  const id = source === "local" && value.id !== "favorites" ? opaqueSharedId(value.id, "shared_playlist", ids.playlistIds) : boundedSharedString(value.id);
+  const name = boundedSharedString(value.name);
+  if (!id || !name) return null;
+  const trackCount = finiteSharedNumber(value.trackCount);
+  return {
+    id,
+    name,
+    cover: sharedCover(value.cover),
+    songs: Array.isArray(value.songs) ? value.songs.slice(0, MAX_SHARED_SONGS).map((song) => sanitizeSharedSong(song, ids)).filter(Boolean) : [],
+    source,
+    ...(Number.isFinite(trackCount) && trackCount >= 0 ? { trackCount } : {}),
+    ...(boundedSharedString(value.creatorNickname) ? { creatorNickname: boundedSharedString(value.creatorNickname) } : {})
+  };
+}
+
+function sanitizeSharedTombstones(value, ids) {
+  const tombstones = value && typeof value === "object" ? value : {};
+  const playlistSongs = {};
+  if (tombstones.playlistSongs && typeof tombstones.playlistSongs === "object" && !Array.isArray(tombstones.playlistSongs)) {
+    let count = 0;
+    let inspected = 0;
+    for (const playlistIdValue in tombstones.playlistSongs) {
+      if (!Object.hasOwn(tombstones.playlistSongs, playlistIdValue)) continue;
+      if (inspected >= MAX_SHARED_PLAYLISTS) break;
+      inspected += 1;
+      const songIdsValue = tombstones.playlistSongs[playlistIdValue];
+      const playlistId = opaqueSharedId(playlistIdValue, "shared_playlist", ids.playlistIds);
+      const songIds = boundedSharedIds(songIdsValue, "shared_song", ids.songIds);
+      if (!playlistId || ["__proto__", "constructor", "prototype"].includes(playlistId) || songIds.length === 0) continue;
+      if (!Object.hasOwn(playlistSongs, playlistId)) {
+        if (count >= MAX_SHARED_PLAYLISTS) continue;
+        playlistSongs[playlistId] = [];
+        count += 1;
+      }
+      playlistSongs[playlistId] = Array.from(new Set([...playlistSongs[playlistId], ...songIds])).slice(0, MAX_SHARED_TOMBSTONES);
+    }
+  }
+  return {
+    playlistIds: boundedSharedIds(tombstones.playlistIds, "shared_playlist", ids.playlistIds),
+    favorites: boundedSharedIds(tombstones.favorites, "shared_song", ids.songIds),
+    playlistSongs
+  };
+}
+
+function sanitizeSharedState(value) {
+  const state = value && typeof value === "object" ? value : {};
+  const ids = { playlistIds: new Map(), songIds: new Map() };
+  const updatedAt = finiteSharedNumber(state.updatedAt);
+  const revision = Number.isSafeInteger(state.revision) && state.revision >= 0 ? state.revision : 0;
+  const lastWriteId = boundedSharedString(state.lastWriteId, 256);
+  return {
+    schemaVersion: 2,
+    revision,
+    playlists: Array.isArray(state.playlists) ? state.playlists.slice(0, MAX_SHARED_PLAYLISTS).map((playlist) => sanitizeSharedPlaylist(playlist, ids)).filter(Boolean) : [],
+    favorites: Array.isArray(state.favorites) ? state.favorites.slice(0, MAX_SHARED_SONGS).map((song) => sanitizeSharedSong(song, ids)).filter(Boolean) : [],
+    tombstones: sanitizeSharedTombstones(state.tombstones, ids),
+    ...(Number.isFinite(updatedAt) && updatedAt > 0 ? { updatedAt } : {}),
+    ...(lastWriteId ? { lastWriteId } : {})
+  };
+}
+
+function emptySharedState() {
+  return sanitizeSharedState({});
+}
+
+function withSharedStateLock(operation) {
+  const previous = sharedStateLockTails.get(statePath) ?? Promise.resolve();
+  const result = previous.then(operation);
+  const tail = result.catch(() => {});
+  sharedStateLockTails.set(statePath, tail);
+  void tail.finally(() => {
+    if (sharedStateLockTails.get(statePath) === tail) sharedStateLockTails.delete(statePath);
+  });
+  return result;
+}
+
+function sharedStateBackupPath() {
+  const timestamp = new Date().toISOString().replaceAll(":", "").replaceAll("-", "");
+  return `${statePath}.bak-${timestamp}`;
+}
+
+async function createSharedStateBackup(source) {
+  const basePath = sharedStateBackupPath();
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
+    const backupPath = attempt === 0 ? basePath : `${basePath}-${attempt}`;
+    try {
+      await writeFile(backupPath, source, { mode: 0o600, flag: "wx" });
+      await chmod(backupPath, 0o600);
+      return backupPath;
+    } catch (error) {
+      if (error?.code === "EEXIST") continue;
+      await rm(backupPath, { force: true }).catch(() => {});
+      throw error;
+    }
+  }
+  throw new Error("unable to create a fresh shared state backup");
+}
+
+async function writeSharedStateAtomically(state) {
+  await mkdir(dirname(statePath), { recursive: true });
+  const temporaryPath = `${statePath}.tmp-${process.pid}-${randomUUID()}`;
   try {
-    return JSON.parse(await readFile(statePath, "utf8"));
+    await writeFile(temporaryPath, JSON.stringify(state, null, 2), { mode: 0o600, flag: "wx" });
+    await chmod(temporaryPath, 0o600);
+    await rename(temporaryPath, statePath);
   } catch (error) {
-    if (error?.code === "ENOENT") return null;
+    await rm(temporaryPath, { force: true }).catch(() => {});
     throw error;
   }
 }
 
-async function writeSharedState(state) {
-  const operation = sharedStateWriteTail.then(async () => {
-    await mkdir(dirname(statePath), { recursive: true });
-    const existing = await readSharedState();
-    const incomingUpdatedAt = Number(state?.updatedAt);
-    const existingUpdatedAt = Number(existing?.updatedAt);
-    if (Number.isFinite(incomingUpdatedAt) && Number.isFinite(existingUpdatedAt) && incomingUpdatedAt < existingUpdatedAt) return;
-    await writeFile(statePath, JSON.stringify({ ...state, savedAt: new Date().toISOString() }, null, 2));
+async function readSharedStateUnlocked({ migrate = true } = {}) {
+  let source;
+  try {
+    source = await readFile(statePath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return { state: emptySharedState(), migrationError: null };
+    throw error;
+  }
+
+  const raw = JSON.parse(source.toString("utf8"));
+  const isVersionTwo = raw?.schemaVersion === 2;
+  const canonical = {
+    ...sanitizeSharedState({
+      playlists: raw?.playlists,
+      favorites: raw?.favorites,
+      tombstones: raw?.tombstones,
+      updatedAt: raw?.updatedAt,
+      revision: isVersionTwo ? raw?.revision : 0,
+      lastWriteId: isVersionTwo ? raw?.lastWriteId : undefined
+    }),
+    savedAt: boundedSharedString(raw?.savedAt) || new Date().toISOString()
+  };
+  const canonicalJson = JSON.stringify(canonical, null, 2);
+  const alreadyCanonical = isVersionTwo && source.toString("utf8") === canonicalJson;
+  let migrationError = null;
+  if (migrate && !alreadyCanonical) {
+    try {
+      await createSharedStateBackup(source);
+      await writeSharedStateAtomically(canonical);
+    } catch (error) {
+      migrationError = error;
+    }
+  }
+  return { state: canonical, migrationError };
+}
+
+function readSharedState() {
+  return withSharedStateLock(async () => (await readSharedStateUnlocked()).state);
+}
+
+function writeSharedState(state, baseRevision, writeId) {
+  return withSharedStateLock(async () => {
+    const snapshot = await readSharedStateUnlocked();
+    const existing = snapshot.state;
+    const rawWriteId = typeof writeId === "string" ? writeId : "";
+    const normalizedWriteId = rawWriteId.trim();
+    const validWriteId = rawWriteId.length <= 256 && normalizedWriteId.length > 0;
+    if (validWriteId && normalizedWriteId === existing.lastWriteId) {
+      return { written: true, state: existing, idempotent: true };
+    }
+    if (!Number.isSafeInteger(baseRevision) || baseRevision < 0 || baseRevision !== existing.revision) {
+      return { written: false, conflict: true, state: existing };
+    }
+    if (!validWriteId) return { written: false, conflict: false, state: existing };
+    if (snapshot.migrationError) throw snapshot.migrationError;
+    if (existing.revision >= Number.MAX_SAFE_INTEGER) throw new Error("shared state revision exhausted");
+    const persisted = {
+      ...sanitizeSharedState(state),
+      revision: existing.revision + 1,
+      lastWriteId: normalizedWriteId,
+      savedAt: new Date().toISOString()
+    };
+    await writeSharedStateAtomically(persisted);
+    return { written: true, conflict: false, state: persisted, idempotent: false };
   });
-  sharedStateWriteTail = operation.catch(() => {});
-  return operation;
 }
 
 	function parseLimit(value, fallback, max) {
@@ -1477,25 +1747,37 @@ app.get("/api/state", async (_req, res) => {
   try {
     res.json({ state: await readSharedState() });
   } catch (error) {
-    res.status(500).json({ error: "state_read_failed", message: errorMessage(error) });
+    reportSharedStateFailure(res, statePath, "read", error);
   }
 });
 
 app.post("/api/state", async (req, res) => {
   try {
-    await writeSharedState(redactSharedState(req.body?.state ?? req.body ?? {}) ?? {});
-    res.json({ ok: true });
+    const result = await writeSharedState(
+      req.body?.state ?? {},
+      req.body?.baseRevision,
+      req.body?.writeId
+    );
+    if (!result.written && result.conflict) {
+      res.status(409).json({ error: "state_revision_conflict", message: "共享歌单已有更新，请重新加载后再保存", state: result.state });
+      return;
+    }
+    if (!result.written) {
+      res.status(400).json({ error: "state_write_id_invalid", message: "writeId must be a non-empty string of at most 256 characters", state: result.state });
+      return;
+    }
+    res.json({ ok: true, state: result.state });
   } catch (error) {
-    res.status(500).json({ error: "state_write_failed", message: errorMessage(error) });
+    reportSharedStateFailure(res, statePath, "write", error);
   }
 });
 
 app.delete("/api/state", async (_req, res) => {
   try {
-    await rm(statePath, { force: true });
+    await withSharedStateLock(() => rm(statePath, { force: true }));
     res.json({ ok: true });
   } catch (error) {
-    res.status(500).json({ error: "state_delete_failed", message: errorMessage(error) });
+    reportSharedStateFailure(res, statePath, "delete", error);
   }
 });
 
@@ -1998,6 +2280,18 @@ if (dev) {
     res.sendFile(resolve(__dirname, "dist/index.html"));
   });
 }
+
+app.use((error, _req, res, next) => {
+  if (error?.status === 413 || error?.type === "entity.too.large") {
+    res.status(413).json({ error: "payload_too_large", message: "请求数据过大" });
+    return;
+  }
+  if (error?.status === 400 && error?.type === "entity.parse.failed") {
+    res.status(400).json({ error: "invalid_json", message: "请求数据格式无效" });
+    return;
+  }
+  next(error);
+});
 
 return app;
 }

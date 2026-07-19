@@ -29,6 +29,7 @@ import { ChangeEvent, FormEvent, MouseEvent, useCallback, useEffect, useMemo, us
 import Modal from "./components/Modal";
 import Player from "./components/Player";
 import SongRow from "./components/SongRow";
+import { applySharedTombstoneClears, deriveSharedTombstoneClears } from "./lib/shared-state";
 import {
   checkProxy,
   fetchNeteaseHome,
@@ -55,22 +56,30 @@ import { applyDesktopUpdate, CURRENT_VERSION, fetchLatestUpdate, UPDATE_CHECK_IN
 import type { LatestUpdate } from "./lib/update";
 import {
   deleteLocalFile,
+  deriveSharedTombstones,
   downloadJson,
+  downloadSongKey,
   hydrateLocalSongs,
   loadLocalFile,
   loadSharedState,
   loadState,
   makeBackup,
+  mergeSharedState,
   mergeStates,
+  normalizeState,
+  replaceSharedState,
   restoreBackup,
   saveLocalFile,
   saveSharedState,
   saveState,
+  SharedStateConflictError,
+  sharedStateSignature,
   songKey,
+  toSharedState,
   validateBackup
 } from "./lib/storage";
 import { FAVORITES_ID, RECENT_HISTORY_LIMIT, cover, recommendedKeywords } from "./data/seed";
-import type { AccountState, BackupPreview, LyricSource, PersistedState, PlayQuality, Playlist, ProgressStyle, Song, Theme } from "./types";
+import type { AccountState, BackupPreview, LyricSource, PersistedState, PlayQuality, Playlist, ProgressStyle, SharedState, SharedTombstones, Song, Theme } from "./types";
 
 type Tab = "home" | "search" | "mine";
 type PlayMode = "sequence" | "repeat" | "shuffle";
@@ -79,6 +88,22 @@ type HomeData = {
   hotSongs: Song[];
   recommendedPlaylists: Playlist[];
 };
+
+type PendingSharedWrite = {
+  state: SharedState;
+  baseRevision: number;
+  writeId: string;
+  tombstoneClears: SharedTombstones;
+};
+
+function createOpaqueSharedId(prefix: "shared-write" | "shared_song" | "shared_playlist") {
+  const separator = prefix === "shared-write" ? "-" : "_";
+  return `${prefix}${separator}${globalThis.crypto?.randomUUID?.() ?? Math.random().toString(36).slice(2)}`;
+}
+
+function createSharedWriteId() {
+  return createOpaqueSharedId("shared-write");
+}
 
 const FLAC_PAUSED_REFRESH_MS = 6 * 60 * 1000;
 const AUDIO_FADE_DURATION_MS = 180;
@@ -131,6 +156,7 @@ function createLocalSong(file: File, index: number): Song {
   const localKey = `local_${file.name}_${file.lastModified}_${file.size}_${index}`;
   return {
     id: localKey,
+    sharedId: createOpaqueSharedId("shared_song"),
     name: file.name.replace(/\.[^.]+$/, ""),
     artist: "本地文件",
     url: URL.createObjectURL(file),
@@ -187,6 +213,20 @@ function preserveDownloadedCache(existing: Song, incoming: Song) {
   };
 }
 
+function preferDownloadedCache(song: Song, cached: Song | undefined) {
+  const key = cached ? downloadCacheKey(cached) : "";
+  if (!cached || !key) return song;
+  return {
+    ...song,
+    name: song.name.replace(/（需重新导入）$/, ""),
+    localKey: key,
+    url: cached.url.startsWith("blob:") ? cached.url : `local-file:${key}`,
+    needsImport: false,
+    remotePlayable: song.remotePlayable || cached.remotePlayable,
+    verifiedPlayable: song.verifiedPlayable || cached.verifiedPlayable
+  };
+}
+
 function remoteCopyAfterDownloadDeleted(song: Song) {
   const next: Song = {
     ...song,
@@ -209,21 +249,17 @@ function allLibrarySongs(playlists: Playlist[], history: Song[]) {
   return uniqueSongs([...playlists.flatMap((playlist) => playlist.songs), ...history]);
 }
 
-function stateContentScore(state: PersistedState) {
+function stateContentScore(state: Pick<SharedState, "playlists" | "favorites">) {
   return state.playlists.reduce((total, playlist) => total + playlist.songs.length, 0) +
-    state.favorites.length +
-    state.downloadHistory.length +
-    state.history.length +
-    state.queue.length;
+    state.favorites.length;
 }
 
-function shouldMergeSharedState(localState: PersistedState, sharedState: PersistedState) {
-  const localScore = stateContentScore(localState);
+function shouldMergeSharedState(localState: PersistedState, sharedState: SharedState) {
+  const localScore = stateContentScore(toSharedState(localState));
   const sharedScore = stateContentScore(sharedState);
   if (!localScore || sharedScore >= localScore) return true;
   const sharedLooksEmpty = sharedState.playlists.every((playlist) => playlist.songs.length === 0) &&
-    sharedState.favorites.length === 0 &&
-    sharedState.downloadHistory.length === 0;
+    sharedState.favorites.length === 0;
   if (sharedLooksEmpty) return false;
   return sharedScore >= Math.max(3, Math.floor(localScore * 0.5));
 }
@@ -300,7 +336,6 @@ export default function App() {
   const [restorePreview, setRestorePreview] = useState<BackupPreview | null>(null);
   const [restoreBusy, setRestoreBusy] = useState(false);
   const [stateHydrated, setStateHydrated] = useState(false);
-  const [objectUrls, setObjectUrls] = useState<string[]>([]);
   const [floatingLyric, setFloatingLyric] = useState(false);
   const [lyricsLoadingKey, setLyricsLoadingKey] = useState("");
   const [sleepTimerUntil, setSleepTimerUntil] = useState<number | null>(null);
@@ -311,10 +346,23 @@ export default function App() {
   const coverInputRef = useRef<HTMLInputElement | null>(null);
   const searchRunRef = useRef(0);
   const sharedStateReadyRef = useRef(false);
-  const sharedDataRefsRef = useRef<unknown[]>([]);
-  const latestSharedStateRef = useRef<PersistedState | null>(null);
-  const sharedSettingsTimerRef = useRef<number | null>(null);
-  const sharedStateWriterRef = useRef<ReturnType<typeof createSharedStateWriter> | null>(null);
+  const initialSharedState = useMemo(() => toSharedState(initial), [initial]);
+  const sharedStateSignatureRef = useRef(sharedStateSignature(initialSharedState));
+  const sharedProjectionRef = useRef(initialSharedState);
+  const sharedRevisionRef = useRef(initial.sharedRevision ?? 0);
+  const sharedTombstonesRef = useRef(initialSharedState.tombstones);
+  const sharedTombstoneClearsRef = useRef<SharedTombstones>(initial.sharedTombstoneClears ?? { playlistIds: [], favorites: [], playlistSongs: {} });
+  const latestSharedStateRef = useRef<PendingSharedWrite | null>(null);
+  const sharedStateDirtyRef = useRef(Boolean(initial.sharedSyncPending));
+  const sharedRemoteKnownRef = useRef(false);
+  const retrySharedStateLoadRef = useRef<() => void>(() => {});
+  const lastLifecycleFlushVersionRef = useRef<number | null>(null);
+  const lastStateUpdatedAtRef = useRef(initial.updatedAt ?? 0);
+  const latestPersistedStateRef = useRef<PersistedState>(initial);
+  const persistedStateVersionRef = useRef(0);
+  const lastPersistedSnapshotRef = useRef<PersistedState | null>(null);
+  const sharedWriteErrorRef = useRef<(error: unknown, write: PendingSharedWrite) => void>(() => {});
+  const sharedStateWriterRef = useRef<ReturnType<typeof createSharedStateWriter<PendingSharedWrite>> | null>(null);
   const homeRequestRef = useRef<{ id: number; controller: AbortController | null }>({ id: 0, controller: null });
   const queueRef = useRef(queue);
   const queueIndexRef = useRef(queueIndex);
@@ -323,23 +371,166 @@ export default function App() {
   const positionRef = useRef(position);
   const androidPlaybackPushRef = useRef({ key: "", playing: false, duration: 0, statusNotificationEnabled: false, lastPosition: -1, lastPushAt: 0 });
   const audioAttemptRef = useRef<{ song: Song; source: Song[] } | null>(null);
+  const audioMutationOwnerRef = useRef(0);
   const playRequestRef = useRef(0);
+  const playbackPauseRef = useRef(0);
   const audioRetryRef = useRef<{ key: string; at: number } | null>(null);
   const pausedPlaybackRef = useRef<{ key: string; at: number } | null>(null);
   const playbackRefreshRef = useRef(false);
   const autoPlayCheckedRef = useRef(false);
   const cacheInFlightRef = useRef(new Map<string, Promise<Song>>());
+  const downloadCacheRef = useRef(new Map<string, Song>());
+  const objectUrlsRef = useRef(new Set<string>());
+  const hydratedObjectUrlsRef = useRef(new Set<string>());
   const updateCheckRef = useRef<AbortController | null>(null);
   const lyricsAutoFetchRef = useRef(new Set<string>());
   const audioFadeRef = useRef<{ frame: number; resolve: () => void } | null>(null);
 
+  const persistedSnapshot = useMemo<PersistedState>(() => ({
+    playlists,
+    favorites,
+    history,
+    downloadHistory,
+    queue: keepQueueOnExit ? queue : [],
+    queueIndex: keepQueueOnExit ? queueIndex : -1,
+    searchHistory,
+    theme,
+    playQuality,
+    downloadQuality,
+    progressStyle,
+    lyricSource,
+    autoLyricsEnabled,
+    playbackSpeed,
+    fadeEnabled,
+    autoCacheEnabled,
+    keepQueueOnExit,
+    autoPlayOnStart,
+    autoUpdateEnabled,
+    androidStatusNotificationEnabled,
+    sharedSyncPending: sharedStateDirtyRef.current,
+    sharedRevision: sharedRevisionRef.current,
+    sharedTombstones: sharedTombstonesRef.current,
+    sharedTombstoneClears: sharedTombstoneClearsRef.current,
+    updatedAt: lastStateUpdatedAtRef.current || undefined
+  }), [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
+  if (lastPersistedSnapshotRef.current !== persistedSnapshot) {
+    lastPersistedSnapshotRef.current = persistedSnapshot;
+    latestPersistedStateRef.current = persistedSnapshot;
+    persistedStateVersionRef.current += 1;
+  }
+
   const currentSong = queue[queueIndex] ?? null;
+  downloadCacheRef.current = new Map(
+    [
+      ...playlists.flatMap((playlist) => playlist.songs),
+      ...favorites,
+      ...history,
+      ...queue,
+      ...downloadHistory
+    ]
+      .filter(isDownloadCachedSong)
+      .map((song) => [downloadSongKey(song), song])
+  );
+  const withDownloadedCache = useCallback((song: Song) => (
+    preferDownloadedCache(song, downloadCacheRef.current.get(downloadSongKey(song)))
+  ), []);
+  const trackObjectUrl = useCallback((url: string) => {
+    if (url.startsWith("blob:")) objectUrlsRef.current.add(url);
+    return url;
+  }, []);
+  const replaceObjectUrls = useCallback((urls: string[]) => {
+    hydratedObjectUrlsRef.current.forEach((url) => {
+      URL.revokeObjectURL(url);
+      objectUrlsRef.current.delete(url);
+    });
+    hydratedObjectUrlsRef.current = new Set(urls);
+    urls.forEach((url) => objectUrlsRef.current.add(url));
+  }, []);
+  const cancelPendingPlayback = useCallback(() => {
+    playRequestRef.current += 1;
+    playbackPauseRef.current += 1;
+    playingRef.current = false;
+  }, []);
   if (!sharedStateWriterRef.current) {
-    sharedStateWriterRef.current = createSharedStateWriter(
-      (state, options) => saveSharedState(state, options),
-      () => setToast("共享歌单保存失败")
+    sharedStateWriterRef.current = createSharedStateWriter<PendingSharedWrite>(
+      async (write, options) => {
+        const saved = await saveSharedState(write.state, {
+          ...options,
+          baseRevision: write.baseRevision,
+          writeId: write.writeId
+        });
+        sharedRevisionRef.current = saved.revision;
+        sharedTombstonesRef.current = applySharedTombstoneClears(saved.tombstones, sharedTombstoneClearsRef.current);
+        if (latestSharedStateRef.current?.writeId === write.writeId) {
+          const tombstoneClears = applySharedTombstoneClears(sharedTombstoneClearsRef.current, write.tombstoneClears);
+          sharedTombstoneClearsRef.current = tombstoneClears;
+          sharedStateDirtyRef.current = false;
+          const persisted = {
+            ...latestPersistedStateRef.current,
+            sharedSyncPending: false,
+            sharedRevision: saved.revision,
+            sharedTombstones: sharedTombstonesRef.current,
+            sharedTombstoneClears: tombstoneClears
+          };
+          latestPersistedStateRef.current = persisted;
+          try {
+            saveState(persisted);
+          } catch {
+            // A stale pending marker only causes a safe duplicate retry on the next launch.
+          }
+        }
+      },
+      (error, write) => sharedWriteErrorRef.current(error, write)
     );
   }
+  sharedWriteErrorRef.current = (error, failedWrite) => {
+    const latestWrite = latestSharedStateRef.current;
+    if (latestWrite && latestWrite.writeId !== failedWrite.writeId) return;
+    if (error instanceof SharedStateConflictError) {
+      const tombstoneClears = sharedTombstoneClearsRef.current;
+      const remoteState = {
+        ...error.state,
+        tombstones: applySharedTombstoneClears(error.state.tombstones, tombstoneClears)
+      };
+      const reconciled = mergeSharedState(latestPersistedStateRef.current, remoteState);
+      const updatedAt = Math.max(Date.now(), lastStateUpdatedAtRef.current + 1, error.state.updatedAt ?? 0);
+      const persisted: PersistedState = {
+        ...reconciled,
+        sharedSyncPending: true,
+        sharedRevision: error.state.revision,
+        sharedTombstones: reconciled.sharedTombstones,
+        sharedTombstoneClears: tombstoneClears,
+        updatedAt
+      };
+      const state = toSharedState(persisted);
+      const retry: PendingSharedWrite = {
+        state,
+        baseRevision: error.state.revision,
+        writeId: createSharedWriteId(),
+        tombstoneClears
+      };
+      lastStateUpdatedAtRef.current = updatedAt;
+      sharedRevisionRef.current = error.state.revision;
+      sharedTombstonesRef.current = state.tombstones;
+      sharedProjectionRef.current = state;
+      sharedStateSignatureRef.current = sharedStateSignature(state);
+      latestSharedStateRef.current = retry;
+      latestPersistedStateRef.current = persisted;
+      persistedStateVersionRef.current += 1;
+      setPlaylists(persisted.playlists);
+      setFavorites(persisted.favorites);
+      try {
+        saveState(persisted);
+      } catch {
+        setToast("浏览器存储空间不足，本次修改可能不会保存");
+        return;
+      }
+      sharedStateWriterRef.current!.enqueue(retry);
+      return;
+    }
+    const detail = error instanceof Error ? error.message : String(error);
+    setToast(detail.startsWith("共享歌单保存失败") ? detail : `共享歌单保存失败：${detail}`);
+  };
   const favoriteKeys = useMemo(() => new Set(favorites.map(songKey)), [favorites]);
   const activePlaylist =
     playlists.find((playlist) => playlist.id === activePlaylistId) ??
@@ -423,13 +614,19 @@ export default function App() {
 
   const prewarmRemoteSongs = useCallback((songs: Song[], limit = 4) => {
     const currentKey = currentSong ? songKey(currentSong) : "";
-    const targets = songs.filter((song) => songKey(song) !== currentKey);
+    const targets = songs
+      .map(withDownloadedCache)
+      .filter((song) => !song.localKey && songKey(song) !== currentKey);
     if (!targets.length) return;
     void prewarmFlacSongs(targets, limit, (original, resolved) => {
       const originalKey = songKey(original);
       const replaceResolved = (item: Song) => songKey(item) === originalKey ? preserveDownloadedCache(item, resolved) : item;
       setRemoteResults((items) => items.map(replaceResolved));
-      setQueue((items) => items.map(replaceResolved));
+      setQueue((items) => {
+        const activeSong = audioAttemptRef.current?.song ?? items[queueIndexRef.current];
+        const activeKey = activeSong ? songKey(activeSong) : "";
+        return items.map((item) => songKey(item) === originalKey && originalKey !== activeKey ? replaceResolved(item) : item);
+      });
       setHistory((items) => items.map(replaceResolved));
       setDownloadHistory((items) => items.map(replaceResolved));
       setFavorites((items) => items.map(replaceResolved));
@@ -443,7 +640,7 @@ export default function App() {
         }))
       }));
     });
-  }, [currentSong]);
+  }, [currentSong, withDownloadedCache]);
 
   useEffect(() => {
     queueRef.current = queue;
@@ -520,11 +717,38 @@ export default function App() {
   }, [theme]);
 
   useEffect(() => {
-    const sharedDataRefs = [playlists, favorites, history, downloadHistory, queue, queueIndex, searchHistory];
-    const previousSharedDataRefs = sharedDataRefsRef.current;
-    const sharedDataChanged = previousSharedDataRefs.length > 0
-      && sharedDataRefs.some((value, index) => value !== previousSharedDataRefs[index]);
-    sharedDataRefsRef.current = sharedDataRefs;
+    const projected = toSharedState({
+      playlists,
+      favorites,
+      sharedRevision: sharedRevisionRef.current,
+      sharedTombstones: sharedTombstonesRef.current,
+      updatedAt: lastStateUpdatedAtRef.current || undefined
+    });
+    const tombstones = deriveSharedTombstones(sharedProjectionRef.current, projected, sharedTombstonesRef.current);
+    const tombstoneClears = deriveSharedTombstoneClears(
+      sharedTombstoneClearsRef.current,
+      sharedProjectionRef.current.tombstones,
+      tombstones
+    );
+    const sharedCandidate = { ...projected, tombstones };
+    const signature = sharedStateSignature(sharedCandidate);
+    const sharedDataChanged = signature !== sharedStateSignatureRef.current;
+    if (sharedDataChanged) {
+      const updatedAt = Math.max(Date.now(), lastStateUpdatedAtRef.current + 1);
+      lastStateUpdatedAtRef.current = updatedAt;
+      sharedStateSignatureRef.current = signature;
+      sharedTombstonesRef.current = tombstones;
+      sharedTombstoneClearsRef.current = tombstoneClears;
+      sharedProjectionRef.current = sharedCandidate;
+      latestSharedStateRef.current = {
+        state: { ...sharedCandidate, updatedAt },
+        baseRevision: sharedRevisionRef.current,
+        writeId: createSharedWriteId(),
+        tombstoneClears
+      };
+      sharedStateDirtyRef.current = true;
+      lastLifecycleFlushVersionRef.current = null;
+    }
     const state: PersistedState = {
       playlists,
       favorites,
@@ -546,97 +770,199 @@ export default function App() {
       autoPlayOnStart,
       autoUpdateEnabled,
       androidStatusNotificationEnabled,
-      updatedAt: Date.now()
+      sharedSyncPending: sharedStateDirtyRef.current,
+      sharedRevision: sharedRevisionRef.current,
+      sharedTombstones: sharedTombstonesRef.current,
+      sharedTombstoneClears: sharedTombstoneClearsRef.current,
+      updatedAt: lastStateUpdatedAtRef.current || undefined
     };
-    latestSharedStateRef.current = state;
     try {
       saveState(state);
+      latestPersistedStateRef.current = state;
+      persistedStateVersionRef.current += 1;
     } catch {
       setToast("浏览器存储空间不足，本次修改可能不会保存");
       return;
     }
-    if (!sharedStateReadyRef.current) return;
-    if (sharedDataChanged) {
-      sharedStateWriterRef.current!.enqueue(state);
-      return;
+    if (sharedDataChanged && sharedRemoteKnownRef.current && latestSharedStateRef.current) {
+      sharedStateWriterRef.current!.enqueue(latestSharedStateRef.current);
     }
-    const timer = window.setTimeout(() => {
-      if (sharedSettingsTimerRef.current === timer) sharedSettingsTimerRef.current = null;
-      sharedStateWriterRef.current!.enqueue(state);
-    }, 250);
-    sharedSettingsTimerRef.current = timer;
-    return () => {
-      window.clearTimeout(timer);
-      if (sharedSettingsTimerRef.current === timer) sharedSettingsTimerRef.current = null;
-    };
-  }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
+  }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, stateHydrated, theme]);
 
   useEffect(() => {
-    const flushLatestSharedState = () => {
-      if (!sharedStateReadyRef.current || !latestSharedStateRef.current || sharedSettingsTimerRef.current === null) return;
-      window.clearTimeout(sharedSettingsTimerRef.current);
-      sharedSettingsTimerRef.current = null;
-      sharedStateWriterRef.current!.flush(latestSharedStateRef.current);
+    const retryLatestSharedState = (keepalive: boolean) => {
+      if (!sharedRemoteKnownRef.current) {
+        if (!keepalive) retrySharedStateLoadRef.current();
+        return;
+      }
+      const latest = latestSharedStateRef.current;
+      if (!sharedStateReadyRef.current || !sharedStateDirtyRef.current || !latest) return;
+      if (!keepalive) {
+        lastLifecycleFlushVersionRef.current = null;
+        sharedStateWriterRef.current!.enqueue(latest);
+        return;
+      }
+      const version = latest.state.updatedAt ?? 0;
+      if (lastLifecycleFlushVersionRef.current === version) return;
+      lastLifecycleFlushVersionRef.current = version;
+      sharedStateWriterRef.current!.flush(latest);
     };
     const handleVisibilityChange = () => {
-      if (document.visibilityState === "hidden") flushLatestSharedState();
+      retryLatestSharedState(document.visibilityState === "hidden");
     };
+    const handlePageHide = () => retryLatestSharedState(true);
+    const handleOnline = () => retryLatestSharedState(false);
     document.addEventListener("visibilitychange", handleVisibilityChange);
-    window.addEventListener("pagehide", flushLatestSharedState);
+    window.addEventListener("pagehide", handlePageHide);
+    window.addEventListener("online", handleOnline);
     return () => {
       document.removeEventListener("visibilitychange", handleVisibilityChange);
-      window.removeEventListener("pagehide", flushLatestSharedState);
+      window.removeEventListener("pagehide", handlePageHide);
+      window.removeEventListener("online", handleOnline);
     };
   }, []);
 
   useEffect(() => {
     let live = true;
-    const localState: PersistedState = { playlists, favorites, history, downloadHistory, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart, autoUpdateEnabled, androidStatusNotificationEnabled, updatedAt: initial.updatedAt };
-    void loadSharedState()
-      .then(async (shared) => {
-        const merged = shared && shouldMergeSharedState(localState, shared) ? mergeStates(localState, shared) : localState;
-        return hydrateLocalSongs(merged);
-      })
-      .then((result) => {
-        if (!live) return;
-        setPlaylists(result.state.playlists);
-        setFavorites(result.state.favorites);
-        setHistory(result.state.history);
-        setDownloadHistory(result.state.downloadHistory);
-        setQueue(result.state.queue);
-        setQueueIndex(result.state.queueIndex);
-        setSearchHistory(result.state.searchHistory);
-        setTheme(result.state.theme);
-        setPlayQuality(result.state.playQuality);
-        setDownloadQuality(result.state.downloadQuality);
-        setProgressStyle(result.state.progressStyle);
-        setLyricSource(result.state.lyricSource);
-        setAutoLyricsEnabled(result.state.autoLyricsEnabled);
-        setPlaybackSpeed(result.state.playbackSpeed);
-        setFadeEnabled(result.state.fadeEnabled);
-        setAutoCacheEnabled(result.state.autoCacheEnabled);
-        setKeepQueueOnExit(result.state.keepQueueOnExit);
-        setAutoPlayOnStart(result.state.autoPlayOnStart);
-        setAutoUpdateEnabled(result.state.autoUpdateEnabled);
-        setAndroidStatusNotificationEnabled(result.state.androidStatusNotificationEnabled);
-        setObjectUrls((items) => {
-          items.forEach(URL.revokeObjectURL);
-          return result.urls;
-        });
-        saveState(result.state);
-        sharedStateReadyRef.current = true;
-        setStateHydrated(true);
-      })
-      .catch(() => {
-        if (live) {
+    let loadInFlight = false;
+    const emptySharedState = toSharedState(normalizeState(null));
+    const mergeForHydration = (localState: PersistedState, shared: SharedState | null) => {
+      if (!shared) return localState;
+      const remoteState = {
+        ...shared,
+        tombstones: applySharedTombstoneClears(shared.tombstones, localState.sharedTombstoneClears)
+      };
+      const remoteIsCompleteEnough = shouldMergeSharedState(localState, remoteState);
+      const localUpdatedAt = localState.updatedAt ?? 0;
+      const remoteUpdatedAt = remoteState.updatedAt ?? 0;
+      if (!localState.sharedSyncPending && localUpdatedAt > 0 && remoteUpdatedAt >= localUpdatedAt && remoteIsCompleteEnough) {
+        return replaceSharedState(localState, remoteState);
+      }
+      return mergeSharedState(localState, remoteState);
+    };
+    const revokeHydrationUrls = (urls: string[]) => urls.forEach((url) => URL.revokeObjectURL(url));
+    const hydrateLatestState = async (shared: SharedState | null) => {
+      while (live) {
+        const version = persistedStateVersionRef.current;
+        const merged = mergeForHydration(latestPersistedStateRef.current, shared);
+        const result = await hydrateLocalSongs(merged);
+        if (!live) {
+          revokeHydrationUrls(result.urls);
+          return null;
+        }
+        if (version === persistedStateVersionRef.current) return result;
+        revokeHydrationUrls(result.urls);
+      }
+      return null;
+    };
+    const loadAndHydrateSharedState = () => {
+      if (!live || loadInFlight) return;
+      loadInFlight = true;
+      void loadSharedState()
+        .then(async (shared) => {
+          const baseline = shared ?? emptySharedState;
+          return { baseline, result: await hydrateLatestState(shared) };
+        })
+        .then(({ baseline, result }) => {
+          if (!live || !result) {
+            if (result) revokeHydrationUrls(result.urls);
+            return;
+          }
+          const projected = toSharedState(result.state);
+          const tombstoneClears = result.state.sharedTombstoneClears ?? { playlistIds: [], favorites: [], playlistSongs: {} };
+          const needsInitialSync = sharedStateSignature(projected) !== sharedStateSignature(baseline);
+          sharedRevisionRef.current = baseline.revision;
+          sharedTombstonesRef.current = projected.tombstones;
+          sharedTombstoneClearsRef.current = tombstoneClears;
+          sharedRemoteKnownRef.current = true;
+          sharedStateDirtyRef.current = Boolean(result.state.sharedSyncPending || needsInitialSync);
+          lastStateUpdatedAtRef.current = Math.max(lastStateUpdatedAtRef.current, result.state.updatedAt ?? 0);
+          if (sharedStateDirtyRef.current) {
+            lastStateUpdatedAtRef.current = Math.max(Date.now(), lastStateUpdatedAtRef.current + 1, baseline.updatedAt ?? 0);
+          }
+          const hydratedState: PersistedState = {
+            ...result.state,
+            sharedSyncPending: sharedStateDirtyRef.current,
+            sharedRevision: baseline.revision,
+            sharedTombstones: projected.tombstones,
+            sharedTombstoneClears: tombstoneClears,
+            updatedAt: lastStateUpdatedAtRef.current || undefined
+          };
+          const candidate = { ...toSharedState(hydratedState), updatedAt: hydratedState.updatedAt };
+          sharedProjectionRef.current = candidate;
+          sharedStateSignatureRef.current = sharedStateSignature(candidate);
+          latestSharedStateRef.current = sharedStateDirtyRef.current ? {
+            state: candidate,
+            baseRevision: baseline.revision,
+            writeId: createSharedWriteId(),
+            tombstoneClears
+          } : null;
+          setPlaylists(result.state.playlists);
+          setFavorites(result.state.favorites);
+          setHistory(result.state.history);
+          setDownloadHistory(result.state.downloadHistory);
+          setQueue(result.state.queue);
+          setQueueIndex(result.state.queueIndex);
+          setSearchHistory(result.state.searchHistory);
+          setTheme(result.state.theme);
+          setPlayQuality(result.state.playQuality);
+          setDownloadQuality(result.state.downloadQuality);
+          setProgressStyle(result.state.progressStyle);
+          setLyricSource(result.state.lyricSource);
+          setAutoLyricsEnabled(result.state.autoLyricsEnabled);
+          setPlaybackSpeed(result.state.playbackSpeed);
+          setFadeEnabled(result.state.fadeEnabled);
+          setAutoCacheEnabled(result.state.autoCacheEnabled);
+          setKeepQueueOnExit(result.state.keepQueueOnExit);
+          setAutoPlayOnStart(result.state.autoPlayOnStart);
+          setAutoUpdateEnabled(result.state.autoUpdateEnabled);
+          setAndroidStatusNotificationEnabled(result.state.androidStatusNotificationEnabled);
+          replaceObjectUrls(result.urls);
+          saveState(hydratedState);
+          latestPersistedStateRef.current = hydratedState;
           sharedStateReadyRef.current = true;
           setStateHydrated(true);
-        }
-      });
+          if (sharedStateDirtyRef.current && latestSharedStateRef.current) {
+            sharedStateWriterRef.current!.enqueue(latestSharedStateRef.current);
+          }
+        })
+        .catch(() => {
+          if (live) {
+            const localState = latestPersistedStateRef.current;
+            const localSharedState = toSharedState(localState);
+            sharedStateSignatureRef.current = sharedStateSignature(localSharedState);
+            sharedProjectionRef.current = localSharedState;
+            sharedRevisionRef.current = localState.sharedRevision ?? 0;
+            sharedTombstonesRef.current = localSharedState.tombstones;
+            sharedTombstoneClearsRef.current = localState.sharedTombstoneClears ?? { playlistIds: [], favorites: [], playlistSongs: {} };
+            sharedRemoteKnownRef.current = false;
+            sharedStateDirtyRef.current = Boolean(localState.sharedSyncPending);
+            latestSharedStateRef.current = sharedStateDirtyRef.current ? {
+              state: localSharedState,
+              baseRevision: localState.sharedRevision ?? 0,
+              writeId: createSharedWriteId(),
+              tombstoneClears: sharedTombstoneClearsRef.current
+            } : null;
+            sharedStateReadyRef.current = true;
+            setStateHydrated(true);
+          }
+        })
+        .finally(() => {
+          loadInFlight = false;
+        });
+    };
+    retrySharedStateLoadRef.current = loadAndHydrateSharedState;
+    loadAndHydrateSharedState();
     return () => {
       live = false;
-      objectUrls.forEach(URL.revokeObjectURL);
+      if (retrySharedStateLoadRef.current === loadAndHydrateSharedState) retrySharedStateLoadRef.current = () => {};
     };
+  }, [replaceObjectUrls]);
+
+  useEffect(() => () => {
+    objectUrlsRef.current.forEach(URL.revokeObjectURL);
+    objectUrlsRef.current.clear();
+    hydratedObjectUrlsRef.current.clear();
   }, []);
 
   const refreshHome = useCallback(async (refresh = 0) => {
@@ -699,6 +1025,7 @@ export default function App() {
     const delay = sleepTimerUntil - Date.now();
     if (delay <= 0) {
       audioRef.current?.pause();
+      cancelPendingPlayback();
       setPlaying(false);
       setSleepTimerUntil(null);
       setToast("定时关闭已执行");
@@ -706,12 +1033,13 @@ export default function App() {
     }
     const timer = window.setTimeout(() => {
       audioRef.current?.pause();
+      cancelPendingPlayback();
       setPlaying(false);
       setSleepTimerUntil(null);
       setToast("定时关闭已执行");
     }, delay);
     return () => window.clearTimeout(timer);
-  }, [sleepTimerUntil]);
+  }, [cancelPendingPlayback, sleepTimerUntil]);
 
   useEffect(() => {
     if (!("mediaSession" in navigator) || !currentSong) return;
@@ -726,6 +1054,10 @@ export default function App() {
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio || !currentSong) return;
+    if (currentSong.localKey && !currentSong.url.startsWith("blob:")) {
+      if (!playing) audio.pause();
+      return;
+    }
     const targetSrc = currentSong.url ? new URL(currentSong.url, window.location.href).href : "";
     if (targetSrc && audio.src !== targetSrc) {
       audio.src = currentSong.url;
@@ -746,18 +1078,22 @@ export default function App() {
   }, [currentSong, playing]);
 
   const resolvePlayable = useCallback(async (song: Song, options: { refresh?: boolean; fallbackToMp3?: boolean } = {}): Promise<Song> => {
-    if (song.localKey) {
-      const blob = await loadLocalFile(song.localKey);
+    const preferred = withDownloadedCache(song);
+    if (preferred.localKey) {
+      if (!options.refresh && preferred.url.startsWith("blob:")) return preferred;
+      const blob = await loadLocalFile(preferred.localKey);
       if (!blob) throw new Error("本地文件不在当前浏览器，请重新导入");
-      return { ...song, url: URL.createObjectURL(blob), needsImport: false };
+      const url = trackObjectUrl(URL.createObjectURL(blob));
+      return { ...preferred, url, needsImport: false, name: preferred.name.replace(/（需重新导入）$/, "") };
     }
-    if (!options.refresh && verifiedUrlMatchesQuality(song, playQuality)) return song;
-    if (song.source === "netease") return resolveNeteaseSong(song, playQuality);
-    if (song.source === "bili") return resolveBiliSong(song);
-    if (song.source === "flac") return resolveFlacSong(song, { refresh: options.refresh ?? false, fallbackToMp3: options.fallbackToMp3 ?? false });
-    if (song.url && !song.url.startsWith("local-file:")) return song;
+    if (!options.refresh && verifiedUrlMatchesQuality(preferred, playQuality)) return preferred;
+    if (preferred.source === "netease") return resolveNeteaseSong(preferred, playQuality);
+    if (preferred.source === "bili") return resolveBiliSong(preferred);
+    if (preferred.source === "flac") return resolveFlacSong(preferred, { refresh: options.refresh ?? false, fallbackToMp3: options.fallbackToMp3 ?? false });
+    if (preferred.url && !preferred.url.startsWith("local-file:")) return preferred;
+    if (preferred.source === "local" && preferred.needsImport) throw new Error("本地文件不在当前浏览器，请重新导入");
     throw new Error("当前歌曲没有可播放链接");
-  }, [playQuality]);
+  }, [playQuality, trackObjectUrl, withDownloadedCache]);
 
   const cancelAudioFade = useCallback((audio: HTMLAudioElement | null = audioRef.current) => {
     const active = audioFadeRef.current;
@@ -805,21 +1141,94 @@ export default function App() {
   const playSong = useCallback(async (song: Song, source?: Song[], options: { quiet?: boolean; startAt?: number; refresh?: boolean; fallbackToMp3?: boolean } = {}) => {
     const requestId = playRequestRef.current + 1;
     playRequestRef.current = requestId;
+    const pauseGeneration = playbackPauseRef.current;
+    let playbackAttempted = false;
+    let sourceChanged = false;
+    let previousAttempt: typeof audioAttemptRef.current = null;
+    let previousAudioOwner = audioMutationOwnerRef.current;
+    let previousPlayingIntent = playingRef.current;
+    let previousAudio: { src: string; currentTime: number; paused: boolean; playbackRate: number; volume: number } | null = null;
+    const restorePreviousPlayback = (forcePaused = false) => {
+      cancelAudioFade();
+      if (!playbackAttempted) return;
+      playingRef.current = forcePaused ? false : previousPlayingIntent;
+      audioAttemptRef.current = previousAttempt;
+      audioMutationOwnerRef.current = previousAudioOwner;
+      const audio = audioRef.current;
+      if (!audio || !previousAudio || !sourceChanged) return;
+      if (previousAudio.src) audio.src = previousAudio.src;
+      else {
+        audio.removeAttribute("src");
+        audio.load();
+      }
+      audio.playbackRate = previousAudio.playbackRate;
+      audio.volume = previousAudio.volume;
+      try {
+        audio.currentTime = previousAudio.currentTime;
+      } catch {
+        // The restored source will apply its saved position once metadata is available.
+      }
+      if (!forcePaused && !previousAudio.paused) {
+        void audio.play().catch(() => {
+          playingRef.current = false;
+          setPlaying(false);
+        });
+      } else {
+        audio.pause();
+      }
+    };
     try {
-      const resolved = await resolvePlayable(song, { refresh: options.refresh, fallbackToMp3: options.fallbackToMp3 });
+      const requested = withDownloadedCache(song);
+      const resolved = await resolvePlayable(requested, { refresh: options.refresh, fallbackToMp3: options.fallbackToMp3 });
       if (requestId !== playRequestRef.current) return false;
-      const playable = preserveDownloadedCache(song, resolved);
+      const playable = preserveDownloadedCache(requested, resolved);
       const originalKey = songKey(song);
       const playableKey = songKey(playable);
       const replaceResolved = (item: Song) => songKey(item) === originalKey ? preserveDownloadedCache(item, playable) : item;
-      const nextQueue = playableSongs((source?.length ? source : [playable]).map((item) => songKey(item) === songKey(song) ? playable : item));
+      const nextQueue = playableSongs((source?.length ? source : [playable])
+        .map(withDownloadedCache)
+        .map((item) => songKey(item) === originalKey ? playable : item));
       const nextIndex = Math.max(0, nextQueue.findIndex((item) => songKey(item) === songKey(playable)));
       const audio = audioRef.current;
       const targetSrc = playable.url ? new URL(playable.url, window.location.href).href : "";
       const shouldFade = Boolean(fadeEnabled && audio && !audio.paused && targetSrc && (audio.currentSrc || audio.src) !== targetSrc);
+      if (audio) {
+        previousAudio = {
+          src: audio.currentSrc || audio.src,
+          currentTime: audio.currentTime,
+          paused: audio.paused,
+          playbackRate: audio.playbackRate,
+          volume: audio.volume
+        };
+      }
       if (audio && shouldFade) {
         await fadeAudioVolume(audio, 0);
-        if (requestId !== playRequestRef.current) return false;
+        if (requestId !== playRequestRef.current) {
+          cancelAudioFade(audio);
+          return false;
+        }
+      }
+      previousAttempt = audioAttemptRef.current;
+      previousAudioOwner = audioMutationOwnerRef.current;
+      previousPlayingIntent = playingRef.current;
+      playbackAttempted = true;
+      playingRef.current = true;
+      audioAttemptRef.current = { song: playable, source: nextQueue };
+      audioMutationOwnerRef.current = requestId;
+      const startAt = Math.max(0, options.startAt ?? 0);
+      if (audio) {
+        audio.volume = shouldFade ? 0 : 1;
+        sourceChanged = Boolean(targetSrc && audio.src !== targetSrc);
+        if (sourceChanged) audio.src = playable.url;
+        audio.playbackRate = playbackSpeed;
+        audio.currentTime = startAt;
+        await audio.play();
+      }
+      if (requestId !== playRequestRef.current) {
+        if (audioMutationOwnerRef.current === requestId) {
+          restorePreviousPlayback(pauseGeneration !== playbackPauseRef.current);
+        }
+        return false;
       }
       setRemoteResults((items) => items.map(replaceResolved));
       setFavorites((items) => items.map(replaceResolved));
@@ -847,24 +1256,19 @@ export default function App() {
         return key !== originalKey && key !== playableKey;
       })].slice(0, RECENT_HISTORY_LIMIT));
       setPlaying(true);
-      audioAttemptRef.current = { song: playable, source: nextQueue };
-      if (audio) {
-        const startAt = Math.max(0, options.startAt ?? 0);
-        audio.volume = shouldFade ? 0 : 1;
-        audio.src = playable.url;
-        audio.playbackRate = playbackSpeed;
-        audio.currentTime = startAt;
-        positionRef.current = startAt;
-        setPosition(startAt);
-        await audio.play();
-        if (shouldFade) void fadeAudioVolume(audio, 1);
-      }
+      positionRef.current = startAt;
+      setPosition(startAt);
+      if (audio && shouldFade) void fadeAudioVolume(audio, 1);
       pausedPlaybackRef.current = null;
       return true;
     } catch (error) {
-      if (requestId !== playRequestRef.current) return false;
-      cancelAudioFade();
-      setPlaying(false);
+      if (requestId !== playRequestRef.current) {
+        if (audioMutationOwnerRef.current === requestId) {
+          restorePreviousPlayback(pauseGeneration !== playbackPauseRef.current);
+        }
+        return false;
+      }
+      restorePreviousPlayback();
       if (!options.quiet) {
         const details = error instanceof Error ? `${error.name} ${error.message}` : String(error);
         const message = /NotAllowedError|user did not interact|autoplay/i.test(details)
@@ -874,7 +1278,7 @@ export default function App() {
       }
       return false;
     }
-  }, [cancelAudioFade, fadeAudioVolume, fadeEnabled, playbackSpeed, resolvePlayable]);
+  }, [cancelAudioFade, fadeAudioVolume, fadeEnabled, playbackSpeed, resolvePlayable, withDownloadedCache]);
 
   useEffect(() => {
     if (!stateHydrated || autoPlayCheckedRef.current || !autoPlayOnStart || !currentSong) return;
@@ -883,25 +1287,36 @@ export default function App() {
   }, [autoPlayOnStart, currentSong, playSong, queue, stateHydrated]);
 
   const retryCurrentSongAfterAudioError = useCallback(async () => {
-    if (playbackRefreshRef.current) return;
+    if (playbackRefreshRef.current || !playingRef.current) return;
     const audio = audioRef.current;
     const attempt = audioAttemptRef.current;
-    const song = attempt?.song ?? queueRef.current[queueIndexRef.current];
-    if (!song || song.source !== "flac") return;
+    const queued = queueRef.current[queueIndexRef.current];
+    const attempted = attempt?.song;
+    const candidate = queued && attempted && songKey(queued) === songKey(attempted) ? queued : attempted ?? queued;
+    const song = candidate ? withDownloadedCache(candidate) : null;
+    if (!song || (!song.localKey && song.source !== "flac")) return;
     const resumeAt = Math.max(audio?.currentTime || 0, positionRef.current);
     const retryAt = Math.floor(resumeAt);
     const key = songKey(song);
     if (audioRetryRef.current?.key === key && Math.abs(audioRetryRef.current.at - retryAt) <= 1) return;
     audioRetryRef.current = { key, at: retryAt };
     const source = attempt?.source?.length ? attempt.source : queueRef.current;
-    const fallbackToMp3 = song.audioType === "flac" || song.url.includes("format=flac");
-    const ok = await playSong(song, source, { quiet: true, startAt: resumeAt, refresh: true, fallbackToMp3 });
-    if (!ok) {
-      audioRetryRef.current = null;
-      setPlaying(false);
-      setToast("播放链接已过期，重新获取失败");
+    const localCache = Boolean(song.localKey);
+    const fallbackToMp3 = !localCache && (song.audioType === "flac" || song.url.includes("format=flac"));
+    playbackRefreshRef.current = true;
+    try {
+      const ok = await playSong(song, source, { quiet: true, startAt: resumeAt, refresh: true, fallbackToMp3 });
+      const current = queueRef.current[queueIndexRef.current];
+      if (!ok && current && songKey(current) === key) {
+        audioRetryRef.current = null;
+        playingRef.current = false;
+        setPlaying(false);
+        setToast(localCache ? "本地缓存读取失败，请重新下载" : "播放链接已过期，重新获取失败");
+      }
+    } finally {
+      playbackRefreshRef.current = false;
     }
-  }, [playSong]);
+  }, [playSong, withDownloadedCache]);
 
   const shouldRefreshAfterLongPause = useCallback((song: Song) => {
     const paused = pausedPlaybackRef.current;
@@ -918,13 +1333,15 @@ export default function App() {
   }, []);
 
   const markPausedPlayback = useCallback(() => {
-    const song = queueRef.current[queueIndexRef.current];
+    const current = queueRef.current[queueIndexRef.current];
+    const song = current ? withDownloadedCache(current) : null;
     pausedPlaybackRef.current = song?.source === "flac" && !song.localKey ? { key: songKey(song), at: Date.now() } : null;
-  }, []);
+  }, [withDownloadedCache]);
 
   const primePlaybackElement = useCallback((song: Song, startAt: number) => {
     const audio = audioRef.current;
     if (!audio || !song.url) return;
+    if (song.localKey && !song.url.startsWith("blob:")) return;
     const targetSrc = new URL(song.url, window.location.href).href;
     if (audio.src !== targetSrc) audio.src = song.url;
     if (startAt > 0) audio.currentTime = startAt;
@@ -934,21 +1351,24 @@ export default function App() {
   }, []);
 
   const resumeCurrentSong = useCallback(() => {
-    if (!currentSong) return;
+    const items = queueRef.current;
+    const current = items[queueIndexRef.current];
+    if (!current) return;
+    const preferred = withDownloadedCache(current);
     const audio = audioRef.current;
     const startAt = Math.max(audio?.currentTime || 0, positionRef.current);
-    const refresh = shouldRefreshAfterLongPause(currentSong);
-    primePlaybackElement(currentSong, startAt);
+    const refresh = shouldRefreshAfterLongPause(preferred);
+    primePlaybackElement(preferred, startAt);
     pausedPlaybackRef.current = null;
     if (!refresh) {
-      void playSong(currentSong, queue, { startAt });
+      void playSong(preferred, items, { startAt });
       return;
     }
     playbackRefreshRef.current = true;
-    void playSong(currentSong, queue, { refresh: true, startAt }).finally(() => {
+    void playSong(preferred, items, { refresh: true, startAt }).finally(() => {
       playbackRefreshRef.current = false;
     });
-  }, [currentSong, playSong, primePlaybackElement, queue, shouldRefreshAfterLongPause]);
+  }, [playSong, primePlaybackElement, shouldRefreshAfterLongPause, withDownloadedCache]);
 
   useEffect(() => {
     const handleVisibilityChange = () => {
@@ -957,18 +1377,6 @@ export default function App() {
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
   }, [markPausedPlayback]);
-
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
-    const handlePlaybackIssue = () => {
-      void retryCurrentSongAfterAudioError();
-    };
-    audio.addEventListener("error", handlePlaybackIssue);
-    return () => {
-      audio.removeEventListener("error", handlePlaybackIssue);
-    };
-  }, [retryCurrentSongAfterAudioError]);
 
   useEffect(() => {
     window.JianyinRecoverAudio = () => {
@@ -1056,6 +1464,7 @@ export default function App() {
     });
     setHandler("pause", () => {
       audioRef.current?.pause();
+      cancelPendingPlayback();
       setPlaying(false);
     });
     setHandler("previoustrack", () => playQueueIndex(queueIndex - 1));
@@ -1067,18 +1476,19 @@ export default function App() {
         setPosition(details.seekTime);
       }
     });
-  }, [nextSong, playQueueIndex, queueIndex, resumeCurrentSong]);
+  }, [cancelPendingPlayback, nextSong, playQueueIndex, queueIndex, resumeCurrentSong]);
 
   const togglePlayback = useCallback(() => {
-    if (!currentSong) return;
+    if (!queueRef.current[queueIndexRef.current]) return;
     const audioPlaying = audioRef.current ? !audioRef.current.paused : false;
-    if (playing || audioPlaying) {
+    if (audioPlaying) {
       audioRef.current?.pause();
+      cancelPendingPlayback();
       setPlaying(false);
       return;
     }
     resumeCurrentSong();
-  }, [currentSong, playing, resumeCurrentSong]);
+  }, [cancelPendingPlayback, resumeCurrentSong]);
 
   useEffect(() => {
     window.JianyinAndroidMedia = (command) => {
@@ -1155,6 +1565,17 @@ export default function App() {
       const songs = playlist.songs.map(update);
       return { ...playlist, songs, cover: songKey(songs[0] ?? target) === key ? songs[0]?.cover ?? playlist.cover : playlist.cover };
     }));
+    const attempt = audioAttemptRef.current;
+    if (options.preserveCurrentPlaybackSource && attempt && songKey(attempt.song) === key) {
+      const updateAttempt = (song: Song) => {
+        if (songKey(song) !== key) return song;
+        return { ...updater(song), url: song.url };
+      };
+      audioAttemptRef.current = {
+        song: updateAttempt(attempt.song),
+        source: attempt.source.map(updateAttempt)
+      };
+    }
   }, []);
 
   useEffect(() => {
@@ -1213,7 +1634,7 @@ export default function App() {
 
   const cacheDownloadedSong = useCallback(async (original: Song, target: Song) => {
     if (target.localKey || !isRemoteSong(target) || !target.url || target.url.startsWith("local-file:")) return target;
-    const key = songKey(original);
+    const key = downloadSongKey(original);
     const existing = cacheInFlightRef.current.get(key);
     if (existing) return existing;
     const task = (async () => {
@@ -1223,10 +1644,11 @@ export default function App() {
         const blob = await response.blob();
         const localKey = `download_${target.source}_${target.id}`.replace(/[^a-zA-Z0-9_.-]/g, "_");
         await saveLocalFile(localKey, blob);
+        const localUrl = trackObjectUrl(URL.createObjectURL(blob));
         const cached: Song = {
           ...target,
           localKey,
-          url: `local-file:${localKey}`,
+          url: localUrl,
           needsImport: false,
           remotePlayable: true
         };
@@ -1242,7 +1664,7 @@ export default function App() {
     } finally {
       if (cacheInFlightRef.current.get(key) === task) cacheInFlightRef.current.delete(key);
     }
-  }, [updateSongEverywhere]);
+  }, [trackObjectUrl, updateSongEverywhere]);
 
   useEffect(() => {
     if (!autoCacheEnabled || !playing || !currentSong || !isRemoteSong(currentSong) || currentSong.localKey || !currentSong.url || currentSong.url.startsWith("local-file:")) return;
@@ -1275,11 +1697,10 @@ export default function App() {
     }
     const coverKey = `cover_${songKey(currentSong)}_${file.lastModified}_${file.size}`;
     await saveLocalFile(coverKey, file);
-    const coverUrl = URL.createObjectURL(file);
-    setObjectUrls((items) => [...items, coverUrl]);
+    const coverUrl = trackObjectUrl(URL.createObjectURL(file));
     updateSongEverywhere(currentSong, (song) => ({ ...song, cover: coverUrl, coverKey }));
     setToast("已应用本地封面");
-  }, [currentSong, updateSongEverywhere]);
+  }, [currentSong, trackObjectUrl, updateSongEverywhere]);
 
   const moveQueueItem = useCallback((index: number, direction: -1 | 1) => {
     const items = queueRef.current;
@@ -1308,7 +1729,12 @@ export default function App() {
     if (!window.confirm(`确认删除下载的 ${label}？本地缓存文件会被移除。`)) return;
     const keys = new Set(targets.map(downloadCacheKey).filter((key): key is string => Boolean(key)));
     const targetSongKeys = new Set(targets.map(songKey));
-    await Promise.all([...keys].map((key) => deleteLocalFile(key).catch(() => null)));
+    try {
+      await Promise.all([...keys].map((key) => deleteLocalFile(key)));
+    } catch {
+      setToast("本地缓存删除失败，请重试");
+      return;
+    }
     const isDeletedDownload = (song: Song) => {
       const key = downloadCacheKey(song);
       return Boolean(key && keys.has(key)) || targetSongKeys.has(songKey(song));
@@ -1413,9 +1839,11 @@ export default function App() {
       return;
     }
     const songs = files.map(createLocalSong);
+    songs.forEach((song) => trackObjectUrl(song.url));
     await Promise.all(songs.map((song, index) => saveLocalFile(song.localKey!, files[index])));
     const playlist: Playlist = {
       id: `local_${Date.now()}`,
+      sharedId: createOpaqueSharedId("shared_playlist"),
       name: `本地歌单_${songs.length}首`,
       cover: songs[0]?.cover ?? cover(1),
       songs,
@@ -1426,7 +1854,7 @@ export default function App() {
     setTab("mine");
     setToast(`已导入 ${songs.length} 首本地音乐`);
     event.target.value = "";
-  }, []);
+  }, [trackObjectUrl]);
 
   const backup = useCallback(async () => {
     const state: PersistedState = { playlists, favorites, history, downloadHistory, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart, autoUpdateEnabled, androidStatusNotificationEnabled, updatedAt: Date.now() };
@@ -1436,6 +1864,7 @@ export default function App() {
   }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
 
   const applyHydratedRestore = useCallback((hydrated: { state: PersistedState; urls: string[] }) => {
+    lastStateUpdatedAtRef.current = Math.max(lastStateUpdatedAtRef.current, hydrated.state.updatedAt ?? 0);
     setPlaylists(hydrated.state.playlists);
     setFavorites(hydrated.state.favorites);
     setHistory(hydrated.state.history);
@@ -1459,11 +1888,8 @@ export default function App() {
     setActivePlaylistId(null);
     setPreviewPlaylist(null);
     setSelected(new Set());
-    setObjectUrls((items) => {
-      items.forEach(URL.revokeObjectURL);
-      return hydrated.urls;
-    });
-  }, []);
+    replaceObjectUrls(hydrated.urls);
+  }, [replaceObjectUrls]);
 
   const restore = useCallback((event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -1787,7 +2213,7 @@ export default function App() {
             onDownloadSelected={() => downloadSongs(searchResults.filter((song) => selected.has(songKey(song))))}
             onCreatePlaylistWithSelected={(name) => {
               const songs = searchResults.filter((song) => selected.has(songKey(song)));
-              const playlist: Playlist = { id: `local_${Date.now()}`, name, cover: songs[0]?.cover ?? cover(3), songs, source: "local" };
+              const playlist: Playlist = { id: `local_${Date.now()}`, sharedId: createOpaqueSharedId("shared_playlist"), name, cover: songs[0]?.cover ?? cover(3), songs, source: "local" };
               setPlaylists((items) => [playlist, ...items]);
               setSelected(new Set());
               setToast(`已创建歌单并添加 ${songs.length} 首歌曲`);
@@ -1861,7 +2287,7 @@ export default function App() {
           }}
           onAddSelected={(songs) => activePlaylistSaved && addSongsToPlaylist(activePlaylist.id, songs)}
           onCreatePlaylistWithSelected={(name, songs) => {
-            const playlist: Playlist = { id: `local_${Date.now()}`, name, cover: songs[0]?.cover ?? cover(3), songs, source: "local" };
+            const playlist: Playlist = { id: `local_${Date.now()}`, sharedId: createOpaqueSharedId("shared_playlist"), name, cover: songs[0]?.cover ?? cover(3), songs, source: "local" };
             setPlaylists((items) => [playlist, ...items]);
             setSelected(new Set());
             setToast(`已创建歌单并添加 ${songs.length} 首歌曲`);
@@ -2043,7 +2469,7 @@ export default function App() {
               setToast("请输入歌单名称");
               return;
             }
-            const playlist: Playlist = { id: `local_${Date.now()}`, name, cover: cover(3), songs: [], source: "local" };
+            const playlist: Playlist = { id: `local_${Date.now()}`, sharedId: createOpaqueSharedId("shared_playlist"), name, cover: cover(3), songs: [], source: "local" };
             setPlaylists((items) => [playlist, ...items]);
             setActivePlaylistId(playlist.id);
             setCreateOpen(false);

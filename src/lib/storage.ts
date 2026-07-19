@@ -1,6 +1,8 @@
 import { FAVORITES_ID, LOCAL_DB_NAME, LOCAL_STORE_NAME, RECENT_HISTORY_LIMIT, STORAGE_KEY, cover } from "../data/seed";
-import type { BackupPayload, BackupPreview, LocalFileBackup, PersistedState, Playlist, Song } from "../types";
+import type { BackupPayload, BackupPreview, LocalFileBackup, PersistedState, Playlist, SharedState, SharedTombstones, Song } from "../types";
 import { apiUrl } from "./api";
+import { applySharedTombstones, canonicalSharedId, mergeSharedTombstones, normalizeSharedTombstones, sharedPlaylistIdentity, sharedSongIdentity, stableFlacSharedId, stableLegacySharedId, toSharedState } from "./shared-state";
+export { deriveSharedTombstones, sharedStateSignature, toSharedState } from "./shared-state";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -16,11 +18,25 @@ function asSong(value: unknown): Song | null {
   const localKey = asString(value.localKey) || (asString(value.url).startsWith("local-file:") ? asString(value.url).slice(11) : "");
   const coverKey = asString(value.coverKey) || (asString(value.cover).startsWith("local-file:") ? asString(value.cover).slice(11) : "");
   if (!id && !localKey) return null;
-  const source = value.source === "netease" || value.source === "bili" || value.source === "flac" || value.source === "local" ? value.source : localKey ? "local" : "netease";
+  const canonicalId = id || localKey;
+  const legacyLocal = canonicalId.startsWith("local_");
+  const spoofedLegacyLocal = legacyLocal && value.source !== undefined && value.source !== "local";
+  const source = legacyLocal
+    ? "local"
+    : value.source === "netease" || value.source === "bili" || value.source === "flac" || value.source === "local" ? value.source : localKey ? "local" : "netease";
+  const name = asString(value.name, "未知歌曲");
+  const artist = asString(value.artist, "未知歌手");
+  const explicitSharedId = spoofedLegacyLocal ? "" : canonicalSharedId("shared_song", asString(value.sharedId));
+  const sharedId = explicitSharedId || (source === "local" && canonicalId.startsWith("local_")
+    ? stableLegacySharedId("shared_song", canonicalId)
+    : source === "local" && canonicalId.startsWith("shared_song")
+      ? canonicalId
+      : source === "flac" ? stableFlacSharedId(name, artist) : "");
   return {
-    id: id || localKey,
-    name: asString(value.name, "未知歌曲"),
-    artist: asString(value.artist, "未知歌手"),
+    id: canonicalId,
+    sharedId: sharedId || undefined,
+    name,
+    artist,
     url: asString(value.url),
     cover: asString(value.cover),
     source,
@@ -69,12 +85,22 @@ function asPlaylist(value: unknown): Playlist | null {
   const name = asString(value.name);
   if (!id || !name) return null;
   const songs = Array.isArray(value.songs) ? removeDemoSongs(value.songs.map(asSong).filter((song): song is Song => Boolean(song))) : [];
+  const legacyLocal = id.startsWith("local_");
+  const spoofedLegacyLocal = legacyLocal && value.source !== undefined && value.source !== "local";
+  const source = legacyLocal
+    ? "local"
+    : value.source === "netease" || value.source === "bili" || value.source === "flac" ? value.source : "local";
+  const explicitSharedId = spoofedLegacyLocal ? "" : canonicalSharedId("shared_playlist", asString(value.sharedId));
+  const sharedId = explicitSharedId || (source === "local" && id.startsWith("local_")
+    ? stableLegacySharedId("shared_playlist", id)
+    : source === "local" && id.startsWith("shared_playlist") ? id : "");
   return {
     id,
+    sharedId: sharedId || undefined,
     name,
     cover: asString(value.cover, songs[0]?.cover ?? ""),
     songs,
-    source: value.source === "netease" || value.source === "bili" || value.source === "flac" ? value.source : "local",
+    source,
     trackCount: typeof value.trackCount === "number" && Number.isFinite(value.trackCount) ? value.trackCount : songs.length,
     creatorNickname: asString(value.creatorNickname)
   };
@@ -83,6 +109,11 @@ function asPlaylist(value: unknown): Playlist | null {
 export function songKey(song: Song) {
   if (song.source !== "local" && song.id) return song.id;
   return song.localKey || song.id || song.url;
+}
+
+export function downloadSongKey(song: Song) {
+  if (song.source === "flac") return sharedSongIdentity(song);
+  return songKey(song);
 }
 
 function serializeSong(song: Song): Song {
@@ -96,7 +127,7 @@ function serializeSong(song: Song): Song {
 }
 
 function persistableSong(song: Song) {
-  return Boolean(song.localKey || (song.url && !song.url.startsWith("blob:")) || song.remotePlayable);
+  return Boolean(song.localKey || (song.url && !song.url.startsWith("blob:")) || song.remotePlayable || song.needsImport);
 }
 
 function serializeSongs(songs: Song[]) {
@@ -132,6 +163,10 @@ function serializeState(state: PersistedState): PersistedState {
     autoPlayOnStart: state.autoPlayOnStart,
     autoUpdateEnabled: state.autoUpdateEnabled,
     androidStatusNotificationEnabled: state.androidStatusNotificationEnabled,
+    sharedSyncPending: Boolean(state.sharedSyncPending),
+    sharedRevision: state.sharedRevision,
+    sharedTombstones: normalizeSharedTombstones(state.sharedTombstones),
+    sharedTombstoneClears: normalizeSharedTombstones(state.sharedTombstoneClears),
     updatedAt: state.updatedAt
   };
 }
@@ -175,6 +210,7 @@ export function normalizeState(value: unknown): PersistedState {
   const autoLyricsEnabled = raw.autoLyricsEnabled !== false;
   const playbackSpeed = typeof raw.playbackSpeed === "number" && Number.isFinite(raw.playbackSpeed) ? Math.min(4, Math.max(0.25, raw.playbackSpeed)) : 1;
   const updatedAt = typeof raw.updatedAt === "number" && Number.isFinite(raw.updatedAt) && raw.updatedAt > 0 ? raw.updatedAt : undefined;
+  const sharedRevision = typeof raw.sharedRevision === "number" && Number.isInteger(raw.sharedRevision) && raw.sharedRevision >= 0 ? raw.sharedRevision : undefined;
   return {
     playlists: withFavorites.map((playlist) => playlist.id === FAVORITES_ID ? { ...playlist, songs: favorites } : playlist),
     favorites,
@@ -196,6 +232,10 @@ export function normalizeState(value: unknown): PersistedState {
     autoPlayOnStart: Boolean(raw.autoPlayOnStart),
     autoUpdateEnabled: Boolean(raw.autoUpdateEnabled),
     androidStatusNotificationEnabled: Boolean(raw.androidStatusNotificationEnabled),
+    sharedSyncPending: Boolean(raw.sharedSyncPending),
+    sharedRevision,
+    sharedTombstones: normalizeSharedTombstones(raw.sharedTombstones),
+    sharedTombstoneClears: normalizeSharedTombstones(raw.sharedTombstoneClears),
     updatedAt
   };
 }
@@ -229,18 +269,42 @@ function uniqueByKey<T>(items: T[], keyOf: (item: T) => string) {
   return result;
 }
 
-function mergePlaylists(local: Playlist[], remote: Playlist[]) {
-  const merged = new Map<string, Playlist>();
-  for (const playlist of [...remote, ...local]) {
-    const existing = merged.get(playlist.id);
-    if (!existing) {
-      merged.set(playlist.id, playlist);
+function sharedSongMergeKey(song: Song) {
+  return sharedSongIdentity(song);
+}
+
+function mergeSharedSongs(local: Song[], remote: Song[]) {
+  const result: Song[] = [];
+  const indexes = new Map<string, number>();
+  const deviceScore = (song: Song) => (song.localKey ? 8 : 0) + (song.url ? 4 : 0) + (!song.needsImport ? 2 : 0) + (song.verifiedPlayable ? 1 : 0);
+  for (const song of [...local, ...remote]) {
+    const key = sharedSongMergeKey(song);
+    const index = indexes.get(key);
+    if (index === undefined) {
+      indexes.set(key, result.length);
+      result.push(song);
       continue;
     }
-    const songs = mergeSongs(existing.songs, playlist.songs);
-    merged.set(playlist.id, {
+    if (deviceScore(song) > deviceScore(result[index])) result[index] = song;
+  }
+  return result;
+}
+
+function mergeSharedPlaylists(local: Playlist[], remote: Playlist[]) {
+  const merged = new Map(local.map((playlist) => [sharedPlaylistIdentity(playlist), playlist]));
+  for (const playlist of remote) {
+    const identity = sharedPlaylistIdentity(playlist);
+    const existing = merged.get(identity);
+    if (!existing) {
+      merged.set(identity, playlist);
+      continue;
+    }
+    const songs = mergeSharedSongs(existing.songs, playlist.songs);
+    merged.set(identity, {
       ...existing,
       ...playlist,
+      id: existing.id,
+      sharedId: existing.sharedId || playlist.sharedId || identity,
       cover: playlist.cover || existing.cover || songs[0]?.cover || "",
       songs,
       trackCount: Math.max(existing.trackCount ?? 0, playlist.trackCount ?? 0, songs.length)
@@ -249,9 +313,62 @@ function mergePlaylists(local: Playlist[], remote: Playlist[]) {
   return Array.from(merged.values());
 }
 
+function applyTombstonesToLibrary(playlists: Playlist[], favorites: Song[], tombstonesValue: SharedTombstones | undefined) {
+  const tombstones = normalizeSharedTombstones(tombstonesValue);
+  const deletedPlaylists = new Set(tombstones.playlistIds);
+  const filteredPlaylists = playlists
+    .filter((playlist) => !deletedPlaylists.has(sharedPlaylistIdentity(playlist)))
+    .map((playlist) => {
+      const deletedSongs = new Set(tombstones.playlistSongs[sharedPlaylistIdentity(playlist)] ?? []);
+      return { ...playlist, songs: playlist.songs.filter((song) => !deletedSongs.has(sharedSongIdentity(song))) };
+    });
+  const deletedFavorites = new Set(tombstones.favorites);
+  return {
+    playlists: filteredPlaylists,
+    favorites: favorites.filter((song) => !deletedFavorites.has(sharedSongIdentity(song)))
+  };
+}
+
+function replaceSharedSongs(local: Song[], remote: Song[]) {
+  const localSongs = new Map(local.map((song) => [sharedSongMergeKey(song), song]));
+  const localMetadata = new Map<string, Song | null>();
+  for (const song of local) {
+    if (song.source !== "local") continue;
+    const key = `${song.name.trim()}\u0000${song.artist.trim()}\u0000${song.durationMs ?? ""}`;
+    localMetadata.set(key, localMetadata.has(key) ? null : song);
+  }
+  return remote.map((song) => {
+    const metadataKey = `${song.name.trim()}\u0000${song.artist.trim()}\u0000${song.durationMs ?? ""}`;
+    const deviceSong = localSongs.get(sharedSongMergeKey(song))
+      ?? (song.source === "local" ? localMetadata.get(metadataKey) ?? undefined : undefined);
+    if (!deviceSong) return song;
+    return {
+      ...song,
+      id: song.source === "local" ? deviceSong.id : song.id,
+      sharedId: song.source === "local"
+        ? song.sharedId || (song.id.startsWith("shared_song") ? song.id : deviceSong.sharedId)
+        : song.sharedId,
+      url: deviceSong.url,
+      cover: deviceSong.cover || song.cover,
+      lrc: deviceSong.lrc,
+      localKey: deviceSong.localKey,
+      coverKey: deviceSong.coverKey,
+      remotePlayable: deviceSong.remotePlayable || song.remotePlayable,
+      verifiedPlayable: deviceSong.verifiedPlayable,
+      br: deviceSong.br,
+      level: deviceSong.level,
+      audioType: deviceSong.audioType,
+      quality: deviceSong.quality,
+      time: deviceSong.time,
+      sign: deviceSong.sign,
+      needsImport: deviceSong.localKey || deviceSong.url ? false : song.needsImport
+    };
+  });
+}
+
 export function mergeStates(local: PersistedState, remote: PersistedState): PersistedState {
-  const playlists = mergePlaylists(local.playlists, remote.playlists);
-  const favorites = mergeSongs(local.favorites, remote.favorites);
+  const playlists = mergeSharedPlaylists(local.playlists, remote.playlists);
+  const favorites = mergeSharedSongs(local.favorites, remote.favorites);
   const updatedAt = Math.max(local.updatedAt ?? 0, remote.updatedAt ?? 0);
   const useRemoteSettings = Boolean(remote.updatedAt && (!local.updatedAt || remote.updatedAt > local.updatedAt));
   return normalizeState({
@@ -259,8 +376,8 @@ export function mergeStates(local: PersistedState, remote: PersistedState): Pers
     ...local,
     playlists,
     favorites,
-    history: mergeSongs(local.history, remote.history).slice(0, RECENT_HISTORY_LIMIT),
-    downloadHistory: mergeSongs(local.downloadHistory, remote.downloadHistory).slice(0, RECENT_HISTORY_LIMIT),
+    history: mergeSharedSongs(local.history, remote.history).slice(0, RECENT_HISTORY_LIMIT),
+    downloadHistory: mergeSharedSongs(local.downloadHistory, remote.downloadHistory).slice(0, RECENT_HISTORY_LIMIT),
     queue: local.queue.length ? local.queue : remote.queue,
     queueIndex: local.queue.length ? local.queueIndex : remote.queueIndex,
     searchHistory: uniqueByKey([...local.searchHistory, ...remote.searchHistory], (item) => item).slice(0, 12),
@@ -283,25 +400,109 @@ export function mergeStates(local: PersistedState, remote: PersistedState): Pers
   });
 }
 
+export function mergeSharedState(local: PersistedState, remote: SharedState): PersistedState {
+  const tombstones = mergeSharedTombstones(local.sharedTombstones, remote.tombstones);
+  const localLibrary = applyTombstonesToLibrary(local.playlists, local.favorites, tombstones);
+  const remoteLibrary = applyTombstonesToLibrary(remote.playlists, remote.favorites, tombstones);
+  return normalizeState({
+    ...local,
+    playlists: applyTombstonesToLibrary(mergeSharedPlaylists(localLibrary.playlists, remoteLibrary.playlists), [], tombstones).playlists,
+    favorites: applyTombstonesToLibrary([], mergeSharedSongs(localLibrary.favorites, remoteLibrary.favorites), tombstones).favorites,
+    sharedRevision: remote.revision,
+    sharedTombstones: tombstones,
+    updatedAt: Math.max(local.updatedAt ?? 0, remote.updatedAt ?? 0) || undefined
+  });
+}
+
+export function replaceSharedState(local: PersistedState, remote: SharedState): PersistedState {
+  const remoteLibrary = applyTombstonesToLibrary(remote.playlists, remote.favorites, remote.tombstones);
+  const localPlaylists = new Map(local.playlists.map((playlist) => [sharedPlaylistIdentity(playlist), playlist]));
+  const localSongs = [
+    ...local.playlists.flatMap((playlist) => playlist.songs),
+    ...local.favorites,
+    ...local.history,
+    ...local.downloadHistory,
+    ...local.queue
+  ];
+  const playlists = remoteLibrary.playlists.map((playlist) => {
+    const identity = sharedPlaylistIdentity(playlist);
+    const devicePlaylist = localPlaylists.get(identity);
+    const songs = replaceSharedSongs(localSongs, playlist.songs);
+    if (!devicePlaylist) return { ...playlist, songs };
+    return {
+      ...playlist,
+      id: devicePlaylist.id,
+      sharedId: devicePlaylist.sharedId || playlist.sharedId || identity,
+      cover: playlist.cover || devicePlaylist.cover || songs[0]?.cover || "",
+      songs,
+      trackCount: Math.max(playlist.trackCount ?? 0, songs.length)
+    };
+  });
+  return normalizeState({
+    ...local,
+    playlists,
+    favorites: replaceSharedSongs(localSongs, remoteLibrary.favorites),
+    sharedRevision: remote.revision,
+    sharedTombstones: remote.tombstones,
+    sharedSyncPending: false,
+    updatedAt: Math.max(local.updatedAt ?? 0, remote.updatedAt ?? 0) || undefined
+  });
+}
+
+function normalizeSharedStatePayload(value: unknown): SharedState {
+  const raw = isRecord(value) ? value : {};
+  const revision = typeof raw.revision === "number" && Number.isInteger(raw.revision) && raw.revision >= 0 ? raw.revision : 0;
+  const tombstones = normalizeSharedTombstones(raw.tombstones);
+  const normalized = normalizeState(raw);
+  const projected = toSharedState({ ...normalized, sharedRevision: revision, sharedTombstones: tombstones });
+  return applySharedTombstones({
+    ...projected,
+    revision,
+    tombstones,
+    ...(typeof raw.lastWriteId === "string" && raw.lastWriteId ? { lastWriteId: raw.lastWriteId } : {}),
+    ...(typeof raw.updatedAt === "number" && Number.isFinite(raw.updatedAt) && raw.updatedAt > 0 ? { updatedAt: raw.updatedAt } : {})
+  });
+}
+
+export class SharedStateConflictError extends Error {
+  state: SharedState;
+
+  constructor(message: string, state: SharedState) {
+    super(message);
+    this.name = "SharedStateConflictError";
+    this.state = state;
+  }
+}
+
 export async function loadSharedState() {
   const response = await fetch(apiUrl("/api/state"));
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(typeof data.message === "string" ? data.message : "共享歌单读取失败");
-  return data.state ? normalizeState(data.state) : null;
+  return data.state ? normalizeSharedStatePayload(data.state) : null;
 }
 
-export async function saveSharedState(state: PersistedState, options: { keepalive?: boolean } = {}) {
-  const body = JSON.stringify({ state: serializeState(state) });
-  const response = await fetch(apiUrl("/api/state"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body,
-    keepalive: Boolean(options.keepalive && body.length <= 60_000)
-  });
-  if (!response.ok) {
-    const data = await response.json().catch(() => ({}));
-    throw new Error(typeof data.message === "string" ? data.message : "共享歌单保存失败");
+export async function saveSharedState(state: SharedState, options: { keepalive?: boolean; baseRevision: number; writeId: string }) {
+  const body = JSON.stringify({ state, baseRevision: options.baseRevision, writeId: options.writeId });
+  let response: Response;
+  try {
+    response = await fetch(apiUrl("/api/state"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+      keepalive: Boolean(options.keepalive && new TextEncoder().encode(body).byteLength <= 60_000)
+    });
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`无法连接共享服务：${detail}`);
   }
+  const data = await response.json().catch(() => ({}));
+  if (response.status === 409 && data.state) {
+    throw new SharedStateConflictError(typeof data.message === "string" ? data.message : "共享歌单已有更新", normalizeSharedStatePayload(data.state));
+  }
+  if (!response.ok) throw new Error(typeof data.message === "string" ? data.message : `共享歌单保存失败（HTTP ${response.status}）`);
+  return data.state
+    ? normalizeSharedStatePayload(data.state)
+    : { ...state, revision: options.baseRevision + 1, lastWriteId: options.writeId };
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -350,34 +551,60 @@ export async function deleteLocalFile(key: string) {
 export async function hydrateLocalSongs(state: PersistedState) {
   const urls: string[] = [];
   const cache = new Map<string, string>();
+  const loading = new Map<string, Promise<string | null>>();
   const missingKeys = new Set<string>();
-  const downloadSongKeys = new Set(state.downloadHistory.map(songKey));
+  const stateSongs = [
+    ...state.playlists.flatMap((playlist) => playlist.songs),
+    ...state.favorites,
+    ...state.history,
+    ...state.downloadHistory,
+    ...state.queue
+  ];
+  const downloadLocalKeys = new Map<string, string>();
+  const downloadHistoryKeys = new Set(state.downloadHistory.map(downloadSongKey));
+  for (const song of stateSongs) {
+    const identity = downloadSongKey(song);
+    if (!isDownloadedSong(song) && !downloadHistoryKeys.has(identity)) continue;
+    const key = song.localKey || candidateDownloadKey(song);
+    if (!key) continue;
+    if (isDownloadedSong(song) || !downloadLocalKeys.has(identity)) downloadLocalKeys.set(identity, key);
+  }
 
   async function loadObjectUrl(key: string) {
     let url = cache.get(key);
     if (url || missingKeys.has(key)) return url ?? null;
-    const blob = await loadLocalFile(key).catch(() => null);
-    if (!blob) {
-      missingKeys.add(key);
-      return null;
+    const active = loading.get(key);
+    if (active) return active;
+    const task = (async () => {
+      const blob = await loadLocalFile(key).catch(() => null);
+      if (!blob) {
+        missingKeys.add(key);
+        return null;
+      }
+      const objectUrl = URL.createObjectURL(blob);
+      urls.push(objectUrl);
+      cache.set(key, objectUrl);
+      return objectUrl;
+    })();
+    loading.set(key, task);
+    try {
+      return await task;
+    } finally {
+      loading.delete(key);
     }
-    url = URL.createObjectURL(blob);
-    urls.push(url);
-    cache.set(key, url);
-    return url;
   }
 
   async function hydrate(song: Song): Promise<Song> {
     let next = song;
-    if (!song.localKey && downloadSongKeys.has(songKey(song))) {
-      const key = candidateDownloadKey(song);
+    if (!song.localKey) {
+      const key = downloadLocalKeys.get(downloadSongKey(song));
       const url = key ? await loadObjectUrl(key) : null;
       if (url) next = { ...next, localKey: key, url, needsImport: false, remotePlayable: true, verifiedPlayable: true };
     }
-    if (next.localKey && next.url.startsWith("local-file:")) {
+    if (next.localKey && !next.url.startsWith("blob:")) {
       const url = await loadObjectUrl(next.localKey);
       if (!url) return { ...next, url: "", needsImport: true, name: next.name.includes("需重新导入") ? next.name : `${next.name}（需重新导入）` };
-      next = { ...next, url, needsImport: false };
+      next = { ...next, url, needsImport: false, name: next.name.replace(/（需重新导入）$/, "") };
     }
     if (next.coverKey && next.cover.startsWith("local-file:")) {
       const cover = await loadObjectUrl(next.coverKey);

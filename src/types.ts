@@ -2,6 +2,7 @@ export type Source = "local" | "netease" | "bili" | "flac";
 
 export type Song = {
   id: string;
+  sharedId?: string;
   name: string;
   artist: string;
   url: string;
@@ -26,6 +27,7 @@ export type Song = {
 
 export type Playlist = {
   id: string;
+  sharedId?: string;
   name: string;
   cover: string;
   songs: Song[];
@@ -60,6 +62,26 @@ export type PersistedState = {
   autoPlayOnStart: boolean;
   autoUpdateEnabled: boolean;
   androidStatusNotificationEnabled: boolean;
+  sharedSyncPending?: boolean;
+  sharedRevision?: number;
+  sharedTombstones?: SharedTombstones;
+  sharedTombstoneClears?: SharedTombstones;
+  updatedAt?: number;
+};
+
+export type SharedTombstones = {
+  playlistIds: string[];
+  favorites: string[];
+  playlistSongs: Record<string, string[]>;
+};
+
+export type SharedState = {
+  schemaVersion: 2;
+  revision: number;
+  playlists: Playlist[];
+  favorites: Song[];
+  tombstones: SharedTombstones;
+  lastWriteId?: string;
   updatedAt?: number;
 };
 

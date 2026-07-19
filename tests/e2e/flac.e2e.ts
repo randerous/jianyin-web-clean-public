@@ -1,5 +1,5 @@
 import { expect, test } from "playwright/test";
-import { fs, storageKey, projectRoot, toneFile, coverFile, fullSongFile, lrcFile, testSongs, testState, mockHome, reset, expectAudioPlaying, expectAudioPaused, expectAudioLongerThan, expectReadableToast, playFirstHomeSong, openPlayer, importLocalTone, openSettings, storedState, songNamesIn } from "../helpers/app-fixture";
+import { fs, storageKey, projectRoot, toneFile, coverFile, fullSongFile, lrcFile, testSongs, testState, mockHome, reset, replaceSharedStateForTest, expectAudioPlaying, expectAudioPaused, expectAudioLongerThan, expectReadableToast, playFirstHomeSong, openPlayer, importLocalTone, openSettings, storedState, songNamesIn } from "../helpers/app-fixture";
 
 test.beforeEach(async ({ page }) => {
   await reset(page);
@@ -217,6 +217,454 @@ test("flac download caches the current song without interrupting playback", asyn
   await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
   await page.locator(".section-title .section-action").first().click();
   await expect(page.locator(".detail")).toContainText("Quality Song");
+});
+
+test("persisted downloaded FLAC prefers its IndexedDB audio over a stale remote URL", async ({ page }) => {
+  const localKey = "download_flac_flac_cached-stale";
+  const cachedSong = {
+    id: "flac_cached-stale",
+    name: "Cached Stale Song",
+    artist: "Offline Artist",
+    pic: "/assets/icon.png",
+    cover: "/assets/icon.png",
+    url: "/api/flac/stream/cached-stale?format=flac&bitrate=2000&time=expired-time&sign=expired-sign",
+    source: "flac" as const,
+    localKey,
+    remotePlayable: true,
+    verifiedPlayable: true,
+    durationMs: 65000,
+    br: 2000000,
+    level: "flac",
+    type: "flac",
+    audioType: "flac",
+    quality: "flac",
+    time: "expired-time",
+    sign: "expired-sign"
+  };
+  const persisted = {
+    ...testState(),
+    downloadHistory: [cachedSong],
+    queue: [cachedSong],
+    queueIndex: 0,
+    updatedAt: Date.now() + 1_000_000
+  };
+  let resolveRequests = 0;
+  let staleStreamRequests = 0;
+
+  await page.route("**/api/flac/song/cached-stale**", async (route) => {
+    resolveRequests += 1;
+    await route.fulfill({ status: 410, contentType: "application/json", body: JSON.stringify({ message: "expired" }) });
+  });
+  await page.route("**/api/flac/stream/cached-stale**", async (route) => {
+    staleStreamRequests += 1;
+    await route.fulfill({ path: fullSongFile, headers: { "content-type": "audio/wav" } });
+  });
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state: persisted }) });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+  await page.evaluate(async ({ key, state, cacheKey }) => {
+    const audioBlob = await fetch("/assets/full-song-65s.wav").then((response) => response.blob());
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("jianyin-web-clean-audio", 1);
+      request.onupgradeneeded = () => request.result.createObjectStore("files");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction("files", "readwrite");
+      tx.objectStore("files").put(audioBlob, cacheKey);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+    localStorage.setItem(key, JSON.stringify(state));
+  }, { key: storageKey, state: persisted, cacheKey: localKey });
+
+  await page.reload();
+  await expect(page.locator(".now-playing")).toContainText("Cached Stale Song");
+  await expect(page.locator(".now-playing")).not.toContainText("需重新导入");
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.src)).toMatch(/^blob:/);
+  expect(staleStreamRequests).toBe(0);
+  expect(resolveRequests).toBe(0);
+
+  await page.evaluate(() => {
+    const typed = window as typeof window & { __mockNow?: number };
+    const realNow = Date.now();
+    typed.__mockNow = realNow;
+    Date.now = () => typed.__mockNow ?? realNow;
+  });
+  if (await page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.paused)) {
+    await page.locator('.now-playing button[aria-label="播放"]').click();
+  }
+  await expectAudioPlaying(page);
+  await page.evaluate(() => (window as typeof window & { JianyinAndroidMedia?: (command: "toggle") => void }).JianyinAndroidMedia?.("toggle"));
+  await expectAudioPaused(page);
+  await page.evaluate(() => {
+    const typed = window as typeof window & { __mockNow?: number };
+    typed.__mockNow = (typed.__mockNow ?? Date.now()) + 10 * 60 * 1000;
+  });
+  await page.evaluate(() => (window as typeof window & { JianyinAndroidMedia?: (command: "toggle") => void }).JianyinAndroidMedia?.("toggle"));
+
+  await expectAudioPlaying(page);
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.src)).toMatch(/^blob:/);
+  expect(staleStreamRequests).toBe(0);
+  expect(resolveRequests).toBe(0);
+  await expect(page.getByText("播放链接已过期", { exact: false })).toHaveCount(0);
+});
+
+test("runtime search result prefers its downloaded IndexedDB cache", async ({ page }) => {
+  const cachedId = "runtime-cached-resolved";
+  const searchId = "flac_search_playlist_runtime-cached";
+  const localKey = `download_flac_${cachedId}`;
+  const remoteSong = {
+    id: searchId,
+    name: "Runtime Cached Song",
+    artist: "Offline Artist",
+    pic: "/assets/icon.png",
+    cover: "/assets/icon.png",
+    url: `/api/flac/stream/${searchId}?format=flac&bitrate=2000&time=expired-time&sign=expired-sign`,
+    source: "flac" as const,
+    remotePlayable: true,
+    verifiedPlayable: true,
+    durationMs: 65000,
+    br: 2000000,
+    level: "flac",
+    type: "flac",
+    audioType: "flac",
+    quality: "flac",
+    time: "expired-time",
+    sign: "expired-sign"
+  };
+  const persisted = {
+    ...testState(),
+    downloadHistory: [{ ...remoteSong, id: cachedId, url: `/api/flac/stream/${cachedId}?format=flac&bitrate=2000&time=expired-time&sign=expired-sign`, localKey }],
+    updatedAt: Date.now() + 1_000_000
+  };
+  let resolveRequests = 0;
+  let staleStreamRequests = 0;
+
+  await page.route("**/api/flac/search**", (route) => route.fulfill({
+    contentType: "application/json",
+    body: JSON.stringify({ songs: [remoteSong], page: 1, limit: 30, total: 1, hasMore: false })
+  }));
+  await page.route("**/api/flac/song/**", async (route) => {
+    resolveRequests += 1;
+    await route.fulfill({ status: 410, contentType: "application/json", body: JSON.stringify({ message: "expired" }) });
+  });
+  await page.route("**/api/flac/stream/**", async (route) => {
+    staleStreamRequests += 1;
+    await route.fulfill({ path: fullSongFile, headers: { "content-type": "audio/wav" } });
+  });
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state: persisted }) });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+  await page.evaluate(async ({ key, state, cacheKey }) => {
+    const blob = await fetch("/assets/full-song-65s.wav").then((response) => response.blob());
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("jianyin-web-clean-audio", 1);
+      request.onupgradeneeded = () => request.result.createObjectStore("files");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction("files", "readwrite");
+      tx.objectStore("files").put(blob, cacheKey);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+    localStorage.setItem(key, JSON.stringify(state));
+  }, { key: storageKey, state: persisted, cacheKey: localKey });
+
+  await page.reload();
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await expect(page.getByRole("main")).toContainText("Runtime Cached Song");
+  await page.getByRole("navigation").getByRole("button", { name: "搜索" }).click();
+  await page.getByPlaceholder("搜索音乐/歌手").fill("Runtime Cached Song");
+  await page.keyboard.press("Enter");
+  await page.getByRole("button", { name: "Runtime Cached Song Offline Artist · 测试源" }).click();
+
+  await expectAudioPlaying(page);
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.src)).toMatch(/^blob:/);
+  expect(resolveRequests).toBe(0);
+  expect(staleStreamRequests).toBe(0);
+});
+
+test("a failed local cache lookup or audio start cannot interrupt the song already playing", async ({ page }) => {
+  const playingSong = {
+    ...testSongs[0],
+    id: "still-playing-a",
+    name: "Still Playing A"
+  };
+  const missingCachedSong = {
+    id: "flac_missing-cached-b",
+    name: "Missing Cached B",
+    artist: "Offline Artist",
+    pic: "/assets/icon.png",
+    cover: "/assets/icon.png",
+    url: "/api/flac/stream/missing-cached-b?format=flac&bitrate=2000&time=expired-time&sign=expired-sign",
+    source: "flac" as const,
+    localKey: "download_flac_flac_missing-cached-b",
+    remotePlayable: true,
+    verifiedPlayable: true,
+    durationMs: 65000,
+    br: 2000000,
+    level: "flac",
+    type: "flac",
+    audioType: "flac",
+    quality: "flac",
+    time: "expired-time",
+    sign: "expired-sign"
+  };
+  const rejectedPlaybackSong = {
+    ...testSongs[1],
+    id: "rejected-playback-b",
+    name: "Rejected Playback B",
+    url: "/assets/rejected-playback.wav"
+  };
+  let missingSongResolveRequests = 0;
+  let missingSongSearchRequests = 0;
+  const persisted = {
+    ...testState(),
+    playlists: [
+      { id: "favorites", name: "我喜欢的音乐", cover: "/assets/icon.png", songs: [], source: "local" },
+      { id: "cache-failure", name: "Cache Failure Playlist", cover: "/assets/icon.png", songs: [playingSong, missingCachedSong, rejectedPlaybackSong], source: "local" }
+    ],
+    updatedAt: Date.now() + 1_000_000
+  };
+
+  await page.route("**/api/flac/song/missing-cached-b**", async (route) => {
+    missingSongResolveRequests += 1;
+    await route.fulfill({ status: 410, contentType: "application/json", body: JSON.stringify({ message: "expired" }) });
+  });
+  await page.route("**/api/flac/search**", async (route) => {
+    const keyword = new URL(route.request().url()).searchParams.get("keyword") ?? "";
+    if (!keyword.includes("Missing Cached B")) {
+      await route.fallback();
+      return;
+    }
+    missingSongSearchRequests += 1;
+    await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "missing cache must not fall back to remote search" }) });
+  });
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state: persisted }) });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+  await page.addInitScript(() => {
+    const realPlay = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function rejectSelectedSource(this: HTMLMediaElement) {
+      if (this.currentSrc.includes("rejected-playback") || this.getAttribute("src")?.includes("rejected-playback")) {
+        return Promise.reject(new DOMException("mock playback rejected", "NotSupportedError"));
+      }
+      return realPlay.call(this);
+    };
+  });
+  await page.evaluate(async (localKey) => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("jianyin-web-clean-audio", 1);
+      request.onupgradeneeded = () => request.result.createObjectStore("files");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    if (db.objectStoreNames.contains("files")) {
+      await new Promise<void>((resolve, reject) => {
+        const tx = db.transaction("files", "readwrite");
+        tx.objectStore("files").delete(localKey);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+    db.close();
+  }, missingCachedSong.localKey);
+  const persistedStateScript = await page.addInitScript(({ key, state }) => localStorage.setItem(key, JSON.stringify(state)), { key: storageKey, state: persisted });
+  await page.reload();
+  await persistedStateScript.dispose();
+
+  await expect.poll(async () => {
+    const state = await storedState(page);
+    const song = state.playlists.flatMap((playlist: { songs: Array<{ id: string; localKey?: string; needsImport?: boolean }> }) => playlist.songs).find((item: { id: string }) => item.id === "flac_missing-cached-b");
+    return { localKey: song?.localKey ?? "", needsImport: Boolean(song?.needsImport) };
+  }).toEqual({ localKey: "download_flac_flac_missing-cached-b", needsImport: true });
+
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await page.getByRole("button", { name: "Cache Failure Playlist 3 首歌曲" }).click();
+  const playlist = page.getByRole("dialog", { name: "Cache Failure Playlist" });
+  await playlist.getByRole("button", { name: /Still Playing A/ }).click();
+  await expectAudioPlaying(page);
+  await expect(page.getByRole("button", { name: "暂停", exact: true })).toBeVisible();
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.currentTime)).toBeGreaterThan(1);
+  const beforeFailedSwitch = await page.locator("audio").evaluate((audio: HTMLAudioElement) => ({
+    src: audio.src,
+    currentTime: audio.currentTime
+  }));
+
+  await playlist.getByRole("button", { name: /Missing Cached B/ }).click();
+  await expect(page.locator(".now-playing")).toContainText("Still Playing A");
+  await expect(page.getByRole("button", { name: "暂停", exact: true })).toBeVisible();
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => ({
+    src: audio.src,
+    paused: audio.paused
+  }))).toEqual({ src: beforeFailedSwitch.src, paused: false });
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.currentTime)).toBeGreaterThan(beforeFailedSwitch.currentTime);
+  expect(missingSongResolveRequests).toBe(0);
+  expect(missingSongSearchRequests).toBe(0);
+
+  const beforeRejectedPlayback = await page.locator("audio").evaluate((audio: HTMLAudioElement) => ({
+    src: audio.src,
+    currentTime: audio.currentTime
+  }));
+  await playlist.getByRole("button", { name: /Rejected Playback B/ }).click();
+  await expect(page.locator(".toast")).toBeVisible();
+  await expect(page.locator(".now-playing")).toContainText("Still Playing A");
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => ({
+    src: audio.src,
+    paused: audio.paused
+  }))).toEqual({ src: beforeRejectedPlayback.src, paused: false });
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.currentTime)).toBeGreaterThan(beforeRejectedPlayback.currentTime);
+});
+
+test("pausing cancels a slow pending song switch", async ({ page }) => {
+  const playingSong = { ...testSongs[0], id: "pending-switch-a", name: "Pending Switch A" };
+  const pendingSong = {
+    id: "netease_pending-switch-b",
+    name: "Pending Switch B",
+    artist: "Pending Artist",
+    url: "",
+    cover: "/assets/icon.png",
+    source: "netease" as const,
+    remotePlayable: true,
+    verifiedPlayable: false
+  };
+  const persisted = {
+    ...testState(),
+    playlists: [
+      { id: "favorites", name: "我喜欢的音乐", cover: "/assets/icon.png", songs: [], source: "local" },
+      { id: "pending-switch", name: "Pending Switch Playlist", cover: "/assets/icon.png", songs: [playingSong, pendingSong, testSongs[2]], source: "local" }
+    ],
+    updatedAt: Date.now() + 1_000_000
+  };
+  let resolveStarted = false;
+  let releaseResolve: () => void = () => {};
+  const resolveGate = new Promise<void>((resolve) => { releaseResolve = resolve; });
+
+  await page.route("**/api/netease/song/pending-switch-b**", async (route) => {
+    resolveStarted = true;
+    await resolveGate;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ url: "/assets/full-song-65s.wav", durationMs: 65000, verifiedPlayable: true, quality: "exhigh" })
+    });
+  });
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state: persisted }) });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+  const persistedStateScript = await page.addInitScript(({ key, state }) => localStorage.setItem(key, JSON.stringify(state)), { key: storageKey, state: persisted });
+  await page.reload();
+  await persistedStateScript.dispose();
+
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await page.getByRole("button", { name: "Pending Switch Playlist 3 首歌曲" }).click();
+  const playlist = page.getByRole("dialog", { name: "Pending Switch Playlist" });
+  await playlist.getByRole("button", { name: /Pending Switch A/ }).click();
+  await expectAudioPlaying(page);
+  const activeSrc = await page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.src);
+
+  await playlist.getByRole("button", { name: /Pending Switch B/ }).click();
+  await expect.poll(() => resolveStarted).toBe(true);
+  await page.evaluate(() => (window as typeof window & { JianyinAndroidMedia?: (command: "toggle") => void }).JianyinAndroidMedia?.("toggle"));
+  releaseResolve();
+
+  await expect(page.locator(".now-playing")).toContainText("Pending Switch A");
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => ({ src: audio.src, paused: audio.paused })))
+    .toEqual({ src: activeSrc, paused: true });
+});
+
+test("a superseded audio mutation restores the active song when the newer resolve fails", async ({ page }) => {
+  const playingSong = { ...testSongs[0], id: "overlap-a", name: "Overlap A" };
+  const delayedSong = { ...testSongs[1], id: "overlap-b", name: "Overlap B", url: "/assets/overlap-b.wav" };
+  const failingSong = {
+    id: "netease_overlap-c",
+    name: "Overlap C",
+    artist: "Overlap Artist",
+    url: "",
+    cover: "/assets/icon.png",
+    source: "netease" as const,
+    remotePlayable: true,
+    verifiedPlayable: false
+  };
+  const persisted = {
+    ...testState(),
+    playlists: [
+      { id: "favorites", name: "我喜欢的音乐", cover: "/assets/icon.png", songs: [], source: "local" },
+      { id: "overlap", name: "Overlap Playlist", cover: "/assets/icon.png", songs: [playingSong, delayedSong, failingSong], source: "local" }
+    ],
+    updatedAt: Date.now() + 1_000_000
+  };
+  let failingResolveStarted = false;
+  let releaseFailingResolve: () => void = () => {};
+  const failingResolveGate = new Promise<void>((resolve) => { releaseFailingResolve = resolve; });
+
+  await page.addInitScript(() => {
+    const realPlay = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function delaySelectedSource(this: HTMLMediaElement) {
+      if (this.getAttribute("src")?.includes("overlap-b")) {
+        return new Promise<void>((resolve) => {
+          (window as Window & { __releaseOverlapPlay?: () => void }).__releaseOverlapPlay = resolve;
+        });
+      }
+      return realPlay.call(this);
+    };
+  });
+  await page.route("**/api/netease/song/overlap-c**", async (route) => {
+    failingResolveStarted = true;
+    await failingResolveGate;
+    await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "mock newer resolve failed" }) });
+  });
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state: persisted }) });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+  const persistedStateScript = await page.addInitScript(({ key, state }) => localStorage.setItem(key, JSON.stringify(state)), { key: storageKey, state: persisted });
+  await page.reload();
+  await persistedStateScript.dispose();
+
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await page.getByRole("button", { name: "Overlap Playlist 3 首歌曲" }).click();
+  const playlist = page.getByRole("dialog", { name: "Overlap Playlist" });
+  await playlist.getByRole("button", { name: "Overlap A 测试曲库 · 本地" }).click();
+  await expectAudioPlaying(page);
+  const active = await page.locator("audio").evaluate((audio: HTMLAudioElement) => ({ src: audio.src, currentTime: audio.currentTime }));
+
+  await playlist.getByRole("button", { name: "Overlap B 测试曲库 · 本地" }).click();
+  await expect.poll(() => page.evaluate(() => typeof (window as Window & { __releaseOverlapPlay?: () => void }).__releaseOverlapPlay)).toBe("function");
+  await playlist.getByRole("button", { name: "Overlap C Overlap Artist · 网易云" }).click();
+  await expect.poll(() => failingResolveStarted).toBe(true);
+  await page.evaluate(() => (window as Window & { __releaseOverlapPlay?: () => void }).__releaseOverlapPlay?.());
+  releaseFailingResolve();
+
+  await expect(page.locator(".toast")).toContainText("mock newer resolve failed");
+  await expect(page.locator(".now-playing")).toContainText("Overlap A");
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => ({ src: audio.src, paused: audio.paused })))
+    .toEqual({ src: active.src, paused: false });
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.currentTime)).toBeGreaterThan(active.currentTime);
 });
 
 test("flac explicit search resolves and plays through flac stream endpoint", async ({ page }) => {
@@ -830,7 +1278,7 @@ test("persisted flac search queue refreshes after reload on the first resume cli
   expect(searchRequests.some((params) => params.get("keyword")?.includes("Persisted September"))).toBe(true);
   expect(songRequests.some((params) => params.get("sign") === "fresh-sign")).toBe(true);
   await expectAudioPlaying(page);
-  await expect(page.locator(".toast")).not.toContainText("浏览器阻止了自动播放");
+  await expect(page.getByText("浏览器阻止了自动播放", { exact: false })).toHaveCount(0);
 });
 
 test("queue prewarms only the immediate previous and next FLAC songs", async ({ page }) => {
@@ -869,7 +1317,7 @@ test("queue prewarms only the immediate previous and next FLAC songs", async ({ 
       })
     });
   });
-  await page.request.post("/api/state", { data: { state } });
+  await replaceSharedStateForTest(page, state);
   const initScript = await page.addInitScript(({ key, value }) => {
     localStorage.setItem(key, JSON.stringify(value));
   }, { key: storageKey, value: state });
@@ -879,6 +1327,93 @@ test("queue prewarms only the immediate previous and next FLAC songs", async ({ 
   await expect.poll(() => [...resolvedIds].sort()).toEqual(["101", "103"]);
   expect(resolvedIds).toHaveLength(2);
   await expect(page.locator("audio")).toHaveAttribute("preload", "metadata");
+});
+
+test("a delayed prewarm result does not replace or restart the song that became current", async ({ page }) => {
+  const current = { ...testSongs[0], id: "prewarm-current", name: "Prewarm Current" };
+  const target = {
+    id: "flac_222",
+    name: "Prewarm Target",
+    artist: "Prewarm Artist",
+    pic: "/assets/icon.png",
+    cover: "/assets/icon.png",
+    source: "flac",
+    url: "/api/flac/stream/222?format=flac&bitrate=2000&time=old-time&sign=old-sign",
+    remotePlayable: true,
+    verifiedPlayable: true,
+    durationMs: 65000,
+    br: 2000000,
+    level: "flac",
+    type: "flac",
+    audioType: "flac",
+    quality: "flac",
+    time: "old-time",
+    sign: "old-sign"
+  };
+  const state = {
+    ...testState(),
+    playlists: [
+      { id: "favorites", name: "我喜欢的音乐", cover: "/assets/icon.png", songs: [], source: "local" },
+      { id: "prewarm-race", name: "Prewarm Race", cover: "/assets/icon.png", songs: [current, target], source: "local" }
+    ],
+    queue: [current, target],
+    queueIndex: 0,
+    updatedAt: Date.now() + 60_000
+  };
+  let prewarmStarted = false;
+  let releasePrewarm: () => void = () => {};
+  const prewarmGate = new Promise<void>((resolve) => { releasePrewarm = resolve; });
+  await page.route("**/api/flac/song/222**", async (route) => {
+    prewarmStarted = true;
+    await prewarmGate;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        url: "/api/flac/stream/222?format=flac&bitrate=2000&time=fresh-time&sign=fresh-sign",
+        durationMs: 65000,
+        verifiedPlayable: true,
+        br: 2000000,
+        level: "flac",
+        type: "flac",
+        audioType: "flac",
+        quality: "flac"
+      })
+    });
+  });
+  await page.route("**/api/flac/stream/222**", async (route) => {
+    await route.fulfill({ path: fullSongFile, headers: { "content-type": "audio/wav", "accept-ranges": "bytes" } });
+  });
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state }) });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+  const stateScript = await page.addInitScript(({ key, value }) => {
+    localStorage.setItem(key, JSON.stringify(value));
+  }, { key: storageKey, value: state });
+  await page.reload();
+  await stateScript.dispose();
+
+  try {
+    await expect.poll(() => prewarmStarted).toBe(true);
+    await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+    await page.getByRole("button", { name: /Prewarm Race/ }).click();
+    await page.getByRole("dialog", { name: "Prewarm Race" }).getByRole("button", { name: /Prewarm Target/ }).click();
+    await expectAudioPlaying(page);
+    const before = await page.locator("audio").evaluate((audio: HTMLAudioElement) => {
+      audio.currentTime = 20;
+      audio.dispatchEvent(new Event("timeupdate"));
+      return { src: audio.src, currentTime: audio.currentTime };
+    });
+    releasePrewarm();
+
+    await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => ({ src: audio.src, currentTime: audio.currentTime }))).toMatchObject({ src: before.src });
+    await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.currentTime)).toBeGreaterThan(19);
+  } finally {
+    releasePrewarm();
+  }
 });
 
 test("flac search queue uses prewarmed signatures when advancing", async ({ page }) => {

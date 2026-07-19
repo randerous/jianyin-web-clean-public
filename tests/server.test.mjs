@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { chmod, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { afterEach, test } from "node:test";
 import { createApp } from "../server.mjs";
@@ -48,6 +50,35 @@ async function getJson(url, init) {
   const response = await fetch(url, init);
   const body = await response.json();
   return { response, body };
+}
+
+function postSharedState(baseUrl, payload) {
+  return getJson(`${baseUrl}/api/state`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+}
+
+function legacySharedId(prefix, value) {
+  let h1 = 2166136261;
+  let h2 = 2654435769;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    h1 = Math.imul(h1 ^ code, 16777619);
+    h2 = Math.imul(h2 ^ code, 2246822519);
+  }
+  const suffix = `${(h1 >>> 0).toString(16).padStart(8, "0")}${(h2 >>> 0).toString(16).padStart(8, "0")}`;
+  return `${prefix}_legacy_${suffix}`;
+}
+
+async function createDisposableStatePath(t, label) {
+  const directory = await mkdtemp(resolve(tmpdir(), `jianyin-${label}-`));
+  t.after(async () => {
+    await chmod(directory, 0o700).catch(() => {});
+    await rm(directory, { recursive: true, force: true });
+  });
+  return { directory, statePath: resolve(directory, "shared-state.json") };
 }
 
 async function assertEventually(assertion, timeoutMs = 500, intervalMs = 10) {
@@ -211,30 +242,30 @@ test("update endpoint exposes only the fixed GitHub release metadata", async () 
     releaseCalls += 1;
     if (url === "https://api.github.com/repos/randerous/jianyin-web-clean-public/releases?per_page=100") {
       return new Response(JSON.stringify([
-        { tag_name: "v1.0.29", published_at: "2026-07-18T00:00:00Z", body: "Latest release" },
-        { tag_name: "v1.0.28", published_at: "2026-07-17T00:00:00Z", body: "Current release" },
-        { tag_name: "v1.0.27", published_at: "2026-07-16T00:00:00Z", body: "Older release" },
-        { tag_name: "v1.0.30", published_at: "2026-07-19T00:00:00Z", body: "Future release" },
-        { tag_name: "v1.0.31", draft: true, published_at: "2026-07-20T00:00:00Z", body: "Draft release" },
-        { tag_name: "v1.0.32", prerelease: true, published_at: "2026-07-21T00:00:00Z", body: "Pre-release" }
+        { tag_name: "v1.0.30", published_at: "2026-07-19T00:00:00Z", body: "Latest release" },
+        { tag_name: "v1.0.29", published_at: "2026-07-18T00:00:00Z", body: "Current release" },
+        { tag_name: "v1.0.28", published_at: "2026-07-17T00:00:00Z", body: "Older release" },
+        { tag_name: "v1.0.31", published_at: "2026-07-20T00:00:00Z", body: "Future release" },
+        { tag_name: "v1.0.32", draft: true, published_at: "2026-07-21T00:00:00Z", body: "Draft release" },
+        { tag_name: "v1.0.33", prerelease: true, published_at: "2026-07-22T00:00:00Z", body: "Pre-release" }
       ]), { status: 200, headers: { "content-type": "application/json" } });
     }
     assert.equal(url, "https://api.github.com/repos/randerous/jianyin-web-clean-public/releases/latest");
     return new Response(JSON.stringify({
-      tag_name: "v1.0.29",
-      html_url: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.29",
-      published_at: "2026-07-18T00:00:00Z",
+      tag_name: "v1.0.30",
+      html_url: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.30",
+      published_at: "2026-07-19T00:00:00Z",
       body: "Latest release",
       assets: [
         {
           name: "app-release.apk",
-          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.29/app-release.apk",
+          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.30/app-release.apk",
           digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
           size: 123
         },
         {
           name: "jianyin-windows-launcher.exe",
-          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.29/jianyin-windows-launcher.exe",
+          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.30/jianyin-windows-launcher.exe",
           digest: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
           size: 456
         },
@@ -251,16 +282,16 @@ test("update endpoint exposes only the fixed GitHub release metadata", async () 
   const first = await getJson(`${baseUrl}/api/update/latest`);
   const second = await getJson(`${baseUrl}/api/update/latest`);
   assert.equal(first.response.status, 200);
-  assert.equal(first.body.currentVersion, "1.0.28");
-  assert.equal(first.body.latestVersion, "1.0.29");
+  assert.equal(first.body.currentVersion, "1.0.29");
+  assert.equal(first.body.latestVersion, "1.0.30");
   assert.equal(first.body.available, true);
-  assert.deepEqual(first.body.releaseNotes.map((note) => note.tag), ["v1.0.29"]);
+  assert.deepEqual(first.body.releaseNotes.map((note) => note.tag), ["v1.0.30"]);
   assert.deepEqual(first.body.releaseNotes.map((note) => note.notes), ["Latest release"]);
   assert.equal(first.body.canApply, false);
   assert.equal(first.body.assets.apk.sha256, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
   assert.equal(first.body.assets.apk.size, 123);
   assert.equal(first.body.assets.windowsLauncher.sha256, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
-  assert.equal(second.body.tag, "v1.0.29");
+  assert.equal(second.body.tag, "v1.0.30");
   assert.equal(releaseCalls, 2);
 });
 
@@ -411,51 +442,453 @@ test("stream revalidates playback data and forwards range requests", async () =>
   assert.equal(upstreamCalls, 1);
 });
 
-test("shared state redacts credentials before persisting", async () => {
-  const statePath = resolve("test-results", `state-redaction-${Date.now()}-${Math.random()}.json`);
+test("shared state v2 redacts credentials and returns the canonical persisted state", async (t) => {
+  const { statePath } = await createDisposableStatePath(t, "state-redaction");
   const baseUrl = await startTestServer({ neteaseClient: {}, statePath });
 
-  const write = await getJson(`${baseUrl}/api/state`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      state: {
-        playlists: [{ id: "safe", name: "Safe Playlist", songs: [] }],
-        accountCookie: "MUSIC_U=secret",
-        nested: { cookie: "SESSDATA=secret; bili_jct=secret", token: "abc" },
-        notes: ["plain", "MUSIC_U=leak"]
-      }
-    })
+  const write = await postSharedState(baseUrl, {
+    baseRevision: 0,
+    writeId: "redaction-write-1",
+    state: {
+      playlists: [{ id: "safe", name: "Safe Playlist", songs: [{ id: "local_private.wav_1700000000000_12345_0", name: "private.wav", artist: "Local", source: "local", url: "local-file:local_private", localKey: "local_private", sign: "signed" }] }],
+      history: [{ id: "history-secret", url: "https://audio.test/file?sign=secret" }],
+      queue: [{ id: "queue-secret" }],
+      theme: "dark",
+      accountCookie: "MUSIC_U=secret",
+      nested: { cookie: "SESSDATA=secret; bili_jct=secret", token: "abc" },
+      notes: ["plain", "MUSIC_U=leak"]
+    }
   });
   const read = await getJson(`${baseUrl}/api/state`);
   const serialized = JSON.stringify(read.body.state);
 
   assert.equal(write.response.status, 200);
   assert.equal(read.response.status, 200);
+  assert.deepEqual(write.body.state, read.body.state);
   assert.equal(read.body.state.playlists[0].id, "safe");
+  assert.equal(read.body.state.schemaVersion, 2);
+  assert.equal(read.body.state.revision, 1);
+  assert.equal(read.body.state.lastWriteId, "redaction-write-1");
+  assert.deepEqual(Object.keys(read.body.state).sort(), ["favorites", "lastWriteId", "playlists", "revision", "savedAt", "schemaVersion", "tombstones"]);
+  assert.equal(read.body.state.playlists[0].songs[0].id, legacySharedId("shared_song", "local_private.wav_1700000000000_12345_0"));
+  assert.doesNotMatch(read.body.state.playlists[0].songs[0].id, /private\.wav|1700000000000|12345/);
+  assert.equal(read.body.state.playlists[0].songs[0].url, "");
+  assert.equal("localKey" in read.body.state.playlists[0].songs[0], false);
   assert.doesNotMatch(serialized, /MUSIC_U|SESSDATA|bili_jct|secret|accountCookie|cookie|token/i);
+  assert.equal((await stat(statePath)).mode & 0o777, 0o600);
 });
 
-test("shared state ignores an older write that arrives after a newer write", async () => {
-  const statePath = resolve("test-results", `state-order-${Date.now()}-${Math.random()}.json`);
+test("shared state canonicalizes full legacy local IDs regardless of claimed source", async (t) => {
+  const { statePath } = await createDisposableStatePath(t, "state-legacy-id-canonicalization");
+  const baseUrl = await startTestServer({ neteaseClient: {}, statePath });
+  const playlistId = `local_private-playlist_${"x".repeat(700)}`;
+  const songId = `local_private-song_${"y".repeat(700)} `;
+  const write = await postSharedState(baseUrl, {
+    baseRevision: 0,
+    writeId: "legacy-id-canonicalization-1",
+    state: {
+      playlists: [{
+        id: playlistId,
+        name: "Spoofed source",
+        source: "netease",
+        songs: [{ id: songId, name: "Private", artist: "Local", source: "netease" }]
+      }],
+      favorites: []
+    }
+  });
+
+  assert.equal(write.response.status, 200);
+  assert.equal(write.body.state.playlists[0].source, "local");
+  assert.equal(write.body.state.playlists[0].id, legacySharedId("shared_playlist", playlistId));
+  assert.equal(write.body.state.playlists[0].songs[0].source, "local");
+  assert.equal(write.body.state.playlists[0].songs[0].id, legacySharedId("shared_song", songId));
+  assert.doesNotMatch(JSON.stringify(write.body.state), /local_private-(?:playlist|song)/);
+});
+
+test("shared state accepts a valid 5000-song library larger than the generic API body limit", async (t) => {
+  const { statePath } = await createDisposableStatePath(t, "state-large-library");
+  const baseUrl = await startTestServer({ neteaseClient: {}, statePath });
+  const songs = Array.from({ length: 5_000 }, (_, index) => ({
+    id: `netease_${index}`,
+    name: `Large Song ${index}`,
+    artist: `Artist ${index}`,
+    cover: "https://img.test/cover.jpg",
+    source: "netease",
+    url: "",
+    remotePlayable: true,
+    verifiedPlayable: false,
+    durationMs: 240_000
+  }));
+  const payload = JSON.stringify({
+    baseRevision: 0,
+    writeId: "large-library-write-1",
+    state: {
+      playlists: [{ id: "large-library", name: "Large Library", cover: "", source: "netease", songs }],
+      favorites: songs,
+      tombstones: { playlistIds: [], favorites: [], playlistSongs: {} }
+    }
+  });
+
+  assert.ok(Buffer.byteLength(payload) > 512 * 1024);
+  const response = await fetch(`${baseUrl}/api/state`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: payload
+  });
+  const body = await response.text();
+
+  assert.equal(response.status, 200, body);
+  assert.equal(JSON.parse(body).state.playlists[0].songs.length, 5_000);
+  assert.equal(JSON.parse(body).state.favorites.length, 5_000);
+});
+
+test("shared state ignores deeply nested forbidden data without recursive traversal", async (t) => {
+  const { statePath } = await createDisposableStatePath(t, "state-deep-forbidden");
+  const baseUrl = await startTestServer({ neteaseClient: {}, statePath });
+  const depth = 20_000;
+  const nested = `${'{"child":'.repeat(depth)}null${"}".repeat(depth)}`;
+  const payload = `{"baseRevision":0,"writeId":"deep-forbidden-write-1","state":{"playlists":[],"favorites":[],"untrusted":${nested}}}`;
+
+  assert.ok(Buffer.byteLength(payload) < 512 * 1024);
+  const response = await fetch(`${baseUrl}/api/state`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: payload
+  });
+  const body = await response.text();
+
+  assert.equal(response.status, 200, body);
+  const state = JSON.parse(body).state;
+  assert.equal(state.revision, 1);
+  assert.deepEqual(state.playlists, []);
+  assert.deepEqual(state.favorites, []);
+  assert.equal("untrusted" in state, false);
+});
+
+test("shared state ignores deeply nested values in numeric fields without coercion", async (t) => {
+  const { statePath } = await createDisposableStatePath(t, "state-deep-numeric-fields");
+  const baseUrl = await startTestServer({ neteaseClient: {}, statePath });
+  const depth = 20_000;
+  const nested = `${"[".repeat(depth)}0${"]".repeat(depth)}`;
+  const payload = `{"baseRevision":0,"writeId":"deep-numeric-write-1","state":{"updatedAt":${nested},"playlists":[{"id":"deep","name":"Deep","source":"bili","trackCount":${nested},"songs":[{"id":"deep-song","name":"Deep Song","artist":"Artist","source":"bili","durationMs":${nested},"cid":${nested}}]}],"favorites":[]}}`;
+
+  assert.ok(Buffer.byteLength(payload) < 512 * 1024);
+  const response = await fetch(`${baseUrl}/api/state`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: payload
+  });
+  const body = await response.text();
+
+  assert.equal(response.status, 200, body);
+  const state = JSON.parse(body).state;
+  assert.equal("updatedAt" in state, false);
+  assert.equal("trackCount" in state.playlists[0], false);
+  assert.equal("durationMs" in state.playlists[0].songs[0], false);
+  assert.equal("cid" in state.playlists[0].songs[0], false);
+});
+
+test("non-state APIs keep the generic 512kb JSON body limit", async () => {
+  const baseUrl = await startTestServer({ neteaseClient: {} });
+  const response = await fetch(`${baseUrl}/api/update/apply`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ padding: "x".repeat(600 * 1024) })
+  });
+  const body = await response.json();
+
+  assert.equal(response.status, 413);
+  assert.deepEqual(body, { error: "payload_too_large", message: "请求数据过大" });
+});
+
+test("shared state CAS requires revision zero for an empty state and ignores client clocks", async (t) => {
+  const { statePath } = await createDisposableStatePath(t, "state-cas");
   const baseUrl = await startTestServer({ neteaseClient: {}, statePath });
 
-  const newer = await getJson(`${baseUrl}/api/state`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ state: { marker: "newer", updatedAt: 200 } })
+  const empty = await getJson(`${baseUrl}/api/state`);
+  assert.equal(empty.response.status, 200);
+  assert.equal(empty.body.state.schemaVersion, 2);
+  assert.equal(empty.body.state.revision, 0);
+
+  const missingOnEmpty = await postSharedState(baseUrl, {
+    writeId: "cas-missing-empty",
+    state: { playlists: [], favorites: [], updatedAt: 999 }
   });
-  const older = await getJson(`${baseUrl}/api/state`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ state: { marker: "older", updatedAt: 100 } })
+  assert.equal(missingOnEmpty.response.status, 409);
+  assert.equal(missingOnEmpty.body.state.revision, 0);
+
+  const initial = await postSharedState(baseUrl, {
+    baseRevision: 0,
+    writeId: "cas-write-1",
+    state: { schemaVersion: 99, revision: 999, lastWriteId: "client-controlled", playlists: [{ id: "initial", name: "Initial", songs: [], source: "local" }], favorites: [], updatedAt: 200 }
+  });
+  assert.equal(initial.response.status, 200);
+  assert.equal(initial.body.state.revision, 1);
+  assert.equal(initial.body.state.lastWriteId, "cas-write-1");
+
+  for (const baseRevision of [undefined, "1", -1]) {
+    const payload = {
+      writeId: `cas-invalid-${String(baseRevision)}`,
+      state: { playlists: [{ id: "invalid", name: "Invalid", songs: [], source: "local" }], favorites: [], updatedAt: 999 }
+    };
+    if (baseRevision !== undefined) payload.baseRevision = baseRevision;
+    const conflict = await postSharedState(baseUrl, payload);
+    assert.equal(conflict.response.status, 409);
+    assert.equal(conflict.body.state.revision, 1);
+    assert.equal(conflict.body.state.playlists[0].id, "initial");
+  }
+
+  const overlongWriteId = await postSharedState(baseUrl, {
+    baseRevision: 1,
+    writeId: `${" ".repeat(300)}x${" ".repeat(300)}`,
+    state: { playlists: [{ id: "invalid-write-id", name: "Invalid", songs: [], source: "local" }], favorites: [] }
+  });
+  assert.equal(overlongWriteId.response.status, 400);
+  assert.equal(overlongWriteId.body.state.revision, 1);
+
+  const equal = await postSharedState(baseUrl, {
+    baseRevision: 1,
+    writeId: "cas-write-2",
+    state: { playlists: [{ id: "equal", name: "Equal", songs: [], source: "local" }], favorites: [], updatedAt: 100 }
+  });
+  assert.equal(equal.response.status, 200);
+  assert.equal(equal.body.state.revision, 2);
+  assert.equal(equal.body.state.updatedAt, 100, "an equal revision wins even with an older client clock");
+
+  const staleWithNewerClock = await postSharedState(baseUrl, {
+    baseRevision: 1,
+    writeId: "cas-stale-newer-clock",
+    state: { playlists: [{ id: "stale", name: "Stale", songs: [], source: "local" }], favorites: [], updatedAt: Number.MAX_SAFE_INTEGER }
+  });
+  assert.equal(staleWithNewerClock.response.status, 409);
+  assert.equal(staleWithNewerClock.body.state.revision, 2);
+  assert.equal(staleWithNewerClock.body.state.playlists[0].id, "equal");
+  assert.equal(staleWithNewerClock.body.state.updatedAt, 100);
+});
+
+test("shared state serializes concurrent writes against one revision", async (t) => {
+  const { statePath } = await createDisposableStatePath(t, "state-concurrent-cas");
+  const baseUrls = await Promise.all([
+    startTestServer({ neteaseClient: {}, statePath }),
+    startTestServer({ neteaseClient: {}, statePath })
+  ]);
+  const writes = await Promise.all(["first", "second"].map((id, index) => postSharedState(baseUrls[index], {
+    baseRevision: 0,
+    writeId: `concurrent-${id}`,
+    state: { playlists: [{ id, name: id, songs: [], source: "local" }], favorites: [] }
+  })));
+  const success = writes.find(({ response }) => response.status === 200);
+  const conflict = writes.find(({ response }) => response.status === 409);
+
+  assert.ok(success);
+  assert.ok(conflict);
+  assert.equal(success.body.state.revision, 1);
+  assert.deepEqual(conflict.body.state, success.body.state);
+});
+
+test("shared state retries with the same writeId are idempotent", async (t) => {
+  const { statePath } = await createDisposableStatePath(t, "state-idempotent");
+  const baseUrl = await startTestServer({ neteaseClient: {}, statePath });
+  const payload = {
+    baseRevision: 0,
+    writeId: "idempotent-write-1",
+    state: { playlists: [{ id: "once", name: "Once", songs: [], source: "local" }], favorites: [] }
+  };
+
+  const first = await postSharedState(baseUrl, payload);
+  const restartedBaseUrl = await startTestServer({ neteaseClient: {}, statePath });
+  const retry = await postSharedState(restartedBaseUrl, payload);
+  const disk = JSON.parse(await readFile(statePath, "utf8"));
+
+  assert.equal(first.response.status, 200);
+  assert.equal(retry.response.status, 200);
+  assert.deepEqual(retry.body.state, first.body.state);
+  assert.equal(disk.revision, 1);
+  assert.equal(disk.lastWriteId, "idempotent-write-1");
+});
+
+test("shared state persists sanitized tombstones", async (t) => {
+  const { statePath } = await createDisposableStatePath(t, "state-tombstones");
+  const baseUrl = await startTestServer({ neteaseClient: {}, statePath });
+
+  const write = await postSharedState(baseUrl, {
+    baseRevision: 0,
+    writeId: "tombstone-write-1",
+    state: {
+      playlists: [],
+      favorites: [],
+      tombstones: {
+        playlistIds: [" removed-playlist ", 7, "", "removed-playlist"],
+        favorites: ["removed-favorite", null],
+        playlistSongs: {
+          " removed-playlist ": [" removed-song ", false, ""],
+          "removed-playlist": ["second-removed-song", "removed-song"],
+          invalid: "not-an-array"
+        }
+      }
+    }
   });
   const read = await getJson(`${baseUrl}/api/state`);
 
-  assert.equal(newer.response.status, 200);
-  assert.equal(older.response.status, 200);
-  assert.equal(read.body.state.marker, "newer");
-  assert.equal(read.body.state.updatedAt, 200);
+  assert.equal(write.response.status, 200);
+  assert.deepEqual(read.body.state.tombstones, {
+    playlistIds: ["removed-playlist"],
+    favorites: ["removed-favorite"],
+    playlistSongs: { "removed-playlist": ["removed-song", "second-removed-song"] }
+  });
+  assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")).tombstones, read.body.state.tombstones);
+});
+
+test("shared state canonicalizes long FLAC tombstones to the persisted song identity", async (t) => {
+  const { statePath } = await createDisposableStatePath(t, "state-long-flac-tombstone");
+  const baseUrl = await startTestServer({ neteaseClient: {}, statePath });
+  const name = "N".repeat(600);
+  const artist = "A".repeat(600);
+  const rawIdentity = `flac\u0000${name}\u0000${artist}`;
+  const expectedIdentity = legacySharedId("shared_song", rawIdentity);
+
+  const write = await postSharedState(baseUrl, {
+    baseRevision: 0,
+    writeId: "long-flac-tombstone-1",
+    state: {
+      playlists: [{
+        id: "flac-long",
+        name: "Long FLAC",
+        source: "flac",
+        songs: [{ id: "flac_long", name, artist, source: "flac" }]
+      }],
+      favorites: [{ id: "flac_long", name, artist, source: "flac" }],
+      tombstones: {
+        playlistIds: [],
+        favorites: [rawIdentity],
+        playlistSongs: { "flac-long": [rawIdentity] }
+      }
+    }
+  });
+
+  assert.equal(write.response.status, 200);
+  const persistedSong = write.body.state.playlists[0].songs[0];
+  assert.equal(persistedSong.name.length, 512);
+  assert.equal(persistedSong.artist.length, 512);
+  assert.equal(persistedSong.sharedId, expectedIdentity);
+  assert.deepEqual(write.body.state.tombstones.favorites, [expectedIdentity]);
+  assert.deepEqual(write.body.state.tombstones.playlistSongs, { "flac-long": [expectedIdentity] });
+
+  const read = await getJson(`${baseUrl}/api/state`);
+  assert.equal(read.body.state.playlists[0].songs[0].sharedId, expectedIdentity);
+  assert.deepEqual(read.body.state.tombstones.favorites, [expectedIdentity]);
+});
+
+test("shared state GET safely migrates legacy full state with a byte-identical private backup", async (t) => {
+  const { directory, statePath } = await createDisposableStatePath(t, "state-migration");
+  const rawPlaylistId = "local_secret-playlist_1700000000000";
+  const rawSongId = "local_secret-name.wav_1700000000000_12345_0";
+  const migratedPlaylistId = legacySharedId("shared_playlist", rawPlaylistId);
+  const migratedSongId = legacySharedId("shared_song", rawSongId);
+  const original = Buffer.from(`${JSON.stringify({
+    playlists: [
+      { id: rawPlaylistId, name: "Legacy", source: "local", songs: [
+        { id: rawSongId, name: "secret-name.wav", artist: "Local", source: "local", url: "local-file:private" },
+        { id: "netease_1", name: "Song", artist: "Artist", source: "netease", url: "https://audio.test/file?time=old&sign=secret", sign: "secret" }
+      ] },
+      { id: "favorites", name: "Favorites", source: "local", songs: [] },
+      { id: "shared_playlist_existing", name: "Opaque", source: "local", songs: [{ id: "shared_song_existing", name: "Opaque Song", artist: "Local", source: "local" }] }
+    ],
+    favorites: [
+      { id: rawSongId, name: "secret-name.wav", artist: "Local", source: "local", url: "local-file:private" },
+      { id: "shared_song_existing", name: "Opaque Song", artist: "Local", source: "local" }
+    ],
+    tombstones: {
+      playlistIds: [rawPlaylistId],
+      favorites: [rawSongId],
+      playlistSongs: { [rawPlaylistId]: [rawSongId] }
+    },
+    queue: [{ id: "private-queue" }],
+    history: [{ id: "private-history" }],
+    theme: "dark",
+    updatedAt: 300
+  }, null, 2)}\n`);
+  await writeFile(statePath, original, { mode: 0o644 });
+  const baseUrl = await startTestServer({ neteaseClient: {}, statePath });
+
+  const read = await getJson(`${baseUrl}/api/state`);
+  const disk = JSON.parse(await readFile(statePath, "utf8"));
+  const secondRead = await getJson(`${baseUrl}/api/state`);
+  for (const state of [read.body.state, disk]) {
+    assert.equal(state.schemaVersion, 2);
+    assert.equal(state.revision, 0);
+    assert.equal(state.updatedAt, 300);
+    assert.deepEqual(Object.keys(state).sort(), ["favorites", "playlists", "revision", "savedAt", "schemaVersion", "tombstones", "updatedAt"]);
+    assert.equal(state.playlists[0].id, migratedPlaylistId);
+    assert.equal(state.playlists[0].songs[0].id, migratedSongId);
+    assert.equal(state.favorites[0].id, state.playlists[0].songs[0].id);
+    assert.doesNotMatch(state.playlists[0].id, /secret-playlist|1700000000000/);
+    assert.doesNotMatch(state.playlists[0].songs[0].id, /secret-name\.wav|1700000000000|12345/);
+    assert.equal(state.playlists[1].id, "favorites");
+    assert.equal(state.playlists[2].id, "shared_playlist_existing");
+    assert.equal(state.playlists[2].songs[0].id, "shared_song_existing");
+    assert.equal(state.favorites[1].id, "shared_song_existing");
+    assert.deepEqual(state.tombstones.playlistIds, [migratedPlaylistId]);
+    assert.deepEqual(state.tombstones.favorites, [migratedSongId]);
+    assert.deepEqual(state.tombstones.playlistSongs, { [migratedPlaylistId]: [migratedSongId] });
+    assert.equal(state.playlists[0].songs[1].url, "");
+    assert.equal("sign" in state.playlists[0].songs[1], false);
+    assert.equal("queue" in state, false);
+  }
+  assert.equal(read.body.state.playlists[0].id, disk.playlists[0].id);
+  assert.equal(read.body.state.playlists[0].songs[0].id, disk.playlists[0].songs[0].id);
+  assert.equal(secondRead.body.state.playlists[0].id, disk.playlists[0].id);
+  assert.equal(secondRead.body.state.playlists[0].songs[0].id, disk.playlists[0].songs[0].id);
+
+  const backupNames = (await readdir(directory)).filter((name) => name.startsWith("shared-state.json.bak-"));
+  assert.equal(backupNames.length, 1);
+  assert.match(backupNames[0], /^shared-state\.json\.bak-\d{8}T\d{6}\.\d{3}Z(?:-\d+)?$/);
+  const backupPath = resolve(directory, backupNames[0]);
+  assert.deepEqual(await readFile(backupPath), original);
+  assert.equal((await stat(backupPath)).mode & 0o777, 0o600);
+  assert.equal((await stat(statePath)).mode & 0o777, 0o600);
+});
+
+test("shared state GET never exposes legacy fields when migration backup creation fails", async (t) => {
+  const { directory, statePath } = await createDisposableStatePath(t, "state-migration-failure");
+  const original = Buffer.from(JSON.stringify({
+    playlists: [{ id: "legacy", name: "Legacy", source: "local", songs: [] }],
+    favorites: [],
+    queue: [{ id: "private-queue" }],
+    accountCookie: "MUSIC_U=private"
+  }));
+  await writeFile(statePath, original, { mode: 0o600 });
+  await chmod(directory, 0o500);
+  const baseUrl = await startTestServer({ neteaseClient: {}, statePath });
+
+  const read = await getJson(`${baseUrl}/api/state`);
+  const unchanged = await readFile(statePath);
+
+  assert.equal(read.response.status, 200);
+  assert.equal(read.body.state.schemaVersion, 2);
+  assert.equal(read.body.state.revision, 0);
+  assert.deepEqual(Object.keys(read.body.state).sort(), ["favorites", "playlists", "revision", "savedAt", "schemaVersion", "tombstones"]);
+  assert.doesNotMatch(JSON.stringify(read.body.state), /queue|accountCookie|MUSIC_U|private/i);
+  assert.deepEqual(unchanged, original);
+  assert.deepEqual(await readdir(directory), ["shared-state.json"]);
+});
+
+test("shared state failures never expose the configured filesystem path", async (t) => {
+  const { directory } = await createDisposableStatePath(t, "state-safe-errors");
+  const statePath = directory;
+  const baseUrl = await startTestServer({ neteaseClient: {}, statePath });
+  const requests = [
+    ["read", () => getJson(`${baseUrl}/api/state`), "state_read_failed", "共享歌单读取失败，请稍后重试"],
+    ["write", () => postSharedState(baseUrl, { baseRevision: 0, writeId: "safe-error-1", state: { playlists: [], favorites: [] } }), "state_write_failed", "共享歌单保存失败，请稍后重试"],
+    ["delete", () => getJson(`${baseUrl}/api/state`, { method: "DELETE" }), "state_delete_failed", "共享歌单删除失败，请稍后重试"]
+  ];
+
+  for (const [operation, request, errorCode, message] of requests) {
+    const result = await request();
+    assert.equal(result.response.status, 500, `${operation} must fail for a directory state path`);
+    assert.deepEqual(result.body, { error: errorCode, message });
+    assert.doesNotMatch(JSON.stringify(result.body), new RegExp(statePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  }
 });
 
 test("upstream error messages redact credential material", async () => {

@@ -244,7 +244,8 @@ test("enabled fade animates volume while switching active songs", async ({ page 
       { id: "fade_playlist", name: "Fade Playlist", cover: "/assets/icon.png", songs: fadeSongs, source: "local" }
     ],
     fadeEnabled: true,
-    autoLyricsEnabled: false
+    autoLyricsEnabled: false,
+    updatedAt: Date.now() + 1_000_000
   };
   const stateScript = await page.addInitScript(({ key, value }) => localStorage.setItem(key, JSON.stringify(value)), { key: storageKey, value: state });
   await page.reload();
@@ -406,6 +407,7 @@ test("startup autoplay attempts to resume the persisted queue when enabled", asy
   const state = await storedState(page);
   const song = { ...testSongs[0], id: "startup_autoplay_song", name: "Startup Autoplay Song", remotePlayable: true };
   const persisted = { ...state, queue: [song], queueIndex: 0, autoPlayOnStart: true, keepQueueOnExit: true, updatedAt: (state.updatedAt ?? Date.now()) + 1_000_000 };
+  const stateScript = await page.addInitScript(({ key, value }) => localStorage.setItem(key, JSON.stringify(value)), { key: storageKey, value: persisted });
   await page.route(/\/api\/state$/, async (route) => {
     if (route.request().method() === "GET") {
       await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state: persisted }) });
@@ -414,6 +416,7 @@ test("startup autoplay attempts to resume the persisted queue when enabled", asy
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
   });
   await page.reload();
+  await stateScript.dispose();
   await expect(page.locator(".now-playing")).toContainText("Startup Autoplay Song");
   await expect.poll(() => page.evaluate(() => {
     const audio = document.querySelector("audio") as HTMLAudioElement | null;
@@ -421,7 +424,7 @@ test("startup autoplay attempts to resume the persisted queue when enabled", asy
   })).toBe(true);
 });
 
-test("rapid settings changes persist locally and batch shared state writes", async ({ page }) => {
+test("rapid settings changes persist locally without saving shared playlists", async ({ page }) => {
   await expect(page.getByRole("button", { name: "刷新推荐" })).toBeEnabled();
   await page.waitForLoadState("networkidle");
 
@@ -453,20 +456,69 @@ test("rapid settings changes persist locally and batch shared state writes", asy
     lyricSource: "embedded",
     theme: "dark"
   });
-  await expect.poll(() => sharedWrites.length).toBeGreaterThanOrEqual(1);
   await page.waitForTimeout(400);
-  expect(sharedWrites).toHaveLength(1);
-  expect(sharedWrites[0]).toMatchObject({
-    state: {
-      playQuality: "lossless",
-      downloadQuality: "standard",
-      lyricSource: "embedded",
-      theme: "dark"
-    }
-  });
+  expect(sharedWrites).toHaveLength(0);
 });
 
-test("shared state writes stay single-flight and keep only the latest pending settings", async ({ page }) => {
+test("playing a local song does not save shared state", async ({ page }) => {
+  await expect(page.getByRole("button", { name: "刷新推荐" })).toBeEnabled();
+  await page.waitForLoadState("networkidle");
+  await page.waitForTimeout(300);
+
+  const sharedSaves: Record<string, unknown>[] = [];
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    sharedSaves.push(route.request().postDataJSON());
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+
+  await playFirstHomeSong(page);
+  await expectAudioPlaying(page);
+  await page.waitForTimeout(350);
+
+  expect(sharedSaves).toHaveLength(0);
+});
+
+test("a failed shared save does not interrupt local playback", async ({ page }) => {
+  await expect(page.getByRole("button", { name: "刷新推荐" })).toBeEnabled();
+  await page.waitForLoadState("networkidle");
+  await page.waitForTimeout(300);
+
+  const sharedWrites: Array<Record<string, any>> = [];
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    sharedWrites.push(route.request().postDataJSON());
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "state_write_failed", message: "测试磁盘写入失败" })
+    });
+  });
+
+  await playFirstHomeSong(page);
+  await expectAudioPlaying(page);
+  const before = await page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.currentTime);
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await page.getByRole("button", { name: "创建歌单" }).click();
+  await page.getByRole("dialog", { name: "创建新歌单" }).getByPlaceholder("歌单名称").fill("保存失败测试歌单");
+  await page.getByRole("dialog", { name: "创建新歌单" }).getByRole("button", { name: "创建" }).click();
+
+  await expect.poll(() => sharedWrites.length).toBe(1);
+  await expectReadableToast(page, "共享歌单保存失败：测试磁盘写入失败");
+  await expectAudioPlaying(page);
+  await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.currentTime)).toBeGreaterThan(before);
+  expect(Object.keys(sharedWrites[0].state).sort()).toEqual(["favorites", "playlists", "revision", "schemaVersion", "tombstones", "updatedAt"]);
+  expect(sharedWrites[0].state).not.toHaveProperty("queue");
+  expect(sharedWrites[0].state).not.toHaveProperty("history");
+});
+
+test("shared playlist writes stay single-flight and keep only the latest pending library", async ({ page }) => {
   await expect(page.getByRole("button", { name: "刷新推荐" })).toBeEnabled();
   await page.waitForLoadState("networkidle");
 
@@ -488,14 +540,18 @@ test("shared state writes stay single-flight and keep only the latest pending se
     activeWrites -= 1;
   });
 
-  const settings = await openSettings(page);
-  await settings.getByLabel("播放音质").selectOption("standard");
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await page.getByRole("button", { name: "创建歌单" }).click();
+  await page.getByRole("dialog", { name: "创建新歌单" }).getByPlaceholder("歌单名称").fill("共享歌单一");
+  await page.getByRole("dialog", { name: "创建新歌单" }).getByRole("button", { name: "创建" }).click();
   await expect.poll(() => sharedWrites.length).toBe(1);
-  await settings.getByLabel("歌词来源").selectOption("embedded");
-  await settings.getByLabel("主题").selectOption("dark");
+  await page.getByRole("dialog", { name: "共享歌单一" }).getByRole("button", { name: "返回" }).click();
+  await page.getByRole("button", { name: "创建歌单" }).click();
+  await page.getByRole("dialog", { name: "创建新歌单" }).getByPlaceholder("歌单名称").fill("共享歌单二");
+  await page.getByRole("dialog", { name: "创建新歌单" }).getByRole("button", { name: "创建" }).click();
 
   try {
-    await page.waitForTimeout(350);
+    await page.waitForTimeout(100);
     expect(sharedWrites).toHaveLength(1);
     expect(maxActiveWrites).toBe(1);
   } finally {
@@ -504,34 +560,672 @@ test("shared state writes stay single-flight and keep only the latest pending se
 
   await expect.poll(() => sharedWrites.length).toBe(2);
   expect(maxActiveWrites).toBe(1);
-  expect(sharedWrites[1]).toMatchObject({
-    state: { playQuality: "standard", lyricSource: "embedded", theme: "dark" }
-  });
+  expect(JSON.stringify(sharedWrites[1])).toContain("共享歌单一");
+  expect(JSON.stringify(sharedWrites[1])).toContain("共享歌单二");
+  expect(Object.keys(sharedWrites[1].state).sort()).toEqual(["favorites", "playlists", "revision", "schemaVersion", "tombstones", "updatedAt"]);
 });
 
-test("pagehide flushes the latest debounced shared settings immediately", async ({ page }) => {
+test("pagehide does not save local settings or playback data as shared playlists", async ({ page }) => {
   await expect(page.getByRole("button", { name: "刷新推荐" })).toBeEnabled();
   await page.waitForLoadState("networkidle");
 
-  const sharedWrites: Array<{ at: number; body: Record<string, any> }> = [];
+  const sharedWrites: Array<Record<string, any>> = [];
   await page.route(/\/api\/state$/, async (route) => {
     if (route.request().method() !== "POST") {
       await route.fallback();
       return;
     }
-    sharedWrites.push({ at: Date.now(), body: route.request().postDataJSON() });
+    sharedWrites.push(route.request().postDataJSON());
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
   });
 
   const settings = await openSettings(page);
   await settings.getByLabel("主题").selectOption("dark");
   await expect.poll(async () => (await storedState(page)).theme).toBe("dark");
-  const dispatchedAt = Date.now();
+  await settings.getByRole("button", { name: "关闭" }).click();
+  await playFirstHomeSong(page);
+  await expectAudioPlaying(page);
   await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: false })));
-  await expect.poll(() => sharedWrites.length).toBeGreaterThan(0);
+  await page.waitForTimeout(250);
+  expect(sharedWrites).toHaveLength(0);
+});
 
-  expect(sharedWrites[0].at - dispatchedAt).toBeLessThan(225);
-  expect(sharedWrites[0].body).toMatchObject({ state: { theme: "dark" } });
+test("pagehide does not duplicate the same dirty playlist write already in flight", async ({ page }) => {
+  await page.waitForLoadState("networkidle");
+  const sharedWrites: Array<Record<string, any>> = [];
+  let releaseFirstWrite: () => void = () => {};
+  const firstWriteGate = new Promise<void>((resolve) => { releaseFirstWrite = resolve; });
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    sharedWrites.push(route.request().postDataJSON());
+    if (sharedWrites.length === 1) await firstWriteGate;
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) }).catch(() => {});
+  });
+
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await page.getByRole("button", { name: "创建歌单" }).click();
+  await page.getByRole("dialog", { name: "创建新歌单" }).getByPlaceholder("歌单名称").fill("后台刷写歌单");
+  await page.getByRole("dialog", { name: "创建新歌单" }).getByRole("button", { name: "创建" }).click();
+  await expect.poll(() => sharedWrites.length).toBe(1);
+  try {
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: false })));
+    await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: false })));
+    await page.waitForTimeout(100);
+    expect(sharedWrites).toHaveLength(1);
+    expect(JSON.stringify(sharedWrites[0])).toContain("后台刷写歌单");
+    expect(Object.keys(sharedWrites[0].state).sort()).toEqual(["favorites", "playlists", "revision", "schemaVersion", "tombstones", "updatedAt"]);
+  } finally {
+    releaseFirstWrite();
+  }
+});
+
+test("a failed shared playlist deletion stays pending and survives reload", async ({ page }) => {
+  let rejectWrites = true;
+  const sharedWrites: Array<Record<string, any>> = [];
+  page.on("dialog", (dialog) => void dialog.accept());
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() !== "POST") {
+      await route.fallback();
+      return;
+    }
+    sharedWrites.push(route.request().postDataJSON());
+    if (rejectWrites) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "测试写入失败" }) });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  const row = page.locator(".playlist-row", { hasText: "热歌推荐" });
+  await row.getByRole("button", { name: "删除歌单" }).click();
+  await expect(row).toHaveCount(0);
+  await expectReadableToast(page, "共享歌单保存失败：测试写入失败");
+  await expect.poll(async () => Boolean((await storedState(page)).sharedSyncPending)).toBe(true);
+
+  await page.reload();
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await expect(page.getByRole("button", { name: /热歌推荐/ })).toHaveCount(0);
+  await expect.poll(async () => Boolean((await storedState(page)).sharedSyncPending)).toBe(true);
+  rejectWrites = false;
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+  await expect.poll(() => sharedWrites.length).toBeGreaterThanOrEqual(2);
+  await expect.poll(async () => Boolean((await storedState(page)).sharedSyncPending)).toBe(false);
+  await expect.poll(async () => {
+    const response = await page.request.get("/api/state");
+    const body = await response.json();
+    return body.state.playlists.some((playlist: { id: string }) => playlist.id === "test_hot");
+  }).toBe(false);
+});
+
+test("an intentional favorite re-add survives a stale tombstone conflict and reload", async ({ page }) => {
+  const favoriteSong = {
+    ...testSongs[0],
+    id: "netease_readd_conflict",
+    name: "Re-add Conflict Song",
+    artist: "Conflict Artist",
+    source: "netease",
+    remotePlayable: true
+  };
+  const initialState = {
+    ...testState(),
+    playlists: [
+      { id: "favorites", name: "我喜欢的音乐", cover: "/assets/icon.png", songs: [favoriteSong], source: "local" },
+      { id: "readd_conflict", name: "Re-add Conflict Playlist", cover: "/assets/icon.png", songs: [favoriteSong], source: "local" }
+    ],
+    favorites: [favoriteSong],
+    sharedSyncPending: false,
+    sharedRevision: 10,
+    sharedTombstones: { playlistIds: [], favorites: [], playlistSongs: {} },
+    sharedTombstoneClears: { playlistIds: [], favorites: [], playlistSongs: {} },
+    updatedAt: 100
+  };
+  let serverState: Record<string, any> = {
+    ...initialState,
+    schemaVersion: 2,
+    revision: 10,
+    tombstones: { playlistIds: [], favorites: [], playlistSongs: {} }
+  };
+  const sharedWrites: Array<Record<string, any>> = [];
+  let deletedFavoriteTombstone = "";
+  let captureWrites = false;
+  let conflictReturned = false;
+  let retryFailed = false;
+  let allowRetrySuccess = false;
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state: serverState }) });
+      return;
+    }
+    const payload = route.request().postDataJSON();
+    if (!captureWrites) {
+      await route.fulfill({
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true, state: { ...payload.state, revision: 10, lastWriteId: payload.writeId } })
+      });
+      return;
+    }
+    sharedWrites.push(payload);
+    const includesFavorite = payload.state.favorites.some((song: { id: string }) => song.id === favoriteSong.id);
+    if (!includesFavorite && !conflictReturned) {
+      deletedFavoriteTombstone = payload.state.tombstones.favorites[0] ?? "";
+      serverState = { ...payload.state, revision: 11, lastWriteId: payload.writeId };
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, state: serverState }) });
+      return;
+    }
+    if (includesFavorite && !conflictReturned) {
+      conflictReturned = true;
+      const concurrentSong = { ...favoriteSong, id: "netease_concurrent_addition", name: "Concurrent Addition Song" };
+      serverState = {
+        ...serverState,
+        revision: 12,
+        updatedAt: Math.max(Number(serverState.updatedAt) || 0, Date.now()),
+        playlists: [
+          ...serverState.playlists,
+          { id: "concurrent_addition", name: "Concurrent Addition Playlist", cover: "/assets/icon.png", songs: [concurrentSong], source: "local" }
+        ]
+      };
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({ message: "concurrent shared update", state: serverState })
+      });
+      return;
+    }
+    if (conflictReturned && !retryFailed) {
+      retryFailed = true;
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "retry after reload" }) });
+      return;
+    }
+    if (!allowRetrySuccess) {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "waiting for reload" }) });
+      return;
+    }
+    serverState = { ...payload.state, revision: 13, lastWriteId: payload.writeId };
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true, state: serverState }) });
+  });
+  const stateScript = await page.addInitScript(({ key, value }) => {
+    localStorage.setItem(key, JSON.stringify(value));
+  }, { key: storageKey, value: initialState });
+  await page.reload();
+  await stateScript.dispose();
+
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await page.getByRole("button", { name: /Re-add Conflict Playlist/ }).click();
+  const dialog = page.getByRole("dialog", { name: "Re-add Conflict Playlist" });
+  const row = dialog.locator(".song-row", { hasText: "Re-add Conflict Song" });
+  await page.waitForTimeout(200);
+  captureWrites = true;
+  await row.getByRole("button", { name: "取消喜欢" }).click();
+  await expect.poll(() => deletedFavoriteTombstone).not.toBe("");
+
+  await row.getByRole("button", { name: "添加到喜欢" }).click();
+  await expect.poll(() => ({ conflictReturned, retryFailed })).toEqual({ conflictReturned: true, retryFailed: true });
+  await expect(row.getByRole("button", { name: "取消喜欢" })).toHaveAttribute("aria-pressed", "true");
+  await expect.poll(async () => {
+    const state = await storedState(page);
+    return {
+      favoritePresent: state.favorites.some((song: { id: string }) => song.id === favoriteSong.id),
+      clearPersisted: state.sharedTombstoneClears?.favorites?.includes(deletedFavoriteTombstone) ?? false,
+      pending: Boolean(state.sharedSyncPending)
+    };
+  }).toEqual({ favoritePresent: true, clearPersisted: true, pending: true });
+  const readdWrite = sharedWrites.find((write) => write.state.favorites.some((song: { id: string }) => song.id === favoriteSong.id));
+  if (!readdWrite) throw new Error("Expected an intentional re-add shared write");
+  expect(readdWrite.state).not.toHaveProperty("sharedTombstoneClears");
+
+  allowRetrySuccess = true;
+  await page.reload();
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await expect(page.getByRole("button", { name: /Concurrent Addition Playlist/ })).toBeVisible();
+  await page.getByRole("button", { name: /Re-add Conflict Playlist/ }).click();
+  const reloadedRow = page.getByRole("dialog", { name: "Re-add Conflict Playlist" }).locator(".song-row", { hasText: "Re-add Conflict Song" });
+  await expect(reloadedRow.getByRole("button", { name: "取消喜欢" })).toHaveAttribute("aria-pressed", "true");
+  await expect.poll(async () => {
+    const state = await storedState(page);
+    return {
+      pending: Boolean(state.sharedSyncPending),
+      clears: state.sharedTombstoneClears,
+      favoritePresent: state.favorites.some((song: { id: string }) => song.id === favoriteSong.id)
+    };
+  }).toEqual({
+    pending: false,
+    clears: { playlistIds: [], favorites: [], playlistSongs: {} },
+    favoritePresent: true
+  });
+  const successfulRetry = sharedWrites.at(-1);
+  if (!successfulRetry) throw new Error("Expected a successful post-reload shared retry");
+  expect(successfulRetry.state.favorites.some((song: { id: string }) => song.id === favoriteSong.id)).toBe(true);
+  expect(successfulRetry.state.playlists.some((playlist: { name: string }) => playlist.name === "Concurrent Addition Playlist")).toBe(true);
+  expect(successfulRetry.state.tombstones.favorites).not.toContain(deletedFavoriteTombstone);
+  expect(successfulRetry.state).not.toHaveProperty("sharedTombstoneClears");
+});
+
+test("a stale browser cannot resurrect a deleted playlist while adding another", async ({ page, browser }) => {
+  const stale = await browser.newContext();
+  const stalePage = await stale.newPage();
+  await mockHome(stalePage);
+  const staleStateScript = await stalePage.addInitScript(({ key, value }) => {
+    localStorage.setItem(key, JSON.stringify(value));
+  }, { key: storageKey, value: testState() });
+  await stalePage.goto("/");
+  await staleStateScript.dispose();
+  await expect(stalePage.getByRole("button", { name: "刷新推荐" })).toBeEnabled();
+
+  page.on("dialog", (dialog) => void dialog.accept());
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  const deletedRow = page.locator(".playlist-row", { hasText: "热歌推荐" });
+  await deletedRow.getByRole("button", { name: "删除歌单" }).click();
+  await expect(deletedRow).toHaveCount(0);
+  await expect.poll(async () => {
+    const response = await page.request.get("/api/state");
+    const body = await response.json();
+    return body.state.playlists.some((playlist: { id: string }) => playlist.id === "test_hot");
+  }).toBe(false);
+
+  await stalePage.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await stalePage.getByRole("button", { name: "创建歌单" }).click();
+  await stalePage.getByRole("dialog", { name: "创建新歌单" }).getByPlaceholder("歌单名称").fill("并发新增歌单");
+  await stalePage.getByRole("dialog", { name: "创建新歌单" }).getByRole("button", { name: "创建" }).click();
+
+  await expect.poll(async () => {
+    const response = await page.request.get("/api/state");
+    const body = await response.json();
+    return {
+      deletedPresent: body.state.playlists.some((playlist: { id: string }) => playlist.id === "test_hot"),
+      additionPresent: body.state.playlists.some((playlist: { name: string }) => playlist.name === "并发新增歌单")
+    };
+  }).toEqual({ deletedPresent: false, additionPresent: true });
+  await stale.close();
+});
+
+test("sparse shared state still applies remote tombstones without dropping unrelated local playlists", async ({ page }) => {
+  const localState = {
+    ...testState(),
+    playlists: [
+      ...testState().playlists,
+      { id: "local_keep", name: "Keep Local Playlist", cover: "/assets/icon.png", songs: [testSongs[0]], source: "local" }
+    ],
+    updatedAt: 200
+  };
+  const remoteState = {
+    schemaVersion: 2,
+    revision: 7,
+    playlists: [
+      { id: "remote_add", name: "Sparse Remote Addition", cover: "/assets/icon.png", songs: [testSongs[1]], source: "local" }
+    ],
+    favorites: [],
+    tombstones: { playlistIds: ["test_hot"], favorites: [], playlistSongs: {} },
+    updatedAt: 300
+  };
+  const sharedWrites: Array<Record<string, any>> = [];
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state: remoteState }) });
+      return;
+    }
+    const payload = route.request().postDataJSON();
+    sharedWrites.push(payload);
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, state: { ...payload.state, revision: 8, lastWriteId: payload.writeId } })
+    });
+  });
+  const stateScript = await page.addInitScript(({ key, value }) => {
+    localStorage.setItem(key, JSON.stringify(value));
+  }, { key: storageKey, value: localState });
+  await page.reload();
+  await stateScript.dispose();
+
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await expect(page.getByRole("button", { name: /热歌推荐/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Keep Local Playlist/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Sparse Remote Addition/ })).toBeVisible();
+  await expect.poll(() => sharedWrites.length).toBeGreaterThan(0);
+  const latestSharedWrite = sharedWrites.at(-1);
+  if (!latestSharedWrite) throw new Error("Expected the merged shared state to be written");
+  expect(latestSharedWrite.state.playlists.some((playlist: { name: string }) => playlist.name === "热歌推荐")).toBe(false);
+  expect(latestSharedWrite.state.playlists.some((playlist: { name: string }) => playlist.name === "Keep Local Playlist")).toBe(true);
+  expect(latestSharedWrite.state.playlists.some((playlist: { name: string }) => playlist.name === "Sparse Remote Addition")).toBe(true);
+  expect(latestSharedWrite.state.tombstones.playlistIds).toContain("test_hot");
+});
+
+test("playlist edits made during delayed initial hydration survive the remote response", async ({ page }) => {
+  const localState = { ...testState(), updatedAt: 100 };
+  const remoteState = {
+    ...testState(),
+    schemaVersion: 2,
+    revision: 4,
+    tombstones: { playlistIds: [], favorites: [], playlistSongs: {} },
+    updatedAt: Date.now() + 60_000
+  };
+  const sharedWrites: Array<Record<string, any>> = [];
+  let sharedReadStarted = false;
+  let releaseSharedRead: () => void = () => {};
+  const sharedReadGate = new Promise<void>((resolve) => { releaseSharedRead = resolve; });
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() === "GET") {
+      sharedReadStarted = true;
+      await sharedReadGate;
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state: remoteState }) });
+      return;
+    }
+    const payload = route.request().postDataJSON();
+    sharedWrites.push(payload);
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, state: { ...payload.state, revision: 5, lastWriteId: payload.writeId } })
+    });
+  });
+  const stateScript = await page.addInitScript(({ key, value }) => {
+    localStorage.setItem(key, JSON.stringify(value));
+  }, { key: storageKey, value: localState });
+  await page.reload();
+  await stateScript.dispose();
+
+  try {
+    await expect.poll(() => sharedReadStarted).toBe(true);
+    await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+    await page.getByRole("button", { name: "创建歌单" }).click();
+    await page.getByRole("dialog", { name: "创建新歌单" }).getByPlaceholder("歌单名称").fill("Hydration Pending Playlist");
+    await page.getByRole("dialog", { name: "创建新歌单" }).getByRole("button", { name: "创建" }).click();
+    await expect.poll(async () => (await storedState(page)).playlists.some((playlist: { name: string }) => playlist.name === "Hydration Pending Playlist")).toBe(true);
+  } finally {
+    releaseSharedRead();
+  }
+
+  await expect.poll(async () => (await storedState(page)).sharedRevision ?? 0).toBeGreaterThanOrEqual(4);
+  await expect(page.getByRole("button", { name: /Hydration Pending Playlist/ })).toBeVisible();
+  await expect.poll(() => sharedWrites.some((write) => write.state.playlists.some((playlist: { name: string }) => playlist.name === "Hydration Pending Playlist"))).toBe(true);
+});
+
+test("online retries a failed initial shared read before syncing pending library edits", async ({ page }) => {
+  const localState = { ...testState(), updatedAt: 100 };
+  const remoteState = {
+    ...testState(),
+    schemaVersion: 2,
+    revision: 9,
+    tombstones: { playlistIds: [], favorites: [], playlistSongs: {} },
+    updatedAt: 200
+  };
+  let sharedReadAttempts = 0;
+  let rejectSharedReads = true;
+  const sharedWrites: Array<Record<string, any>> = [];
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() === "GET") {
+      sharedReadAttempts += 1;
+      if (rejectSharedReads) {
+        await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "temporary shared read failure" }) });
+        return;
+      }
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state: remoteState }) });
+      return;
+    }
+    const payload = route.request().postDataJSON();
+    sharedWrites.push(payload);
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({ ok: true, state: { ...payload.state, revision: 10, lastWriteId: payload.writeId } })
+    });
+  });
+  const stateScript = await page.addInitScript(({ key, value }) => {
+    localStorage.setItem(key, JSON.stringify(value));
+  }, { key: storageKey, value: localState });
+  await page.reload();
+  await stateScript.dispose();
+
+  await expect.poll(() => sharedReadAttempts).toBeGreaterThan(0);
+  await page.waitForTimeout(200);
+  const attemptsBeforeOnline = sharedReadAttempts;
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await page.getByRole("button", { name: "创建歌单" }).click();
+  await page.getByRole("dialog", { name: "创建新歌单" }).getByPlaceholder("歌单名称").fill("Recovered Shared Playlist");
+  await page.getByRole("dialog", { name: "创建新歌单" }).getByRole("button", { name: "创建" }).click();
+  await expect.poll(async () => Boolean((await storedState(page)).sharedSyncPending)).toBe(true);
+  expect(sharedWrites).toHaveLength(0);
+
+  rejectSharedReads = false;
+  await page.evaluate(() => window.dispatchEvent(new Event("online")));
+
+  await expect.poll(() => sharedReadAttempts).toBeGreaterThan(attemptsBeforeOnline);
+  await expect.poll(() => sharedWrites.some((write) => write.state.playlists.some((playlist: { name: string }) => playlist.name === "Recovered Shared Playlist"))).toBe(true);
+  await expect.poll(async () => Boolean((await storedState(page)).sharedSyncPending)).toBe(false);
+});
+
+test("slow shared hydration does not roll back playback or settings changed meanwhile", async ({ page }) => {
+  let releaseSharedRead: () => void = () => {};
+  const sharedReadGate = new Promise<void>((resolve) => { releaseSharedRead = resolve; });
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+      return;
+    }
+    await sharedReadGate;
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state: testState() }) });
+  });
+  const stateScript = await page.addInitScript(({ key, value }) => localStorage.setItem(key, JSON.stringify(value)), { key: storageKey, value: testState() });
+  await page.reload();
+  await stateScript.dispose();
+
+  try {
+    await playFirstHomeSong(page);
+    await expectAudioPlaying(page);
+    const settings = await openSettings(page);
+    await settings.getByLabel("主题").selectOption("dark");
+    await expect.poll(async () => (await storedState(page)).theme).toBe("dark");
+  } finally {
+    releaseSharedRead();
+  }
+
+  await expect(page.locator(".now-playing")).toContainText("周杰伦 本地试听");
+  await expectAudioPlaying(page);
+  await expect.poll(async () => {
+    const state = await storedState(page);
+    return { theme: state.theme, queue: state.queue.map((song: { name: string }) => song.name) };
+  }).toEqual({ theme: "dark", queue: ["周杰伦 本地试听", "陈奕迅 本地试听"] });
+});
+
+test("late shared hydration keeps the active downloaded audio source and position", async ({ page }) => {
+  const localKey = "download_flac_late-hydration";
+  const cachedSong = {
+    ...testSongs[0],
+    id: "flac_late-hydration",
+    name: "Late Hydration Cache",
+    artist: "Offline Artist",
+    source: "flac" as const,
+    url: `local-file:${localKey}`,
+    localKey,
+    remotePlayable: true,
+    verifiedPlayable: true
+  };
+  const state = {
+    ...testState(),
+    downloadHistory: [cachedSong],
+    queue: [cachedSong],
+    queueIndex: 0,
+    updatedAt: Date.now() + 1_000_000
+  };
+  let releaseSharedRead: () => void = () => {};
+  const sharedReadGate = new Promise<void>((resolve) => { releaseSharedRead = resolve; });
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() === "GET") {
+      await sharedReadGate;
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state }) });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+  await page.evaluate(async ({ key, value, cacheKey }) => {
+    const blob = await fetch("/assets/full-song-65s.wav").then((response) => response.blob());
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("jianyin-web-clean-audio", 1);
+      request.onupgradeneeded = () => request.result.createObjectStore("files");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction("files", "readwrite");
+      tx.objectStore("files").put(blob, cacheKey);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+    localStorage.setItem(key, JSON.stringify(value));
+  }, { key: storageKey, value: state, cacheKey: localKey });
+  await page.reload();
+
+  try {
+    await page.getByRole("button", { name: "播放", exact: true }).click();
+    await expectAudioPlaying(page);
+    const before = await page.locator("audio").evaluate((audio: HTMLAudioElement) => {
+      audio.dataset.lateHydrationEmptied = "0";
+      audio.addEventListener("emptied", () => {
+        audio.dataset.lateHydrationEmptied = String(Number(audio.dataset.lateHydrationEmptied ?? "0") + 1);
+      });
+      audio.currentTime = 12;
+      audio.dispatchEvent(new Event("timeupdate"));
+      return { src: audio.src, currentTime: audio.currentTime };
+    });
+    releaseSharedRead();
+
+    await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => ({
+      src: audio.src,
+      emptied: Number(audio.dataset.lateHydrationEmptied ?? "0")
+    }))).toEqual({ src: before.src, emptied: 0 });
+    await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.currentTime)).toBeGreaterThan(before.currentTime);
+  } finally {
+    releaseSharedRead();
+  }
+});
+
+test("stale hydration revokes object URLs before retrying the latest state", async ({ page }) => {
+  const keys = ["download_flac_stale-hydration-a", "download_flac_stale-hydration-b"];
+  const songs = keys.map((localKey, index) => ({
+    ...testSongs[index],
+    id: `flac_stale-hydration-${index}`,
+    name: `Stale Hydration ${index}`,
+    source: "flac",
+    url: `local-file:${localKey}`,
+    localKey,
+    remotePlayable: true,
+    verifiedPlayable: true
+  }));
+  const state = {
+    ...testState(),
+    downloadHistory: songs,
+    queue: songs,
+    queueIndex: 0,
+    updatedAt: 100
+  };
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ state }) });
+      return;
+    }
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+  await page.addInitScript((delayedKeys) => {
+    const scope = window as Window & {
+      __hydrationUrlTest?: {
+        created: string[];
+        revoked: string[];
+        releases: Record<string, () => void>;
+        delayed: Set<string>;
+      };
+    };
+    const state = {
+      created: [] as string[],
+      revoked: [] as string[],
+      releases: {} as Record<string, () => void>,
+      delayed: new Set<string>()
+    };
+    scope.__hydrationUrlTest = state;
+    const originalCreateObjectURL = URL.createObjectURL.bind(URL);
+    const originalRevokeObjectURL = URL.revokeObjectURL.bind(URL);
+    URL.createObjectURL = (value: Blob | MediaSource) => {
+      const url = originalCreateObjectURL(value);
+      state.created.push(url);
+      return url;
+    };
+    URL.revokeObjectURL = (url: string) => {
+      state.revoked.push(url);
+      originalRevokeObjectURL(url);
+    };
+    const originalGet = IDBObjectStore.prototype.get;
+    IDBObjectStore.prototype.get = function delayedHydrationGet(query: IDBValidKey | IDBKeyRange) {
+      const key = String(query);
+      const request = originalGet.call(this, query);
+      if (!delayedKeys.includes(key) || state.delayed.has(key)) return request;
+      state.delayed.add(key);
+      const proxy = { result: undefined, error: null, onsuccess: null, onerror: null } as unknown as IDBRequest;
+      request.onsuccess = () => {
+        state.releases[key] = () => {
+          Object.defineProperty(proxy, "result", { configurable: true, value: request.result });
+          proxy.onsuccess?.(new Event("success") as Event & { target: IDBRequest });
+        };
+      };
+      request.onerror = () => proxy.onerror?.(new Event("error") as Event & { target: IDBRequest });
+      return proxy;
+    };
+  }, keys);
+  await page.evaluate(async ({ storageKey, value, localKeys }) => {
+    const blob = await fetch("/assets/full-song-65s.wav").then((response) => response.blob());
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open("jianyin-web-clean-audio", 1);
+      request.onupgradeneeded = () => request.result.createObjectStore("files");
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction("files", "readwrite");
+      localKeys.forEach((key) => tx.objectStore("files").put(blob, key));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+    localStorage.setItem(storageKey, JSON.stringify(value));
+  }, { storageKey, value: state, localKeys: keys });
+  await page.reload();
+
+  await expect.poll(() => page.evaluate((key) => typeof (window as Window & { __hydrationUrlTest?: { releases: Record<string, () => void> } }).__hydrationUrlTest?.releases[key], keys[0])).toBe("function");
+  await page.evaluate((key) => (window as Window & { __hydrationUrlTest?: { releases: Record<string, () => void> } }).__hydrationUrlTest?.releases[key]?.(), keys[0]);
+  await expect.poll(() => page.evaluate(() => (window as Window & { __hydrationUrlTest?: { created: string[] } }).__hydrationUrlTest?.created.length ?? 0)).toBe(1);
+
+  const settings = await openSettings(page);
+  await settings.getByLabel("主题").selectOption("dark");
+  await expect.poll(async () => (await storedState(page)).theme).toBe("dark");
+  await settings.getByRole("button", { name: "关闭" }).click();
+  await expect.poll(() => page.evaluate((key) => typeof (window as Window & { __hydrationUrlTest?: { releases: Record<string, () => void> } }).__hydrationUrlTest?.releases[key], keys[1])).toBe("function");
+  await page.evaluate((key) => (window as Window & { __hydrationUrlTest?: { releases: Record<string, () => void> } }).__hydrationUrlTest?.releases[key]?.(), keys[1]);
+
+  await expect.poll(() => page.evaluate(() => (window as Window & { __hydrationUrlTest?: { created: string[] } }).__hydrationUrlTest?.created.length ?? 0)).toBeGreaterThanOrEqual(4);
+  const urls = await page.evaluate(() => {
+    const value = (window as Window & { __hydrationUrlTest?: { created: string[]; revoked: string[] } }).__hydrationUrlTest;
+    return value ?? { created: [], revoked: [] };
+  });
+  expect(urls.revoked).toEqual(expect.arrayContaining(urls.created.slice(0, 2)));
+});
+
+test("a failed shared-state read never causes a blind background overwrite", async ({ page }) => {
+  let sharedWrites = 0;
+  await page.route(/\/api\/state$/, async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "测试读取失败" }) });
+      return;
+    }
+    sharedWrites += 1;
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ ok: true }) });
+  });
+  const stateScript = await page.addInitScript(({ key, value }) => localStorage.setItem(key, JSON.stringify(value)), { key: storageKey, value: testState() });
+  await page.reload();
+  await stateScript.dispose();
+
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: false })));
+  await page.waitForTimeout(250);
+  expect(sharedWrites).toBe(0);
 });
 
 test("settings dialog remains topmost while mobile player is active", async ({ page }) => {
@@ -717,7 +1411,7 @@ test("empty shared state cannot overwrite a populated local library", async ({ p
   await expect(page.getByRole("button", { name: /我喜欢的音乐 1 首歌曲/ })).toBeVisible();
 });
 
-test("smaller non-empty shared state cannot overwrite a populated local library", async ({ page }) => {
+test("smaller non-empty shared state merges without overwriting a populated local library", async ({ page }) => {
   const protectedSongs = testSongs.map((song, index) => ({
     ...song,
     id: `protected_song_${index}`,
@@ -769,10 +1463,10 @@ test("smaller non-empty shared state cannot overwrite a populated local library"
 
   await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
   await expect(page.getByRole("button", { name: /Protected Large Playlist 3 首歌曲/ })).toBeVisible();
-  await expect(page.getByRole("button", { name: /Remote Small Playlist/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Remote Small Playlist/ })).toBeVisible();
   const state = await storedState(page);
   expect(JSON.stringify(state)).toContain("Protected Large Playlist");
-  expect(JSON.stringify(state)).not.toContain("Remote Small Playlist");
+  expect(JSON.stringify(state)).toContain("Remote Small Playlist");
 });
 
 test("shared state merges playlists and dedupes repeated songs", async ({ page }) => {
@@ -837,9 +1531,9 @@ test("shared state merges playlists and dedupes repeated songs", async ({ page }
   await expect(page.getByRole("button", { name: /Local Merge Playlist 1 首歌曲/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /Remote Merge Playlist 1 首歌曲/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /我喜欢的音乐 2 首歌曲/ })).toBeVisible();
+  await expect.poll(async () => (await storedState(page)).favorites.map((song: { name: string }) => song.name).sort()).toEqual(["Merge Song A", "Merge Song C"]);
   const merged = await storedState(page);
-  expect(merged.favorites.map((song: { id: string }) => song.id).sort()).toEqual(["merge_song_a", "merge_song_c"]);
-  expect(merged.history.map((song: { id: string }) => song.id).sort()).toEqual(["merge_song_a", "merge_song_b"]);
-  expect(merged.downloadHistory.map((song: { id: string }) => song.id)).toEqual(["merge_song_c"]);
-  expect(merged.searchHistory).toEqual(["local merge", "remote merge"]);
+  expect(merged.history.map((song: { id: string }) => song.id)).toEqual(["merge_song_a"]);
+  expect(merged.downloadHistory).toEqual([]);
+  expect(merged.searchHistory).toEqual(["local merge"]);
 });

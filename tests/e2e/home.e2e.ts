@@ -293,6 +293,62 @@ test("opening recommended playlist starts bounded FLAC prewarm without blocking 
   expect(flacSearchRequests.length).toBeLessThanOrEqual(4);
 });
 
+test("resolving a saved FLAC placeholder during prewarm does not resave shared state", async ({ page }) => {
+  let releasePrewarm: () => void = () => {};
+  const prewarmGate = new Promise<void>((resolve) => { releasePrewarm = resolve; });
+  let searchRequests = 0;
+  const sharedWrites: Array<Record<string, unknown>> = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/state") {
+      sharedWrites.push(request.postDataJSON());
+    }
+  });
+  await page.route(/\/api\/netease\/playlist\/3778678.*/, async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        playlist: {
+          id: "netease_playlist_3778678",
+          name: "Placeholder Playlist",
+          cover: "/assets/icon.png",
+          source: "netease",
+          songs: [{ id: "flac_search_placeholder", name: "Stable Placeholder", artist: "Cloud Artist", cover: "/assets/icon.png", url: "", source: "flac", remotePlayable: true, verifiedPlayable: false }]
+        }
+      })
+    });
+  });
+  await page.route("**/api/flac/search**", async (route) => {
+    searchRequests += 1;
+    await prewarmGate;
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        songs: [{ id: "flac_101", name: "Stable Placeholder", artist: "Cloud Artist", cover: "/assets/icon.png", url: "/api/flac/stream/101?format=mp3&bitrate=320&time=t101&sign=s101", source: "flac", remotePlayable: true, verifiedPlayable: true, durationMs: 65000, audioType: "mp3", quality: "320k" }],
+        page: 1,
+        limit: 5,
+        total: 1,
+        hasMore: false
+      })
+    });
+  });
+  await page.route(/\/api\/flac\/song\/101.*/, async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ url: "/api/flac/stream/101?format=mp3&bitrate=320&time=t101&sign=s101", durationMs: 65000, verifiedPlayable: true, audioType: "mp3", quality: "320k" }) });
+  });
+
+  await page.getByRole("button", { name: /Home Playlist/ }).click();
+  const playlist = page.getByRole("dialog", { name: "Placeholder Playlist" });
+  await playlist.getByRole("button", { name: "收藏歌单" }).click();
+  await expect.poll(() => sharedWrites.length).toBe(1);
+  releasePrewarm();
+  await expect.poll(() => searchRequests).toBeGreaterThan(0);
+  await expect.poll(async () => {
+    const raw = await page.evaluate((key) => localStorage.getItem(key), storageKey);
+    return raw?.includes("flac_101") ?? false;
+  }).toBe(true);
+  await page.waitForTimeout(300);
+  expect(sharedWrites).toHaveLength(1);
+});
+
 test("playing an imported homepage playlist song keeps other recommendation covers", async ({ page }) => {
   await page.route("**/api/netease/home**", async (route) => {
     await route.fulfill({

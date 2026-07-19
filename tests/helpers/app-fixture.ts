@@ -113,13 +113,36 @@ export async function mockHome(page: Page) {
 
 export async function reset(page: Page) {
   const state = testState();
-  await page.request.post("/api/state", { data: { state } });
+  await replaceSharedStateForTest(page, state);
   await mockHome(page);
   const initScript = await page.addInitScript(({ key, value }) => {
     localStorage.setItem(key, JSON.stringify(value));
   }, { key: storageKey, value: state });
   await page.goto("/");
   await initScript.dispose();
+}
+
+export async function replaceSharedStateForTest(page: Page, state: Record<string, unknown>) {
+  let currentResponse = await page.request.get("/api/state");
+  let current = await currentResponse.json();
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const baseRevision = Number.isInteger(current?.state?.revision) ? current.state.revision : 0;
+    const response = await page.request.post("/api/state", {
+      data: {
+        state,
+        baseRevision,
+        writeId: `test-write-${globalThis.crypto.randomUUID()}`
+      }
+    });
+    if (response.ok()) return;
+    const body = await response.json().catch(() => ({}));
+    if (response.status() !== 409 || !body.state) {
+      throw new Error(`test shared state setup failed: HTTP ${response.status()} ${JSON.stringify(body)}`);
+    }
+    current = body;
+    currentResponse = response;
+  }
+  throw new Error(`test shared state setup failed after CAS retries: HTTP ${currentResponse.status()}`);
 }
 
 export async function expectAudioPlaying(page: Page) {

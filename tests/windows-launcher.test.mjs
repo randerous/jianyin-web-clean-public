@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 const source = await readFile(new URL("../windows/Launcher.cs", import.meta.url), "utf8");
@@ -17,6 +19,28 @@ test("launcher preserves local changes and only performs fast-forward updates", 
 test("launcher stores state and logs under LocalAppData", () => {
   assert.match(source, /SpecialFolder\.LocalApplicationData/);
   assert.match(source, /JIANYIN_STATE_PATH/);
+});
+
+test("launcher ignores the 1.0.20 runtime cache after upgrading to 1.0.29", async (t) => {
+  const versionMatch = source.match(/private const string RuntimeVersion = "([^"]+)";/);
+  assert.ok(versionMatch, "launcher must declare an embedded runtime version");
+  const runtimeVersion = versionMatch[1];
+  assert.equal(runtimeVersion, "1.0.29");
+  assert.match(
+    source,
+    /var target = Path\.Combine\(DataDir, "runtime", RuntimeVersion, "app"\);\s+var marker = Path\.Combine\(target, "\.ready"\);\s+if \(File\.Exists\(marker\)\) return target;/,
+  );
+
+  const dataDir = await mkdtemp(join(tmpdir(), "jianyin-launcher-"));
+  t.after(() => rm(dataDir, { recursive: true, force: true }));
+
+  const staleTarget = join(dataDir, "runtime", "1.0.20", "app");
+  await mkdir(staleTarget, { recursive: true });
+  await writeFile(join(staleTarget, ".ready"), "1.0.20");
+
+  const selectedTarget = join(dataDir, "runtime", runtimeVersion, "app");
+  assert.notEqual(selectedTarget, staleTarget);
+  await assert.rejects(readFile(join(selectedTarget, ".ready")), { code: "ENOENT" });
 });
 
 test("build embeds only backend runtime dependencies", async () => {
