@@ -1209,7 +1209,7 @@ test("stale hydration revokes object URLs before retrying the latest state", asy
   expect(urls.revoked).toEqual(expect.arrayContaining(urls.created.slice(0, 2)));
 });
 
-test("a failed shared-state read never causes a blind background overwrite", async ({ page }) => {
+test("a failed shared-state read keeps local edits pending without attempting doomed saves", async ({ page }) => {
   let sharedWrites = 0;
   await page.route(/\/api\/state$/, async (route) => {
     if (route.request().method() === "GET") {
@@ -1223,9 +1223,15 @@ test("a failed shared-state read never causes a blind background overwrite", asy
   await page.reload();
   await stateScript.dispose();
 
+  await page.getByRole("navigation").getByRole("button", { name: "我的" }).click();
+  await page.getByRole("button", { name: "创建歌单" }).click();
+  await page.getByRole("dialog", { name: "创建新歌单" }).getByPlaceholder("歌单名称").fill("等待共享恢复");
+  await page.getByRole("dialog", { name: "创建新歌单" }).getByRole("button", { name: "创建" }).click();
+  await expect.poll(async () => Boolean((await storedState(page)).sharedSyncPending)).toBe(true);
   await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: false })));
   await page.waitForTimeout(250);
   expect(sharedWrites).toBe(0);
+  await expect(page.locator(".toast")).toHaveCount(0);
 });
 
 test("settings dialog remains topmost while mobile player is active", async ({ page }) => {

@@ -460,7 +460,11 @@ async function readSharedStateUnlocked({ migrate = true } = {}) {
 }
 
 function readSharedState() {
-  return withSharedStateLock(async () => (await readSharedStateUnlocked()).state);
+  return withSharedStateLock(async () => {
+    const snapshot = await readSharedStateUnlocked();
+    if (snapshot.migrationError) throw snapshot.migrationError;
+    return snapshot.state;
+  });
 }
 
 function writeSharedState(state, baseRevision, writeId) {

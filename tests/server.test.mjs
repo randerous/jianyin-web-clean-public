@@ -242,30 +242,30 @@ test("update endpoint exposes only the fixed GitHub release metadata", async () 
     releaseCalls += 1;
     if (url === "https://api.github.com/repos/randerous/jianyin-web-clean-public/releases?per_page=100") {
       return new Response(JSON.stringify([
-        { tag_name: "v1.0.30", published_at: "2026-07-19T00:00:00Z", body: "Latest release" },
+        { tag_name: "v1.0.31", published_at: "2026-07-20T00:00:00Z", body: "Latest release" },
         { tag_name: "v1.0.29", published_at: "2026-07-18T00:00:00Z", body: "Current release" },
         { tag_name: "v1.0.28", published_at: "2026-07-17T00:00:00Z", body: "Older release" },
-        { tag_name: "v1.0.31", published_at: "2026-07-20T00:00:00Z", body: "Future release" },
-        { tag_name: "v1.0.32", draft: true, published_at: "2026-07-21T00:00:00Z", body: "Draft release" },
-        { tag_name: "v1.0.33", prerelease: true, published_at: "2026-07-22T00:00:00Z", body: "Pre-release" }
+        { tag_name: "v1.0.32", published_at: "2026-07-21T00:00:00Z", body: "Future release" },
+        { tag_name: "v1.0.33", draft: true, published_at: "2026-07-22T00:00:00Z", body: "Draft release" },
+        { tag_name: "v1.0.34", prerelease: true, published_at: "2026-07-23T00:00:00Z", body: "Pre-release" }
       ]), { status: 200, headers: { "content-type": "application/json" } });
     }
     assert.equal(url, "https://api.github.com/repos/randerous/jianyin-web-clean-public/releases/latest");
     return new Response(JSON.stringify({
-      tag_name: "v1.0.30",
-      html_url: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.30",
-      published_at: "2026-07-19T00:00:00Z",
+      tag_name: "v1.0.31",
+      html_url: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.31",
+      published_at: "2026-07-20T00:00:00Z",
       body: "Latest release",
       assets: [
         {
           name: "app-release.apk",
-          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.30/app-release.apk",
+          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.31/app-release.apk",
           digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
           size: 123
         },
         {
           name: "jianyin-windows-launcher.exe",
-          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.30/jianyin-windows-launcher.exe",
+          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.31/jianyin-windows-launcher.exe",
           digest: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
           size: 456
         },
@@ -282,16 +282,16 @@ test("update endpoint exposes only the fixed GitHub release metadata", async () 
   const first = await getJson(`${baseUrl}/api/update/latest`);
   const second = await getJson(`${baseUrl}/api/update/latest`);
   assert.equal(first.response.status, 200);
-  assert.equal(first.body.currentVersion, "1.0.29");
-  assert.equal(first.body.latestVersion, "1.0.30");
+  assert.equal(first.body.currentVersion, "1.0.30");
+  assert.equal(first.body.latestVersion, "1.0.31");
   assert.equal(first.body.available, true);
-  assert.deepEqual(first.body.releaseNotes.map((note) => note.tag), ["v1.0.30"]);
+  assert.deepEqual(first.body.releaseNotes.map((note) => note.tag), ["v1.0.31"]);
   assert.deepEqual(first.body.releaseNotes.map((note) => note.notes), ["Latest release"]);
   assert.equal(first.body.canApply, false);
   assert.equal(first.body.assets.apk.sha256, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
   assert.equal(first.body.assets.apk.size, 123);
   assert.equal(first.body.assets.windowsLauncher.sha256, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
-  assert.equal(second.body.tag, "v1.0.30");
+  assert.equal(second.body.tag, "v1.0.31");
   assert.equal(releaseCalls, 2);
 });
 
@@ -849,7 +849,7 @@ test("shared state GET safely migrates legacy full state with a byte-identical p
   assert.equal((await stat(statePath)).mode & 0o777, 0o600);
 });
 
-test("shared state GET never exposes legacy fields when migration backup creation fails", async (t) => {
+test("shared state GET does not advertise a writable remote state when migration persistence fails", async (t) => {
   const { directory, statePath } = await createDisposableStatePath(t, "state-migration-failure");
   const original = Buffer.from(JSON.stringify({
     playlists: [{ id: "legacy", name: "Legacy", source: "local", songs: [] }],
@@ -864,11 +864,9 @@ test("shared state GET never exposes legacy fields when migration backup creatio
   const read = await getJson(`${baseUrl}/api/state`);
   const unchanged = await readFile(statePath);
 
-  assert.equal(read.response.status, 200);
-  assert.equal(read.body.state.schemaVersion, 2);
-  assert.equal(read.body.state.revision, 0);
-  assert.deepEqual(Object.keys(read.body.state).sort(), ["favorites", "playlists", "revision", "savedAt", "schemaVersion", "tombstones"]);
-  assert.doesNotMatch(JSON.stringify(read.body.state), /queue|accountCookie|MUSIC_U|private/i);
+  assert.equal(read.response.status, 500);
+  assert.deepEqual(read.body, { error: "state_read_failed", message: "共享歌单读取失败，请稍后重试" });
+  assert.doesNotMatch(JSON.stringify(read.body), /queue|accountCookie|MUSIC_U|private/i);
   assert.deepEqual(unchanged, original);
   assert.deepEqual(await readdir(directory), ["shared-state.json"]);
 });
