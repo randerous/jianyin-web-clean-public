@@ -377,6 +377,10 @@ export default function App() {
   const audioAttemptRef = useRef<{ song: Song; source: Song[] } | null>(null);
   const audioMutationOwnerRef = useRef(0);
   const playRequestRef = useRef(0);
+  // 用户已主动发起播放（点击/自动续播）。hydration 完成时若为真，
+  // 不得用持久化队列覆盖正在进行的播放（否则 currentSong 变 null，
+  // Android bridge 会推 present=false → 停掉尚未 startForeground 的前台服务 → 崩溃）。
+  const userStartedPlaybackRef = useRef(false);
   const playbackPauseRef = useRef(0);
   const audioRetryRef = useRef<{ key: string; at: number } | null>(null);
   const pausedPlaybackRef = useRef<{ key: string; at: number } | null>(null);
@@ -691,9 +695,15 @@ export default function App() {
 
   useEffect(() => {
     try {
+      // 未 hydration 前状态是中间态（持久化恢复尚未完成），推送会把
+      // 错误的 present/playing 发给 Android 侧；恢复完成后本 effect 会
+      // 随 stateHydrated 变化再次触发并推送正确状态。
+      // 首次推送也不得为 present=false（初始空态推 STOP 会停掉
+      // 正在启动的前台服务 → ForegroundServiceDidNotStartInTimeException）。
+      const last = androidPlaybackPushRef.current;
+      if (!stateHydrated || (!currentSong && last.lastPushAt === 0)) return;
       const key = currentSong ? songKey(currentSong) : "";
       const now = Date.now();
-      const last = androidPlaybackPushRef.current;
       const songChanged = key !== last.key;
       const stateChanged = playing !== last.playing;
       const durationChanged = Math.abs(duration - last.duration) >= 1;
@@ -716,7 +726,7 @@ export default function App() {
     } catch {
       // Android bridge is only available inside the packaged app.
     }
-  }, [androidStatusNotificationEnabled, currentSong, duration, playing, position]);
+  }, [androidStatusNotificationEnabled, currentSong, duration, playing, position, stateHydrated]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -920,8 +930,10 @@ export default function App() {
           setFavorites(result.state.favorites);
           setHistory(result.state.history);
           setDownloadHistory(result.state.downloadHistory);
-          setQueue(result.state.queue);
-          setQueueIndex(result.state.queueIndex);
+          if (!userStartedPlaybackRef.current) {
+            setQueue(result.state.queue);
+            setQueueIndex(result.state.queueIndex);
+          }
           setSearchHistory(result.state.searchHistory);
           setTheme(result.state.theme);
           setPlayQuality(result.state.playQuality);
@@ -1162,6 +1174,7 @@ export default function App() {
   const playSong = useCallback(async (song: Song, source?: Song[], options: { quiet?: boolean; startAt?: number; refresh?: boolean; fallbackToMp3?: boolean } = {}) => {
     const requestId = playRequestRef.current + 1;
     playRequestRef.current = requestId;
+    userStartedPlaybackRef.current = true;
     // 在首个 await 前同步接线 WebAudio 均衡图（常见路径都在用户手势内，
     // 保证 AudioContext 以 running 状态创建；非手势时内部自动延迟）。
     ensureAudioEffects(audioRef.current);

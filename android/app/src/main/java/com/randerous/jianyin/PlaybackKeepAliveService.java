@@ -41,10 +41,25 @@ public class PlaybackKeepAliveService extends Service {
     private PowerManager.WakeLock wakeLock;
     private MediaSessionCompat mediaSession;
 
+    // 供 MainActivity 判断服务是否已进入前台（避免在服务尚未
+    // startForeground 时 stopService 触发 ForegroundServiceDidNotStartInTimeException）
+    static volatile boolean startedForeground = false;
+
     @Override
     public void onCreate() {
         super.onCreate();
         createChannels();
+        // 立即进入前台（最小通知），再设置媒体会话等耗时工作。
+        // startForegroundService 投递后若被 stopService 在 startForeground
+        // 之前打断，AMS 会抛 ForegroundServiceDidNotStartInTimeException 杀掉进程。
+        // 主线程繁忙时 onCreate 可能延迟数秒执行，这里越早 startForeground 越好。
+        try {
+            PendingIntent launchIntent = buildLaunchIntent();
+            startForeground(MEDIA_NOTIFICATION_ID, buildMediaNotification("既见", "正在播放", false, 0, 0, launchIntent));
+            startedForeground = true;
+        } catch (Exception e) {
+            android.util.Log.e("JianyinBridge", "startForeground in onCreate failed: " + e);
+        }
         mediaSession = new MediaSessionCompat(this, "JijianPlayback");
         mediaSession.setFlags(MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS | MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS);
         mediaSession.setCallback(new MediaSessionCompat.Callback() {
@@ -74,6 +89,7 @@ public class PlaybackKeepAliveService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? ACTION_START : intent.getAction();
+        android.util.Log.d("JianyinBridge", "service onStartCommand action=" + action + " flags=" + flags);
         if (ACTION_STOP.equals(action)) {
             stopPlaybackKeepAlive();
             return START_NOT_STICKY;
@@ -95,6 +111,8 @@ public class PlaybackKeepAliveService extends Service {
 
         updateMediaSession(safeTitle, safeArtist, playing, positionMs, durationMs, launchIntent);
         startForeground(MEDIA_NOTIFICATION_ID, buildMediaNotification(safeTitle, safeArtist, playing, positionMs, durationMs, launchIntent));
+        // 服务已真正进入前台，MainActivity 的延迟 STOP 轮询可据此放行
+        startedForeground = true;
         if (statusNotificationEnabled) {
             showStatusNotification(safeTitle, safeArtist, playing, positionMs, durationMs, launchIntent);
         } else {

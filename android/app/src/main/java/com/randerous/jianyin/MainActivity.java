@@ -16,6 +16,8 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.ParcelFileDescriptor;
 import android.provider.Settings;
 import android.webkit.CookieManager;
@@ -499,6 +501,21 @@ public class MainActivity extends BridgeActivity {
             activity.runOnUiThread(() -> activity.downloadAndInstallUpdate(url, fileName, sha256, versionTag));
         }
 
+        private long lastStartSentAt = 0L;
+        private final Handler bridgeHandler = new Handler(Looper.getMainLooper());
+        private final Runnable deferredStopRunnable = new Runnable() {
+            @Override
+            public void run() {
+                // 服务已进入前台，或 START 发出已久（服务理应早已 startForeground），可以安全 stop。
+                if (PlaybackKeepAliveService.startedForeground || System.currentTimeMillis() - lastStartSentAt > 10000) {
+                    context.startService(stopIntent);
+                } else {
+                    bridgeHandler.postDelayed(this, 300);
+                }
+            }
+        };
+        private Intent stopIntent;
+
         private void updatePlaybackDetails(boolean present, boolean playing, String title, String artist, double position, double duration, boolean statusNotificationEnabled) {
             Intent intent = new Intent(context, PlaybackKeepAliveService.class);
             intent.setAction(present ? PlaybackKeepAliveService.ACTION_START : PlaybackKeepAliveService.ACTION_STOP);
@@ -509,9 +526,24 @@ public class MainActivity extends BridgeActivity {
             intent.putExtra(PlaybackKeepAliveService.EXTRA_DURATION_MS, Math.max(0, (long) (duration * 1000)));
             intent.putExtra(PlaybackKeepAliveService.EXTRA_STATUS_NOTIFICATION_ENABLED, statusNotificationEnabled);
             if (present) {
+                lastStartSentAt = System.currentTimeMillis();
+                bridgeHandler.removeCallbacks(deferredStopRunnable);
+                // 新 START 会重建前台状态，清掉旧标志，避免用旧实例的
+                // startedForeground=true 误跳过 STOP 延迟（新实例尚未 startForeground 时 stop 会崩）。
+                PlaybackKeepAliveService.startedForeground = false;
                 context.startForegroundService(intent);
             } else {
-                context.startService(intent);
+                // 服务可能刚被 startForegroundService 创建、尚未调用 startForeground
+                //（主线程繁忙时 onCreate 可延迟数秒）。此时立即 stopService 会让
+                // AMS 抛 ForegroundServiceDidNotStartInTimeException 杀掉进程，
+                // 因此延迟到服务真正 startForeground（或超时）后再 stop。
+                stopIntent = intent;
+                if (PlaybackKeepAliveService.startedForeground) {
+                    context.startService(intent);
+                } else {
+                    bridgeHandler.removeCallbacks(deferredStopRunnable);
+                    bridgeHandler.postDelayed(deferredStopRunnable, 300);
+                }
             }
         }
     }
