@@ -55,6 +55,8 @@ app.use(express.json({ limit: "512kb" }));
 const RESOLVED_URL_TTL_MS = 8 * 60 * 1000;
 const SEARCH_CACHE_TTL_MS = 90 * 1000;
 const PLAYLIST_DETAIL_CACHE_TTL_MS = 10 * 60 * 1000;
+const HOT_SONGS_CACHE_TTL_MS = 10 * 60 * 1000;
+const NETEASE_HOT_PLAYLIST_ID = "3778678"; // 云音乐热歌榜
 const playlistTimeoutFromEnv = Number(process.env.JIANYIN_PLAYLIST_TIMEOUT_MS);
 const PLAYLIST_UPSTREAM_TIMEOUT_MS = Number.isFinite(playlistTimeoutFromEnv) && playlistTimeoutFromEnv > 0
   ? Math.min(Math.trunc(playlistTimeoutFromEnv), 10_000)
@@ -78,6 +80,8 @@ const FLAC_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/5
 	const flacSearchInFlight = new Map();
 	const playlistDetailCache = new Map();
 	const playlistDetailInFlight = new Map();
+	const hotSongsCache = new Map();
+	const hotSongsInFlight = new Map();
 	const biliStreamCache = new Map();
 	const flacStreamCache = new Map();
 	let latestUpdateCache = null;
@@ -564,6 +568,7 @@ function writeSharedState(state, baseRevision, writeId) {
 	  searchCache.clear();
 	  flacSearchCache.clear();
 	  flacSearchInFlight.clear();
+	  hotSongsCache.clear();
 	}
 
 	function setBiliCookie(cookie) {
@@ -1399,6 +1404,35 @@ function playableRejectReason(data) {
 	  return [];
 	}
 
+	async function getHotTracks(cookie = neteaseAccountCookie, limit = 10) {
+	  const safeLimit = Math.min(Math.max(1, Number(limit) || 10), 30);
+	  const playlist = await getPlaylistDetailWithFallback(NETEASE_HOT_PLAYLIST_ID, cookie, Math.min(safeLimit * 2, PLAYLIST_CANDIDATE_LIMIT));
+	  return Array.isArray(playlist?.tracks) ? playlist.tracks : [];
+	}
+
+	async function getHotSongs(limit, preferredQuality = DEFAULT_PLAY_QUALITY, cookie = neteaseAccountCookie) {
+	  const safeLimit = Math.min(Math.max(1, Number(limit) || 10), 30);
+	  const cacheKey = `${cookieHash(cookie)}:${safeLimit}:${normalizeQuality(preferredQuality)}`;
+	  const cached = hotSongsCache.get(cacheKey);
+	  if (cached && cached.expiresAt > Date.now()) return cached.songs;
+	  const pending = hotSongsInFlight.get(cacheKey);
+	  if (pending) return pending;
+	  const request = (async () => {
+	    const tracks = await getHotTracks(cookie, safeLimit);
+	    let songs = [];
+	    if (tracks.length) {
+	      const verified = await mapVerifiedSongs(tracks, safeLimit, preferredQuality, cookie);
+	      songs = verified.length ? verified : tracks.slice(0, safeLimit).map(mapSong);
+	    }
+	    hotSongsCache.set(cacheKey, { songs, expiresAt: Date.now() + HOT_SONGS_CACHE_TTL_MS });
+	    return songs;
+	  })().finally(() => {
+	    hotSongsInFlight.delete(cacheKey);
+	  });
+	  hotSongsInFlight.set(cacheKey, request);
+	  return request;
+	}
+
 	async function retryNetease(requester, attempts = 3) {
 	  let lastError;
 	  for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -2028,10 +2062,23 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 	app.get("/api/netease/home", async (req, res) => {
 	  try {
 	    const limit = parseLimit(req.query.playlistLimit, 20, 30);
+	    const hotLimit = parseLimit(req.query.hotLimit, 10, 20);
 	    const refresh = parseOffset(req.query.refresh, 0, 99);
 	    const offset = parseOffset(req.query.offset, refresh ? (refresh * limit) % 300 : 0, 300);
-	    const recommendedPlaylists = await getRecommendedPlaylists(limit, offset);
-	    res.json({ radarSongs: [], hotSongs: [], recommendedPlaylists, quality: normalizeQuality(req.query.quality), refresh, offset });
+	    const quality = normalizeQuality(req.query.quality);
+	    const [recommendedPlaylists, hotSongs] = await Promise.allSettled([
+	      getRecommendedPlaylists(limit, offset),
+	      getHotSongs(hotLimit, quality, neteaseAccountCookie)
+	    ]);
+	    if (recommendedPlaylists.status === "rejected") throw recommendedPlaylists.reason;
+	    res.json({
+	      radarSongs: [],
+	      hotSongs: hotSongs.status === "fulfilled" ? hotSongs.value : [],
+	      recommendedPlaylists: recommendedPlaylists.value,
+	      quality,
+	      refresh,
+	      offset
+	    });
 	  } catch (error) {
 	    res.status(502).json({ error: "netease_home_failed", message: errorMessage(error) });
 	  }

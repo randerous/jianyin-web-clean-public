@@ -7,9 +7,16 @@ test.beforeEach(async ({ page }) => {
 
 test("home shows Android 5 recommendation sections", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "今日推荐" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "热门歌曲" })).toBeVisible();
   await expect(page.getByRole("button", { name: /周杰伦 本地试听/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /Home Hot Song/ })).toBeVisible();
   await expect(page.getByRole("button", { name: /Home Playlist/ })).toBeVisible();
+});
+
+test("home hot song plays from the hot shelf", async ({ page }) => {
+  await page.getByRole("button", { name: /Home Hot Song/ }).click();
+  await expectAudioPlaying(page);
+  await expect(page.locator(".now-playing")).toContainText("Home Hot Song");
 });
 
 test("home recommended playlist opens from homepage state", async ({ page }) => {

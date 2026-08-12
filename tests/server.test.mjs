@@ -242,30 +242,30 @@ test("update endpoint exposes only the fixed GitHub release metadata", async () 
     releaseCalls += 1;
     if (url === "https://api.github.com/repos/randerous/jianyin-web-clean-public/releases?per_page=100") {
       return new Response(JSON.stringify([
-        { tag_name: "v1.0.32", published_at: "2026-07-20T00:00:00Z", body: "Latest release" },
-        { tag_name: "v1.0.29", published_at: "2026-07-18T00:00:00Z", body: "Current release" },
+        { tag_name: "v1.0.33", published_at: "2026-07-21T00:00:00Z", body: "Latest release" },
+        { tag_name: "v1.0.32", published_at: "2026-07-20T00:00:00Z", body: "Current release" },
+        { tag_name: "v1.0.29", published_at: "2026-07-18T00:00:00Z", body: "Older release" },
         { tag_name: "v1.0.28", published_at: "2026-07-17T00:00:00Z", body: "Older release" },
-        { tag_name: "v1.0.33", published_at: "2026-07-21T00:00:00Z", body: "Future release" },
         { tag_name: "v1.0.34", draft: true, published_at: "2026-07-22T00:00:00Z", body: "Draft release" },
         { tag_name: "v1.0.35", prerelease: true, published_at: "2026-07-23T00:00:00Z", body: "Pre-release" }
       ]), { status: 200, headers: { "content-type": "application/json" } });
     }
     assert.equal(url, "https://api.github.com/repos/randerous/jianyin-web-clean-public/releases/latest");
     return new Response(JSON.stringify({
-      tag_name: "v1.0.32",
-      html_url: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.32",
-      published_at: "2026-07-20T00:00:00Z",
+      tag_name: "v1.0.33",
+      html_url: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.33",
+      published_at: "2026-07-21T00:00:00Z",
       body: "Latest release",
       assets: [
         {
           name: "app-release.apk",
-          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.32/app-release.apk",
+          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.33/app-release.apk",
           digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
           size: 123
         },
         {
           name: "jianyin-windows-launcher.exe",
-          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.32/jianyin-windows-launcher.exe",
+          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.33/jianyin-windows-launcher.exe",
           digest: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
           size: 456
         },
@@ -282,16 +282,16 @@ test("update endpoint exposes only the fixed GitHub release metadata", async () 
   const first = await getJson(`${baseUrl}/api/update/latest`);
   const second = await getJson(`${baseUrl}/api/update/latest`);
   assert.equal(first.response.status, 200);
-  assert.equal(first.body.currentVersion, "1.0.31");
-  assert.equal(first.body.latestVersion, "1.0.32");
+  assert.equal(first.body.currentVersion, "1.0.32");
+  assert.equal(first.body.latestVersion, "1.0.33");
   assert.equal(first.body.available, true);
-  assert.deepEqual(first.body.releaseNotes.map((note) => note.tag), ["v1.0.32"]);
+  assert.deepEqual(first.body.releaseNotes.map((note) => note.tag), ["v1.0.33"]);
   assert.deepEqual(first.body.releaseNotes.map((note) => note.notes), ["Latest release"]);
   assert.equal(first.body.canApply, false);
   assert.equal(first.body.assets.apk.sha256, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
   assert.equal(first.body.assets.apk.size, 123);
   assert.equal(first.body.assets.windowsLauncher.sha256, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
-  assert.equal(second.body.tag, "v1.0.32");
+  assert.equal(second.body.tag, "v1.0.33");
   assert.equal(releaseCalls, 2);
 });
 
@@ -313,12 +313,12 @@ test("packaged Windows server advertises update apply without a git checkout", a
   const fetchImpl = async (url) => {
     if (url.endsWith("/releases/latest")) {
       return new Response(JSON.stringify({
-        tag_name: "v1.0.32",
-        published_at: "2026-07-20T00:00:00Z",
+        tag_name: "v1.0.33",
+        published_at: "2026-07-21T00:00:00Z",
         body: "Windows launcher update",
         assets: [{
           name: "jianyin-windows-launcher.exe",
-          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.32/jianyin-windows-launcher.exe",
+          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.33/jianyin-windows-launcher.exe",
           digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
           size: 123
         }]
@@ -1661,7 +1661,8 @@ test("playlist endpoint imports Netease metadata as FLAC-search playable placeho
   assert.equal(imported.body.playlist.songs[0].verifiedPlayable, false);
   assert.equal(imported.body.playlist.trackCount, 3);
   assert.deepEqual(home.body.radarSongs, []);
-  assert.deepEqual(home.body.hotSongs, []);
+  assert.deepEqual(home.body.hotSongs.map((item) => item.id), ["netease_1"]);
+  assert.equal(home.body.hotSongs[0].url, "/api/netease/stream/1?quality=exhigh");
   assert.deepEqual(home.body.recommendedPlaylists.map((item) => item.id), ["88", "77"]);
   assert.deepEqual(home.body.recommendedPlaylists.map((item) => item.songs ?? []), [[], []]);
   assert.deepEqual(refreshedHome.body.recommendedPlaylists.map((item) => item.id), ["940"]);
@@ -1703,6 +1704,7 @@ test("netease playlist detail loads all available songs and preserves track coun
 
 test("home recommendation does not prefetch playlist detail", async () => {
   let detailCalls = 0;
+  let hotDetailCalls = 0;
   const playlist = {
     id: 77,
     name: "Prefetched Playlist",
@@ -1715,9 +1717,19 @@ test("home recommendation does not prefetch playlist detail", async () => {
     async personalized() {
       return { body: { result: [{ id: 77, name: "Prefetched Playlist", picUrl: "/playlist.png", trackCount: 2 }] } };
     },
-    async playlist_detail() {
+    async playlist_detail({ id }) {
+      if (String(id) === "3778678") {
+        hotDetailCalls += 1;
+        return { body: { playlist: { id: 3778678, name: "热歌榜", trackCount: 2, tracks: [song(1), song(2)], trackIds: [{ id: 1 }, { id: 2 }] } } };
+      }
       detailCalls += 1;
       return { body: { playlist } };
+    },
+    async song_url({ id }) {
+      return urlResponse(id, {
+        "1": urlData({ url: "https://audio.test/hot-1.mp3", time: 65_000 }),
+        "2": urlData({ url: "https://audio.test/hot-2.mp3", time: 65_000 })
+      });
     }
   };
   const baseUrl = await startTestServer({ neteaseClient });
@@ -1726,6 +1738,8 @@ test("home recommendation does not prefetch playlist detail", async () => {
   assert.equal(home.response.status, 200);
   await new Promise((resolve) => setTimeout(resolve, 25));
   assert.equal(detailCalls, 0);
+  assert.equal(hotDetailCalls, 1);
+  assert.equal(home.body.hotSongs.length, 2);
   const imported = await getJson(`${baseUrl}/api/netease/playlist/77`);
 
   assert.equal(imported.response.status, 200);
@@ -1774,8 +1788,16 @@ test("home recommendation returns summaries without detail fan-out", async () =>
       return { body: { result: playlists } };
     },
     async playlist_detail({ id }) {
+      if (String(id) === "3778678") {
+        return { body: { playlist: { id: 3778678, name: "热歌榜", trackCount: 1, tracks: [song(1)], trackIds: [{ id: 1 }] } } };
+      }
       requested.push(String(id));
       return { body: { playlist: { id, name: `Playlist ${id}`, tracks: [song(id)], trackIds: [{ id }] } } };
+    },
+    async song_url({ id }) {
+      return urlResponse(id, {
+        "1": urlData({ url: "https://audio.test/hot-1.mp3", time: 65_000 })
+      });
     }
   };
   const baseUrl = await startTestServer({ neteaseClient });
@@ -1785,6 +1807,127 @@ test("home recommendation returns summaries without detail fan-out", async () =>
   await new Promise((resolve) => setTimeout(resolve, 25));
   assert.equal(home.body.recommendedPlaylists.length, 12);
   assert.deepEqual(requested, []);
+});
+
+test("home returns verified hot songs from the Netease hot playlist", async () => {
+  const neteaseClient = {
+    async playlist_detail({ id }) {
+      assert.equal(String(id), "3778678");
+      return { body: { playlist: {
+        id: 3778678,
+        name: "热歌榜",
+        trackCount: 4,
+        tracks: [song(1), song(2), song(3), song(4)],
+        trackIds: [{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }]
+      } } };
+    },
+    async song_url({ id }) {
+      return urlResponse(id, {
+        "1": urlData({ url: "https://audio.test/hot-1.mp3", time: 65_000 }),
+        "2": urlData({ url: "", time: 65_000 }),
+        "3": urlData({ freeTrialInfo: { start: 0, end: 30_000 }, time: 65_000 }),
+        "4": urlData({ url: "https://audio.test/hot-4.mp3", time: 65_000 })
+      });
+    },
+    async personalized() {
+      return { body: { result: [] } };
+    }
+  };
+  const baseUrl = await startTestServer({ neteaseClient });
+
+  const home = await getJson(`${baseUrl}/api/netease/home?hotLimit=10`);
+
+  assert.equal(home.response.status, 200);
+  assert.deepEqual(home.body.hotSongs.map((item) => item.id), ["netease_1", "netease_4"]);
+  assert.equal(home.body.hotSongs[0].name, "Song 1");
+  assert.equal(home.body.hotSongs[0].artist, "Artist 1");
+  assert.equal(home.body.hotSongs[0].source, "netease");
+  assert.equal(home.body.hotSongs[0].verifiedPlayable, true);
+  assert.equal(home.body.hotSongs[0].url, "/api/netease/stream/1?quality=exhigh");
+  assert.equal(home.body.hotSongs[1].id, "netease_4");
+  assert.equal(home.body.hotSongs[1].url, "/api/netease/stream/4?quality=exhigh");
+});
+
+test("home hot songs fall back to unverified metadata when none are playable", async () => {
+  const neteaseClient = {
+    async playlist_detail() {
+      return { body: { playlist: {
+        id: 3778678,
+        name: "热歌榜",
+        trackCount: 2,
+        tracks: [song(11), song(12)],
+        trackIds: [{ id: 11 }, { id: 12 }]
+      } } };
+    },
+    async song_url({ id }) {
+      return urlResponse(id, {
+        "11": urlData({ url: "", time: 65_000 }),
+        "12": urlData({ url: "", time: 65_000 })
+      });
+    },
+    async personalized() {
+      return { body: { result: [] } };
+    }
+  };
+  const baseUrl = await startTestServer({ neteaseClient });
+
+  const home = await getJson(`${baseUrl}/api/netease/home?hotLimit=5`);
+
+  assert.equal(home.response.status, 200);
+  assert.deepEqual(home.body.hotSongs.map((item) => item.id), ["netease_11", "netease_12"]);
+  assert.equal(home.body.hotSongs[0].url, "");
+  assert.equal(home.body.hotSongs[0].remotePlayable, true);
+});
+
+test("home stays available when the hot songs source fails", async () => {
+  const neteaseClient = {
+    async playlist_detail() {
+      throw new Error("toplist outage");
+    },
+    async personalized() {
+      return { body: { result: [{ id: 77, name: "Playlist", picUrl: "/playlist.png", trackCount: 1 }] } };
+    }
+  };
+  const baseUrl = await startTestServer({ neteaseClient });
+
+  const home = await getJson(`${baseUrl}/api/netease/home`);
+
+  assert.equal(home.response.status, 200);
+  assert.deepEqual(home.body.hotSongs, []);
+  assert.equal(home.body.recommendedPlaylists.length, 1);
+});
+
+test("home hot songs are cached between requests", async () => {
+  let hotPlaylistCalls = 0;
+  const neteaseClient = {
+    async playlist_detail() {
+      hotPlaylistCalls += 1;
+      return { body: { playlist: {
+        id: 3778678,
+        name: "热歌榜",
+        trackCount: 1,
+        tracks: [song(1)],
+        trackIds: [{ id: 1 }]
+      } } };
+    },
+    async song_url({ id }) {
+      return urlResponse(id, {
+        "1": urlData({ url: "https://audio.test/hot-1.mp3", time: 65_000 })
+      });
+    },
+    async personalized() {
+      return { body: { result: [] } };
+    }
+  };
+  const baseUrl = await startTestServer({ neteaseClient });
+
+  const first = await getJson(`${baseUrl}/api/netease/home`);
+  const second = await getJson(`${baseUrl}/api/netease/home`);
+
+  assert.equal(first.response.status, 200);
+  assert.equal(second.response.status, 200);
+  assert.equal(second.body.hotSongs.length, 1);
+  assert.equal(hotPlaylistCalls, 1);
 });
 
 test("netease account login validates cookie and syncs only playable playlists", async () => {

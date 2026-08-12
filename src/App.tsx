@@ -6,6 +6,7 @@ import {
   Download,
   FileAudio,
   FileText,
+  Flame,
   Heart,
   Home,
   Library,
@@ -29,6 +30,7 @@ import { ChangeEvent, FormEvent, MouseEvent, useCallback, useEffect, useMemo, us
 import Modal from "./components/Modal";
 import Player from "./components/Player";
 import SongRow from "./components/SongRow";
+import { EQ_PRESETS, ensureAudioEffects, setAudioEffects, setDebugHook } from "./lib/audio-effects";
 import { applySharedTombstoneClears, deriveSharedTombstoneClears } from "./lib/shared-state";
 import {
   checkProxy,
@@ -79,7 +81,7 @@ import {
   validateBackup
 } from "./lib/storage";
 import { FAVORITES_ID, RECENT_HISTORY_LIMIT, cover, recommendedKeywords } from "./data/seed";
-import type { AccountState, BackupPreview, LyricSource, PersistedState, PlayQuality, Playlist, ProgressStyle, SharedState, SharedTombstones, Song, Theme } from "./types";
+import type { AccountState, AudioEffectsPreset, BackupPreview, LyricSource, PersistedState, PlayQuality, Playlist, ProgressStyle, SharedState, SharedTombstones, Song, Theme } from "./types";
 
 type Tab = "home" | "search" | "mine";
 type PlayMode = "sequence" | "repeat" | "shuffle";
@@ -288,6 +290,8 @@ export default function App() {
   const [autoLyricsEnabled, setAutoLyricsEnabled] = useState(initial.autoLyricsEnabled);
   const [playbackSpeed, setPlaybackSpeed] = useState(initial.playbackSpeed);
   const [fadeEnabled, setFadeEnabled] = useState(initial.fadeEnabled);
+  const [eqPreset, setEqPreset] = useState<AudioEffectsPreset>(initial.eqPreset);
+  const [eqIntensity, setEqIntensity] = useState(initial.eqIntensity);
   const [autoCacheEnabled, setAutoCacheEnabled] = useState(initial.autoCacheEnabled);
   const [keepQueueOnExit, setKeepQueueOnExit] = useState(initial.keepQueueOnExit);
   const [autoPlayOnStart, setAutoPlayOnStart] = useState(initial.autoPlayOnStart);
@@ -402,6 +406,8 @@ export default function App() {
     autoLyricsEnabled,
     playbackSpeed,
     fadeEnabled,
+    eqPreset,
+    eqIntensity,
     autoCacheEnabled,
     keepQueueOnExit,
     autoPlayOnStart,
@@ -412,7 +418,7 @@ export default function App() {
     sharedTombstones: sharedTombstonesRef.current,
     sharedTombstoneClears: sharedTombstoneClearsRef.current,
     updatedAt: lastStateUpdatedAtRef.current || undefined
-  }), [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
+  }), [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, eqIntensity, eqPreset, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
   if (lastPersistedSnapshotRef.current !== persistedSnapshot) {
     lastPersistedSnapshotRef.current = persistedSnapshot;
     latestPersistedStateRef.current = persistedSnapshot;
@@ -765,6 +771,8 @@ export default function App() {
       autoLyricsEnabled,
       playbackSpeed,
       fadeEnabled,
+      eqPreset,
+      eqIntensity,
       autoCacheEnabled,
       keepQueueOnExit,
       autoPlayOnStart,
@@ -787,7 +795,18 @@ export default function App() {
     if (sharedDataChanged && sharedRemoteKnownRef.current && latestSharedStateRef.current) {
       sharedStateWriterRef.current!.enqueue(latestSharedStateRef.current);
     }
-  }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, stateHydrated, theme]);
+  }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, eqIntensity, eqPreset, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, stateHydrated, theme]);
+
+  useEffect(() => {
+    setAudioEffects(eqPreset, eqIntensity);
+    setDebugHook(true);
+    // 播放中切换预设/强度时，若图尚未建立（如非手势启动的自动播放），
+    // 在可安全运行的情况下补接线；ensureAudioEffects 自带手势门控，无法运行则保持直通。
+    if (eqPreset !== "none") {
+      const audio = audioRef.current;
+      if (audio && !audio.paused) ensureAudioEffects(audio);
+    }
+  }, [eqIntensity, eqPreset]);
 
   useEffect(() => {
     const retryLatestSharedState = (keepalive: boolean) => {
@@ -912,6 +931,8 @@ export default function App() {
           setAutoLyricsEnabled(result.state.autoLyricsEnabled);
           setPlaybackSpeed(result.state.playbackSpeed);
           setFadeEnabled(result.state.fadeEnabled);
+          // EQ 为本地设置（共享状态不含设置字段，服务端返回的全是默认值，
+          // 覆盖会把用户选择重置回 hiFi；其他设置字段保持既有行为）
           setAutoCacheEnabled(result.state.autoCacheEnabled);
           setKeepQueueOnExit(result.state.keepQueueOnExit);
           setAutoPlayOnStart(result.state.autoPlayOnStart);
@@ -1141,6 +1162,9 @@ export default function App() {
   const playSong = useCallback(async (song: Song, source?: Song[], options: { quiet?: boolean; startAt?: number; refresh?: boolean; fallbackToMp3?: boolean } = {}) => {
     const requestId = playRequestRef.current + 1;
     playRequestRef.current = requestId;
+    // 在首个 await 前同步接线 WebAudio 均衡图（常见路径都在用户手势内，
+    // 保证 AudioContext 以 running 状态创建；非手势时内部自动延迟）。
+    ensureAudioEffects(audioRef.current);
     const pauseGeneration = playbackPauseRef.current;
     let playbackAttempted = false;
     let sourceChanged = false;
@@ -1341,6 +1365,7 @@ export default function App() {
   const primePlaybackElement = useCallback((song: Song, startAt: number) => {
     const audio = audioRef.current;
     if (!audio || !song.url) return;
+    ensureAudioEffects(audio);
     if (song.localKey && !song.url.startsWith("blob:")) return;
     const targetSrc = new URL(song.url, window.location.href).href;
     if (audio.src !== targetSrc) audio.src = song.url;
@@ -1857,11 +1882,11 @@ export default function App() {
   }, [trackObjectUrl]);
 
   const backup = useCallback(async () => {
-    const state: PersistedState = { playlists, favorites, history, downloadHistory, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart, autoUpdateEnabled, androidStatusNotificationEnabled, updatedAt: Date.now() };
+    const state: PersistedState = { playlists, favorites, history, downloadHistory, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, eqPreset, eqIntensity, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart, autoUpdateEnabled, androidStatusNotificationEnabled, updatedAt: Date.now() };
     const payload = await makeBackup(state);
     downloadJson(`jianyin_web_clean_${new Date().toISOString().replace(/[:.]/g, "-")}.json`, payload);
     setToast(payload.localFiles?.length ? `已导出备份，包含 ${payload.localFiles.length} 个本地音频` : "已导出备份");
-  }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
+  }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, eqIntensity, eqPreset, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
 
   const applyHydratedRestore = useCallback((hydrated: { state: PersistedState; urls: string[] }) => {
     lastStateUpdatedAtRef.current = Math.max(lastStateUpdatedAtRef.current, hydrated.state.updatedAt ?? 0);
@@ -1880,6 +1905,8 @@ export default function App() {
     setAutoLyricsEnabled(hydrated.state.autoLyricsEnabled);
     setPlaybackSpeed(hydrated.state.playbackSpeed);
     setFadeEnabled(hydrated.state.fadeEnabled);
+    setEqPreset(hydrated.state.eqPreset);
+    setEqIntensity(hydrated.state.eqIntensity);
     setAutoCacheEnabled(hydrated.state.autoCacheEnabled);
     setKeepQueueOnExit(hydrated.state.keepQueueOnExit);
     setAutoPlayOnStart(hydrated.state.autoPlayOnStart);
@@ -1928,6 +1955,8 @@ export default function App() {
         autoLyricsEnabled,
         playbackSpeed,
         fadeEnabled,
+        eqPreset,
+        eqIntensity,
         autoCacheEnabled,
         keepQueueOnExit,
         autoPlayOnStart,
@@ -1945,7 +1974,7 @@ export default function App() {
     } finally {
       setRestoreBusy(false);
     }
-  }, [androidStatusNotificationEnabled, applyHydratedRestore, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playbackSpeed, playlists, progressStyle, queue, queueIndex, restoreBusy, restorePreview, searchHistory, theme]);
+  }, [androidStatusNotificationEnabled, applyHydratedRestore, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, eqIntensity, eqPreset, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playbackSpeed, playlists, progressStyle, queue, queueIndex, restoreBusy, restorePreview, searchHistory, theme]);
 
   const resolveDownloadable = useCallback(async (song: Song) => {
     if (song.localKey) return resolvePlayable(song);
@@ -2410,6 +2439,18 @@ export default function App() {
               </select>
             </label>
             <label className="switch-line"><span>歌曲淡入淡出</span><input type="checkbox" checked={fadeEnabled} onChange={(event) => setFadeEnabled(event.target.checked)} /></label>
+            <label>
+              均衡器预设
+              <select value={eqPreset} onChange={(event) => setEqPreset(event.target.value as AudioEffectsPreset)} aria-label="均衡器预设">
+                {EQ_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}
+              </select>
+            </label>
+            <label>
+              均衡器强度
+              <input type="range" min={0} max={100} step={1} value={eqIntensity} onChange={(event) => setEqIntensity(Number(event.target.value))} aria-label="均衡器强度" />
+              <span className="muted">{eqIntensity}%</span>
+            </label>
+            <p className="muted">均衡器使用浏览器原生 10 段 ISO 滤波器（WebAudio），不修改音频文件本身；选择"原声（关闭）"时完全绕过，不产生任何处理。</p>
             <label className="switch-line"><span>自动缓存</span><input type="checkbox" checked={autoCacheEnabled} onChange={(event) => setAutoCacheEnabled(event.target.checked)} /></label>
             <label className="switch-line"><span>离开后保留列表</span><input type="checkbox" checked={keepQueueOnExit} onChange={(event) => setKeepQueueOnExit(event.target.checked)} /></label>
             <label className="switch-line"><span>启动时播放</span><input type="checkbox" checked={autoPlayOnStart} disabled={!keepQueueOnExit} onChange={(event) => setAutoPlayOnStart(event.target.checked)} /></label>
@@ -2593,9 +2634,14 @@ function HomeScreen({ data, loading, openingPlaylistId, error, onPlay, onOpenPla
       <div className="shelf-row today-shelf">
         {data.radarSongs.map((song) => <CoverSong key={songKey(song)} song={song} songs={data.radarSongs} onPlay={onPlay} />)}
       </div>
-      <div className="shelf-row hot-shelf">
-        {data.hotSongs.map((song) => <CoverSong key={songKey(song)} song={song} songs={data.hotSongs} onPlay={onPlay} />)}
-      </div>
+      {data.hotSongs.length > 0 && (
+        <>
+          <SectionTitle icon={<Flame />} title="热门歌曲" />
+          <div className="shelf-row hot-shelf">
+            {data.hotSongs.map((song) => <CoverSong key={songKey(song)} song={song} songs={data.hotSongs} onPlay={onPlay} />)}
+          </div>
+        </>
+      )}
       <div className="playlist-grid">
         {data.recommendedPlaylists.map((playlist) => {
           const opening = openingPlaylistId === playlist.id;

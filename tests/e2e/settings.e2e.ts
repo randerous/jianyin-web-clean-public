@@ -1342,6 +1342,11 @@ test("remote playlists persist across clean browser contexts", async ({ page, br
 
   const clean = await browser.newContext();
   const cleanPage = await clean.newPage();
+  // clean context 无注入时 EQ 走产品默认 hiFi，headless 下接线会冻结元素时钟；
+  // 注入 eqPreset none（与 clean 状态其余字段等价），该测试不涉及 EQ
+  await cleanPage.addInitScript(({ key, value }) => {
+    localStorage.setItem(key, JSON.stringify(value));
+  }, { key: storageKey, value: { eqPreset: "none" } });
   await mockHome(cleanPage);
   await cleanPage.route("**/api/netease/song/321**", async (route) => {
     await route.fulfill({
@@ -1542,4 +1547,30 @@ test("shared state merges playlists and dedupes repeated songs", async ({ page }
   expect(merged.history.map((song: { id: string }) => song.id)).toEqual(["merge_song_a"]);
   expect(merged.downloadHistory).toEqual([]);
   expect(merged.searchHistory).toEqual(["local merge"]);
+});
+
+test("EQ preset and intensity persist across reload; bypass is selectable", async ({ page }) => {
+  let dialog = await openSettings(page);
+  await dialog.getByLabel("均衡器预设").selectOption("vocal");
+  await dialog.getByLabel("均衡器强度").fill("40");
+
+  await expect.poll(async () => {
+    const state = await storedState(page);
+    return { eqPreset: state.eqPreset, eqIntensity: state.eqIntensity };
+  }).toEqual({ eqPreset: "vocal", eqIntensity: 40 });
+
+  await page.reload();
+  dialog = await openSettings(page);
+  await expect(dialog.getByLabel("均衡器预设")).toHaveValue("vocal");
+  await expect(dialog.getByLabel("均衡器强度")).toHaveValue("40");
+
+  // 原声（关闭）旁路
+  await dialog.getByLabel("均衡器预设").selectOption("none");
+  await expect.poll(async () => (await storedState(page)).eqPreset).toBe("none");
+  await expect(dialog.getByLabel("均衡器强度")).toHaveValue("40");
+
+  // 重载后旁路依然生效
+  await page.reload();
+  dialog = await openSettings(page);
+  await expect(dialog.getByLabel("均衡器预设")).toHaveValue("none");
 });

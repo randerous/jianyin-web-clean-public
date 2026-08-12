@@ -1,4 +1,4 @@
-import { cover } from "../data/seed";
+import { cover } from "../data/seed.ts";
 import type { AccountState, PlayQuality, Playlist, Song } from "../types";
 
 const LEGACY_API_BASE_STORAGE_KEY = "jianyin_api_base_url";

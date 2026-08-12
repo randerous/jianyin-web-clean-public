@@ -1,8 +1,9 @@
-import { FAVORITES_ID, LOCAL_DB_NAME, LOCAL_STORE_NAME, RECENT_HISTORY_LIMIT, STORAGE_KEY, cover } from "../data/seed";
+import { FAVORITES_ID, LOCAL_DB_NAME, LOCAL_STORE_NAME, RECENT_HISTORY_LIMIT, STORAGE_KEY, cover } from "../data/seed.ts";
 import type { BackupPayload, BackupPreview, LocalFileBackup, PersistedState, Playlist, SharedState, SharedTombstones, Song } from "../types";
-import { apiUrl } from "./api";
-import { applySharedTombstones, canonicalSharedId, mergeSharedTombstones, normalizeSharedTombstones, sharedPlaylistIdentity, sharedSongIdentity, stableFlacSharedId, stableLegacySharedId, toSharedState } from "./shared-state";
-export { deriveSharedTombstones, sharedStateSignature, toSharedState } from "./shared-state";
+import { apiUrl } from "./api.ts";
+import { clampIntensity, normalizeEqPreset } from "./audio-effects.ts";
+import { applySharedTombstones, canonicalSharedId, mergeSharedTombstones, normalizeSharedTombstones, sharedPlaylistIdentity, sharedSongIdentity, stableFlacSharedId, stableLegacySharedId, toSharedState } from "./shared-state.ts";
+export { deriveSharedTombstones, sharedStateSignature, toSharedState } from "./shared-state.ts";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -138,7 +139,7 @@ function serializePlaylist(playlist: Playlist): Playlist {
   return { ...playlist, songs: serializeSongs(playlist.songs) };
 }
 
-function serializeState(state: PersistedState): PersistedState {
+export function serializeState(state: PersistedState): PersistedState {
   const queue = serializeSongs(state.queue);
   const currentKey = state.queue[state.queueIndex] ? songKey(state.queue[state.queueIndex]) : "";
   const queueIndex = currentKey ? queue.findIndex((song) => songKey(song) === currentKey) : -1;
@@ -158,6 +159,8 @@ function serializeState(state: PersistedState): PersistedState {
     autoLyricsEnabled: state.autoLyricsEnabled,
     playbackSpeed: state.playbackSpeed,
     fadeEnabled: state.fadeEnabled,
+    eqPreset: state.eqPreset,
+    eqIntensity: state.eqIntensity,
     autoCacheEnabled: state.autoCacheEnabled,
     keepQueueOnExit: state.keepQueueOnExit,
     autoPlayOnStart: state.autoPlayOnStart,
@@ -227,6 +230,8 @@ export function normalizeState(value: unknown): PersistedState {
     autoLyricsEnabled,
     playbackSpeed,
     fadeEnabled: Boolean(raw.fadeEnabled),
+    eqPreset: normalizeEqPreset(raw.eqPreset),
+    eqIntensity: clampIntensity(raw.eqIntensity),
     autoCacheEnabled: Boolean(raw.autoCacheEnabled),
     keepQueueOnExit: raw.keepQueueOnExit !== false,
     autoPlayOnStart: Boolean(raw.autoPlayOnStart),
@@ -390,6 +395,8 @@ export function mergeStates(local: PersistedState, remote: PersistedState): Pers
       autoLyricsEnabled: remote.autoLyricsEnabled,
       playbackSpeed: remote.playbackSpeed,
       fadeEnabled: remote.fadeEnabled,
+      eqPreset: remote.eqPreset,
+      eqIntensity: remote.eqIntensity,
       autoCacheEnabled: remote.autoCacheEnabled,
       keepQueueOnExit: remote.keepQueueOnExit,
       autoPlayOnStart: remote.autoPlayOnStart,

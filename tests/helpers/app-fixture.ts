@@ -86,6 +86,10 @@ export function testState() {
     autoLyricsEnabled: true,
     playbackSpeed: 1,
     fadeEnabled: false,
+    // e2e 默认旁路：headless 下 createMediaElementSource 会冻结元素时钟，
+    // 现有播放测试保持 8/2 行为；EQ 专项测试显式启用
+    eqPreset: "none",
+    eqIntensity: 100,
     autoCacheEnabled: false,
     keepQueueOnExit: true,
     autoPlayOnStart: false,
@@ -101,7 +105,7 @@ export async function mockHome(page: Page) {
       body: JSON.stringify({
         radarSongs: testSongs.slice(0, 2),
         hotSongs: [
-          { id: "home-2", name: "Home Hot Song", artist: "Hot Artist", pic: "/assets/icon.png", url: "/assets/full-song-65s.wav", durationMs: 65000, verifiedPlayable: true, br: 999000, level: "lossless", type: "flac" }
+          { id: "home-2", name: "Home Hot Song", artist: "Hot Artist", pic: "/assets/icon.png", url: "/assets/full-song-65s.wav", source: "netease", quality: "exhigh", durationMs: 65000, verifiedPlayable: true, br: 999000, level: "lossless", type: "flac" }
         ],
         recommendedPlaylists: [
           { id: "3778678", name: "Home Playlist", cover: "/assets/icon.png", trackCount: 1, creatorNickname: "Mock Creator" }
