@@ -15,7 +15,7 @@ using System.Windows.Forms;
 
 internal static class Launcher
 {
-    private const string RuntimeVersion = "1.0.31";
+    private const string RuntimeVersion = "1.0.32";
     private const string NodeVersion = "22.17.0";
     private const string NodeSha256 = "721ab118a3aac8584348b132767eadf51379e0616f0db802cc1e66d7f0d98f85";
     private const string LatestReleaseUrl = "https://api.github.com/repos/randerous/jianyin-web-clean-public/releases/latest";
@@ -26,6 +26,9 @@ internal static class Launcher
     [STAThread]
     private static void Main()
     {
+        // GitHub 仅支持 TLS 1.2+；.NET 4.0 语义默认不含 TLS 1.2，
+        // 不显式启用则 WebClient 报"未能创建 SSL/TLS 安全通道"。
+        ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072;
         Directory.CreateDirectory(DataDir);
         bool ownsMutex;
         using (var mutex = new Mutex(true, "Local\\Randerous.Jianyin.Launcher", out ownsMutex))
