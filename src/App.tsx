@@ -48,6 +48,7 @@ import {
   resolveBiliSong,
   resolveFlacSong,
   resolveNeteaseSong,
+  searchBili,
   searchFlac,
   syncBiliAccountPlaylists,
   syncNeteaseAccountPlaylists
@@ -1896,10 +1897,33 @@ export default function App() {
     setSelected(new Set());
     setSearching(true);
     try {
-      const result = await searchFlac(text, page);
+      // 主源：FLAC 直链库；补充源：B站（B站有大量版权曲目合集/现场/官方 MV，
+      // 如周杰伦等网易云/FLAC 均搜不到的曲目），按「FLAC 优先 + B站补充」聚合。
+      const [flacResult, biliSongs] = await Promise.allSettled([
+        searchFlac(text, page),
+        searchBili(text)
+      ]);
       if (searchRunRef.current !== runId) return;
-      setRemoteResults(result.songs);
-      setSearchPageInfo({ page: result.page, pageSize: result.pageSize, total: result.total, hasMore: result.hasMore });
+      const flacSongs = flacResult.status === "fulfilled" ? flacResult.value.songs : [];
+      const biliList = biliSongs.status === "fulfilled" ? (biliSongs.value ?? []) : [];
+      // 去重：同一首歌（按名称+歌手）B站合集与 FLAC 同时存在时保留 FLAC；
+      // B站结果放在 FLAC 之后，作为补充可播放项。
+      const seenKeys = new Set<string>();
+      const merged: Song[] = [];
+      for (const song of [...flacSongs, ...biliList]) {
+        const key = `${song.name}|${song.artist}`.toLocaleLowerCase();
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        merged.push(song);
+      }
+      setRemoteResults(merged);
+      const flacPage = flacResult.status === "fulfilled" ? flacResult.value : null;
+      setSearchPageInfo({
+        page: flacPage?.page ?? page,
+        pageSize: flacPage?.pageSize ?? FLAC_SEARCH_PAGE_SIZE,
+        total: flacPage?.total ?? null,
+        hasMore: flacPage?.hasMore ?? false
+      });
       setSearchOfflineResults(false);
       setProxyOnline(true);
     } catch {

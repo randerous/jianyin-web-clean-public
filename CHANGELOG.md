@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.33 - 2026-08-13
+
+- 修复切换音效后播放卡死：改用 `audio.captureStream()` 方案替代
+  `createMediaElementSource`（后者接管元素会永久冻结播放时钟，
+  Chromium 系桌面 Chrome/Edge 与 Android WebView 一致）。
+  现在播放中切换均衡器预设/强度播放不中断。
+- Android WebView 因环境限制禁用音效（播放保持原声，不再卡死），
+  桌面端完整支持均衡器。
+- 修复播放器更多面板 EQ 选择器白底白字不可见。
+
 ## 1.0.32 - 2026-08-11
 
 - 新增 WebAudio 均衡器音效系统：默认「均衡·原声 Hi-Fi」微笑曲线，另有饱满、人声、古典、摇滚 4 个预设与「原声（关闭）」完全旁路。
