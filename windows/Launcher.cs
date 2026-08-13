@@ -165,6 +165,9 @@ internal static class Launcher
                 RedirectStandardOutput = true,
                 RedirectStandardError = true
             };
+            // Windows DNS 对网易云 interface 系域名返回 IPv6 优先，该域名 IPv6 的
+            // TLS 握手被网络侧 RST（ECONNRESET），强制 IPv4 优先解析修复。
+            info.EnvironmentVariables["NODE_OPTIONS"] = "--dns-result-order=ipv4first";
             info.EnvironmentVariables["JIANYIN_STATE_PATH"] = Path.Combine(DataDir, "state.json");
             info.EnvironmentVariables["JIANYIN_ENABLE_UPDATE"] = "1";
             info.EnvironmentVariables["JIANYIN_UPDATE_ROOT"] = AppDomain.CurrentDomain.BaseDirectory;
