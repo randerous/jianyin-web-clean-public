@@ -818,6 +818,27 @@ export default function App() {
     }
   }, [eqIntensity, eqPreset]);
 
+  // EQ 切换必须在用户手势内同步接线：change 事件处理栈内 navigator.userActivation
+  // 仍为激活态，此时 new AudioContext() 才会以 running 创建；若在 useEffect 里
+  // 接线，浏览器按自动播放策略以 suspended 创建，createMediaElementSource 接管
+  // 元素后时钟冻结、声音卡死（原声 none 不接线所以正常）。
+  const handleEqPresetChange = (preset: AudioEffectsPreset) => {
+    setEqPreset(preset);
+    setAudioEffects(preset, eqIntensity);
+    if (preset !== "none") {
+      const audio = audioRef.current;
+      if (audio && !audio.paused) ensureAudioEffects(audio);
+    }
+  };
+  const handleEqIntensityChange = (intensity: number) => {
+    setEqIntensity(intensity);
+    setAudioEffects(eqPreset, intensity);
+    if (eqPreset !== "none") {
+      const audio = audioRef.current;
+      if (audio && !audio.paused) ensureAudioEffects(audio);
+    }
+  };
+
   useEffect(() => {
     const retryLatestSharedState = (keepalive: boolean) => {
       if (!sharedRemoteKnownRef.current) {
@@ -2384,8 +2405,8 @@ export default function App() {
           onProgressStyle={setProgressStyle}
           eqPreset={eqPreset}
           eqIntensity={eqIntensity}
-          onEqPreset={setEqPreset}
-          onEqIntensity={setEqIntensity}
+          onEqPreset={handleEqPresetChange}
+          onEqIntensity={handleEqIntensityChange}
           onSleepTimer={(seconds) => {
             setSleepTimerUntil(Date.now() + seconds * 1000);
             setToast(`已设置定时关闭：${seconds < 60 ? `${seconds} 秒` : `${Math.round(seconds / 60)} 分钟`}`);

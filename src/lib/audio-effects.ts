@@ -211,6 +211,13 @@ export function ensureAudioEffects(audio: HTMLAudioElement | null): boolean {
  */
 export function applyAudioEffects(): void {
   if (!isBrowser() || !ctx || !source) return;
+  if (ctx.state === "suspended") {
+    // 浏览器自动播放策略可能把 AudioContext 置于 suspended（如先前在非手势
+    // 上下文接线）；这里尽力恢复，避免 createMediaElementSource 接管元素后
+    // 时钟冻结。若当前不在用户手势内，resume 会被浏览器拒绝，后续手势里
+    // ensureAudioEffects 的已接线分支会再次尝试。
+    void ctx.resume().catch(() => undefined);
+  }
   const bypass = recordedPreset === "none";
   if (bypass !== bypassActive) {
     const chainEnd = filters[filters.length - 1];
