@@ -30,7 +30,7 @@ import { ChangeEvent, FormEvent, MouseEvent, useCallback, useEffect, useMemo, us
 import Modal from "./components/Modal";
 import Player from "./components/Player";
 import SongRow from "./components/SongRow";
-import { ensureAudioEffects, setAudioEffects, setDebugHook } from "./lib/audio-effects";
+import { ensureAudioEffects, isAudioEffectsWired, setAudioEffects, setDebugHook } from "./lib/audio-effects";
 import { applySharedTombstoneClears, deriveSharedTombstoneClears } from "./lib/shared-state";
 import {
   checkProxy,
@@ -274,6 +274,9 @@ function coverAfterSongResolved(playlist: Playlist, originalKey: string, resolve
 
 export default function App() {
   const initial = useMemo(loadState, []);
+  // Android WebView 上 WebAudio 接管 audio 元素会冻结播放时钟（环境限制），
+  // 音效 EQ 不可用，播放保持直通；桌面端正常。
+  const eqDisabled = /Android/i.test(typeof navigator !== "undefined" ? navigator.userAgent : "");
   const [tab, setTab] = useState<Tab>("home");
   const [playlists, setPlaylists] = useState(initial.playlists);
   const [favorites, setFavorites] = useState(initial.favorites);
@@ -822,12 +825,28 @@ export default function App() {
   // 仍为激活态，此时 new AudioContext() 才会以 running 创建；若在 useEffect 里
   // 接线，浏览器按自动播放策略以 suspended 创建，createMediaElementSource 接管
   // 元素后时钟冻结、声音卡死（原声 none 不接线所以正常）。
+  // 另：对**正在播放**的元素调用 createMediaElementSource 会冻结元素时钟，
+  // 因此从原声（未接线）切到其他预设时需先 pause → 接线 → 恢复播放位置。
+  const ensureWiredWhilePlaying = (preset: AudioEffectsPreset) => {
+    if (preset === "none") return;
+    const audio = audioRef.current;
+    if (!audio || audio.paused || isAudioEffectsWired(audio)) return;
+    const position = audio.currentTime;
+    audio.pause();
+    ensureAudioEffects(audio);
+    try {
+      audio.currentTime = position;
+    } catch {
+      // 新源恢复位置在 metadata 就绪后自动生效
+    }
+    void audio.play().catch(() => undefined);
+  };
   const handleEqPresetChange = (preset: AudioEffectsPreset) => {
     setEqPreset(preset);
     setAudioEffects(preset, eqIntensity);
     if (preset !== "none") {
       const audio = audioRef.current;
-      if (audio && !audio.paused) ensureAudioEffects(audio);
+      if (audio && !audio.paused) ensureWiredWhilePlaying(preset);
     }
   };
   const handleEqIntensityChange = (intensity: number) => {
@@ -835,7 +854,7 @@ export default function App() {
     setAudioEffects(eqPreset, intensity);
     if (eqPreset !== "none") {
       const audio = audioRef.current;
-      if (audio && !audio.paused) ensureAudioEffects(audio);
+      if (audio && !audio.paused) ensureWiredWhilePlaying(eqPreset);
     }
   };
 
@@ -2405,6 +2424,7 @@ export default function App() {
           onProgressStyle={setProgressStyle}
           eqPreset={eqPreset}
           eqIntensity={eqIntensity}
+          eqDisabled={eqDisabled}
           onEqPreset={handleEqPresetChange}
           onEqIntensity={handleEqIntensityChange}
           onSleepTimer={(seconds) => {

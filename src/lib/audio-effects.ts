@@ -89,6 +89,18 @@ function isBrowser() {
   return typeof window !== "undefined";
 }
 
+/**
+ * Android WebView 上 createMediaElementSource 会冻结 audio 元素时钟
+ * （切换音效后播放位置停住、无法恢复），这是 WebView 环境限制而非代码 bug。
+ * 桌面 Chrome/Edge/Safari 行为正常。因此 Android 端禁用 WebAudio 接线，
+ * 播放保持直通（等同「原声」），避免切音效后播放卡死。
+ */
+function isAndroidWebView() {
+  if (!isBrowser()) return false;
+  const ua = String(navigator.userAgent || "");
+  return /Android/i.test(ua);
+}
+
 function teardownGraph() {
   if (source) {
     try {
@@ -154,6 +166,8 @@ function attachFallbackGestureListeners(audio: HTMLAudioElement) {
  */
 export function ensureAudioEffects(audio: HTMLAudioElement | null): boolean {
   if (!isBrowser() || !audio) return false;
+  // Android WebView 上 WebAudio 接管会冻结元素时钟 → 不接线，保持直通。
+  if (isAndroidWebView()) return false;
   // 原声（关闭）不需要任何图：不接线、不挂延迟监听。
   // （MediaElementSource 接管元素在部分环境有副作用，none 时应完全零介入）
   if (recordedPreset === "none") return false;
@@ -256,6 +270,11 @@ export function getAudioEffectsDebugInfo(): AudioEffectsDebugInfo {
     bandGains: filters.length ? filters.map((filter) => filter.gain.value) : Array.from({ length: EQ_BAND_COUNT }, () => 0),
     bandFrequencies: [...EQ_BAND_FREQUENCIES]
   };
+}
+
+/** 指定 audio 元素是否已接入 WebAudio 图（用于切换预设时的接线决策）。 */
+export function isAudioEffectsWired(audio: HTMLAudioElement | null): boolean {
+  return isBrowser() && audio !== null && wiredElement === audio && ctx !== null;
 }
 
 /** 暴露 window.JianyinAudioEffects 调试钩子（e2e 使用，同 window.JianyinAndroid 惯例）。 */
