@@ -1550,9 +1550,12 @@ test("shared state merges playlists and dedupes repeated songs", async ({ page }
 });
 
 test("EQ preset and intensity persist across reload; bypass is selectable", async ({ page }) => {
-  let dialog = await openSettings(page);
-  await dialog.getByLabel("均衡器预设").selectOption("vocal");
-  await dialog.getByLabel("均衡器强度").fill("40");
+  // EQ 在播放器「更多选项」面板（播放界面），不在设置里
+  await playFirstHomeSong(page);
+  const player = await openPlayer(page);
+  await player.locator(".more-menu > .icon-button").click();
+  await player.getByLabel("均衡器预设").selectOption("vocal");
+  await player.getByLabel("均衡器强度").fill("40");
 
   await expect.poll(async () => {
     const state = await storedState(page);
@@ -1560,17 +1563,21 @@ test("EQ preset and intensity persist across reload; bypass is selectable", asyn
   }).toEqual({ eqPreset: "vocal", eqIntensity: 40 });
 
   await page.reload();
-  dialog = await openSettings(page);
-  await expect(dialog.getByLabel("均衡器预设")).toHaveValue("vocal");
-  await expect(dialog.getByLabel("均衡器强度")).toHaveValue("40");
+  await page.locator(".now-playing").click();
+  const player2 = page.locator(".player-sheet");
+  await player2.locator(".more-menu > .icon-button").click();
+  await expect(player2.getByLabel("均衡器预设")).toHaveValue("vocal");
+  await expect(player2.getByLabel("均衡器强度")).toHaveValue("40");
 
   // 原声（关闭）旁路
-  await dialog.getByLabel("均衡器预设").selectOption("none");
+  await player2.getByLabel("均衡器预设").selectOption("none");
   await expect.poll(async () => (await storedState(page)).eqPreset).toBe("none");
-  await expect(dialog.getByLabel("均衡器强度")).toHaveValue("40");
+  await expect(player2.getByLabel("均衡器强度")).toHaveValue("40");
 
   // 重载后旁路依然生效
   await page.reload();
-  dialog = await openSettings(page);
-  await expect(dialog.getByLabel("均衡器预设")).toHaveValue("none");
+  await page.locator(".now-playing").click();
+  const player3 = page.locator(".player-sheet");
+  await player3.locator(".more-menu > .icon-button").click();
+  await expect(player3.getByLabel("均衡器预设")).toHaveValue("none");
 });

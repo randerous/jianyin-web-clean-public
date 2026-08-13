@@ -82,6 +82,8 @@ const FLAC_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/5
 	const playlistDetailInFlight = new Map();
 	const hotSongsCache = new Map();
 	const hotSongsInFlight = new Map();
+	const radarSongsCache = new Map();
+	const radarSongsInFlight = new Map();
 	const biliStreamCache = new Map();
 	const flacStreamCache = new Map();
 	let latestUpdateCache = null;
@@ -569,6 +571,7 @@ function writeSharedState(state, baseRevision, writeId) {
 	  flacSearchCache.clear();
 	  flacSearchInFlight.clear();
 	  hotSongsCache.clear();
+	  radarSongsCache.clear();
 	}
 
 	function setBiliCookie(cookie) {
@@ -1433,6 +1436,51 @@ function playableRejectReason(data) {
 	  return request;
 	}
 
+	async function getRecommendedSongs(limit, preferredQuality = DEFAULT_PLAY_QUALITY, cookie = neteaseAccountCookie) {
+	  const safeLimit = Math.min(Math.max(1, Number(limit) || 10), 30);
+	  const cacheKey = `radar:${cookieHash(cookie)}:${safeLimit}:${normalizeQuality(preferredQuality)}`;
+	  const cached = radarSongsCache.get(cacheKey);
+	  if (cached && cached.expiresAt > Date.now()) return cached.songs;
+	  const pending = radarSongsInFlight.get(cacheKey);
+	  if (pending) return pending;
+	  const request = (async () => {
+	    let songs = [];
+	    // 每日推荐需要登录；未登录或失败时回退「新歌速递」。
+	    // 任何失败都返回空列表而不是 reject，避免拖垮整个首页接口。
+	    try {
+	      if (cookie && typeof netease.recommend_songs === "function") {
+	        const response = await netease.recommend_songs({ limit: safeLimit, cookie });
+	        songs = response.body?.data?.dailySongs ?? [];
+	      }
+	    } catch (error) {
+	      console.log("recommend_songs failed:", errorMessage(error));
+	    }
+	    if (!songs.length && typeof netease.personalized_newsong === "function") {
+	      try {
+	        const response = await netease.personalized_newsong({ limit: safeLimit });
+	        songs = (response.body?.result ?? []).map((item) => item.song).filter(Boolean);
+	      } catch (error) {
+	        console.log("personalized_newsong failed:", errorMessage(error));
+	      }
+	    }
+	    if (songs.length) {
+	      try {
+	        const verified = await mapVerifiedSongs(songs, safeLimit, preferredQuality, cookie);
+	        songs = verified.length ? verified : songs.slice(0, safeLimit).map(mapSong);
+	      } catch (error) {
+	        console.log("mapVerifiedSongs(radar) failed:", errorMessage(error));
+	        songs = songs.slice(0, safeLimit).map(mapSong);
+	      }
+	    }
+	    radarSongsCache.set(cacheKey, { songs, expiresAt: Date.now() + HOT_SONGS_CACHE_TTL_MS });
+	    return songs;
+	  })().finally(() => {
+	    radarSongsInFlight.delete(cacheKey);
+	  });
+	  radarSongsInFlight.set(cacheKey, request);
+	  return request;
+	}
+
 	async function retryNetease(requester, attempts = 3) {
 	  let lastError;
 	  for (let attempt = 0; attempt < attempts; attempt += 1) {
@@ -2063,16 +2111,18 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 	  try {
 	    const limit = parseLimit(req.query.playlistLimit, 20, 30);
 	    const hotLimit = parseLimit(req.query.hotLimit, 10, 20);
+	    const radarLimit = parseLimit(req.query.radarLimit, 10, 20);
 	    const refresh = parseOffset(req.query.refresh, 0, 99);
 	    const offset = parseOffset(req.query.offset, refresh ? (refresh * limit) % 300 : 0, 300);
 	    const quality = normalizeQuality(req.query.quality);
-	    const [recommendedPlaylists, hotSongs] = await Promise.allSettled([
+	    const [recommendedPlaylists, hotSongs, radarSongs] = await Promise.allSettled([
 	      getRecommendedPlaylists(limit, offset),
-	      getHotSongs(hotLimit, quality, neteaseAccountCookie)
+	      getHotSongs(hotLimit, quality, neteaseAccountCookie),
+	      getRecommendedSongs(radarLimit, quality, neteaseAccountCookie)
 	    ]);
 	    if (recommendedPlaylists.status === "rejected") throw recommendedPlaylists.reason;
 	    res.json({
-	      radarSongs: [],
+	      radarSongs: radarSongs.status === "fulfilled" ? radarSongs.value : [],
 	      hotSongs: hotSongs.status === "fulfilled" ? hotSongs.value : [],
 	      recommendedPlaylists: recommendedPlaylists.value,
 	      quality,

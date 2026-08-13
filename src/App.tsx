@@ -30,7 +30,7 @@ import { ChangeEvent, FormEvent, MouseEvent, useCallback, useEffect, useMemo, us
 import Modal from "./components/Modal";
 import Player from "./components/Player";
 import SongRow from "./components/SongRow";
-import { EQ_PRESETS, ensureAudioEffects, setAudioEffects, setDebugHook } from "./lib/audio-effects";
+import { ensureAudioEffects, setAudioEffects, setDebugHook } from "./lib/audio-effects";
 import { applySharedTombstoneClears, deriveSharedTombstoneClears } from "./lib/shared-state";
 import {
   checkProxy,
@@ -2382,6 +2382,10 @@ export default function App() {
           selectedKeys={selected}
           onPlaybackSpeed={setPlaybackSpeed}
           onProgressStyle={setProgressStyle}
+          eqPreset={eqPreset}
+          eqIntensity={eqIntensity}
+          onEqPreset={setEqPreset}
+          onEqIntensity={setEqIntensity}
           onSleepTimer={(seconds) => {
             setSleepTimerUntil(Date.now() + seconds * 1000);
             setToast(`已设置定时关闭：${seconds < 60 ? `${seconds} 秒` : `${Math.round(seconds / 60)} 分钟`}`);
@@ -2452,18 +2456,6 @@ export default function App() {
               </select>
             </label>
             <label className="switch-line"><span>歌曲淡入淡出</span><input type="checkbox" checked={fadeEnabled} onChange={(event) => setFadeEnabled(event.target.checked)} /></label>
-            <label>
-              均衡器预设
-              <select value={eqPreset} onChange={(event) => setEqPreset(event.target.value as AudioEffectsPreset)} aria-label="均衡器预设">
-                {EQ_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}
-              </select>
-            </label>
-            <label>
-              均衡器强度
-              <input type="range" min={0} max={100} step={1} value={eqIntensity} onChange={(event) => setEqIntensity(Number(event.target.value))} aria-label="均衡器强度" />
-              <span className="muted">{eqIntensity}%</span>
-            </label>
-            <p className="muted">均衡器使用浏览器原生 10 段 ISO 滤波器（WebAudio），不修改音频文件本身；选择"原声（关闭）"时完全绕过，不产生任何处理。</p>
             <label className="switch-line"><span>自动缓存</span><input type="checkbox" checked={autoCacheEnabled} onChange={(event) => setAutoCacheEnabled(event.target.checked)} /></label>
             <label className="switch-line"><span>离开后保留列表</span><input type="checkbox" checked={keepQueueOnExit} onChange={(event) => setKeepQueueOnExit(event.target.checked)} /></label>
             <label className="switch-line"><span>启动时播放</span><input type="checkbox" checked={autoPlayOnStart} disabled={!keepQueueOnExit} onChange={(event) => setAutoPlayOnStart(event.target.checked)} /></label>
