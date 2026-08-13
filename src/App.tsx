@@ -826,20 +826,26 @@ export default function App() {
   // 接线，浏览器按自动播放策略以 suspended 创建，createMediaElementSource 接管
   // 元素后时钟冻结、声音卡死（原声 none 不接线所以正常）。
   // 另：对**正在播放**的元素调用 createMediaElementSource 会冻结元素时钟，
-  // 因此从原声（未接线）切到其他预设时需先 pause → 接线 → 恢复播放位置。
+  // 因此从原声（未接线）切到其他预设时需先暂停 → 接线 → 恢复播放；
+  // ensureAudioEffects 接线前自动 pause、接线后不自动恢复（由本函数恢复，
+  // 保证「接线 → play」在元素暂停态下完成，时钟才正常推进）。
   const ensureWiredWhilePlaying = (preset: AudioEffectsPreset) => {
     if (preset === "none") return;
     const audio = audioRef.current;
-    if (!audio || audio.paused || isAudioEffectsWired(audio)) return;
+    if (!audio || isAudioEffectsWired(audio)) return;
     const position = audio.currentTime;
-    audio.pause();
+    const wasPlaying = !audio.paused;
     ensureAudioEffects(audio);
-    try {
-      audio.currentTime = position;
-    } catch {
-      // 新源恢复位置在 metadata 就绪后自动生效
+    if (wasPlaying) {
+      if (position > 0) {
+        try {
+          audio.currentTime = position;
+        } catch {
+          // 元数据就绪后自动恢复
+        }
+      }
+      void audio.play().catch(() => undefined);
     }
-    void audio.play().catch(() => undefined);
   };
   const handleEqPresetChange = (preset: AudioEffectsPreset) => {
     setEqPreset(preset);

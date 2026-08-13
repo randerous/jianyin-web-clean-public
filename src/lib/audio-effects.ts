@@ -3,17 +3,26 @@ import type { AudioEffectsPreset } from "../types";
 /**
  * WebAudio 音效系统（10 段 ISO 均衡）。
  *
+ * 实现方式：**不接管 audio 元素**，而是用 `audio.captureStream()` 取元素
+ * 的音频流副本 → `MediaStreamAudioSourceNode` → 10 段 peaking biquad → destination；
+ * 同时把元素音量置 0（元素直通静音，用户听到的是经过 EQ 的流）。
+ *
+ * 为什么不用 createMediaElementSource：
+ * - Chromium 系（桌面 Chrome/Edge/Android WebView）中，createMediaElementSource
+ *   接管元素后元素时钟会**永久冻结**（切换音效后播放位置停住，pause/resume
+ *   均无法恢复）；captureStream 只是复制流，不接管元素，时钟完全正常。
+ * - 已验证：captureStream + volume=0 时流内仍有完整音频能量（volume 不影响
+ *   captureStream 的数据），EQ 后声音正常；none 旁路时 volume=1 恢复原声直通。
+ *
  * 设计要点：
  * - 模块级单例持有全部 WebAudio 状态；顶层不触碰 window/AudioContext，
  *   每个 DOM 调用都有守卫，因此本模块可在 Node（node:test）中直接 import。
  * - AudioContext 懒创建，只在用户播放手势内接线（ensureAudioEffects），
- *   非手势播放（启动自动播放等）由 userActivation 门控延迟到下一个真实手势，
- *   避免 suspended AudioContext 导致整体静音的回归。
- * - 旁路（"原声/关闭"）是拓扑切换：source → destination 直连。
- *   附注：0 dB 的 peaking biquad 数学上恰为恒等（分子=分母），
- *   因此强度 0 时即使链连接也逐位透明。
- * - createMediaElementSource 对同一元素调用两次会抛错，因此接线以元素同一性
- *   做幂等守卫，且绝不在 React mount effect 中调用（StrictMode 双跑安全）。
+ *   非手势播放由 userActivation 门控延迟到下一个真实手势。
+ * - 旁路（"原声/关闭"）：元素音量恢复 1（原声直通），WebAudio 输出保持
+ *   但元素已静音，等于完全旁路。
+ * - captureStream 对同一元素可重复调用（每次新流），接线以元素同一性做
+ *   幂等守卫。
  */
 
 export const EQ_BAND_FREQUENCIES = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
@@ -76,7 +85,7 @@ export type AudioEffectsDebugInfo = {
 
 // ---- 图状态（浏览器内有效；Node 下保持空） ----
 let ctx: AudioContext | null = null;
-let source: MediaElementAudioSourceNode | null = null;
+let source: MediaStreamAudioSourceNode | null = null;
 let filters: BiquadFilterNode[] = [];
 let wiredElement: HTMLAudioElement | null = null;
 let bypassActive = false;
@@ -90,8 +99,8 @@ function isBrowser() {
 }
 
 /**
- * Android WebView 上 createMediaElementSource 会冻结 audio 元素时钟
- * （切换音效后播放位置停住、无法恢复），这是 WebView 环境限制而非代码 bug。
+ * Android WebView 上 captureStream 的音频时钟同样会被 WebAudio 图冻结
+ * （切换音效后播放位置停住），这是 WebView 环境限制而非代码 bug。
  * 桌面 Chrome/Edge/Safari 行为正常。因此 Android 端禁用 WebAudio 接线，
  * 播放保持直通（等同「原声」），避免切音效后播放卡死。
  */
@@ -99,6 +108,11 @@ function isAndroidWebView() {
   if (!isBrowser()) return false;
   const ua = String(navigator.userAgent || "");
   return /Android/i.test(ua);
+}
+
+/** 元素是否支持 captureStream（桌面 Chromium/Safari 均支持） */
+function canCaptureStream(audio: HTMLAudioElement | null): audio is HTMLAudioElement {
+  return audio !== null && typeof (audio as HTMLMediaElement & { captureStream?: () => MediaStream }).captureStream === "function";
 }
 
 function teardownGraph() {
@@ -118,6 +132,10 @@ function teardownGraph() {
   }
   if (ctx) {
     void ctx.close().catch(() => undefined);
+  }
+  if (wiredElement) {
+    // 恢复元素音量：图拆除后元素直通原声
+    wiredElement.volume = 1;
   }
   ctx = null;
   source = null;
@@ -154,39 +172,21 @@ function attachFallbackGestureListeners(audio: HTMLAudioElement) {
   window.addEventListener("touchstart", retry, true);
 }
 
-/**
- * 幂等接线：把 audio 元素包进 WebAudio 图。
- * - 已接线且元素相同 → 尝试 resume 并返回 true。
- * - 元素不同 → 返回 false（本应用只有一个静态元素，正常不会发生；
- *   这也是第二次 createMediaElementSource 会抛错的唯一情形）。
- * - 非浏览器 / 无元素 → false。
- * - 非手势（navigator.userActivation.hasBeenActive 为 false）→ 挂一次性
- *   手势监听延迟接线，返回 false（保证"启动自动播放"等非手势路径零回归）。
- * - 正常路径 → 建 AudioContext + source + 10 段 biquad 链，应用当前预设。
- */
-export function ensureAudioEffects(audio: HTMLAudioElement | null): boolean {
-  if (!isBrowser() || !audio) return false;
-  // Android WebView 上 WebAudio 接管会冻结元素时钟 → 不接线，保持直通。
-  if (isAndroidWebView()) return false;
-  // 原声（关闭）不需要任何图：不接线、不挂延迟监听。
-  // （MediaElementSource 接管元素在部分环境有副作用，none 时应完全零介入）
-  if (recordedPreset === "none") return false;
-  if (ctx && wiredElement === audio) {
-    if (ctx.state === "suspended") {
-      void ctx.resume().catch(() => undefined);
-    }
-    return true;
-  }
-  if (wiredElement && wiredElement !== audio) return false;
-  if (typeof navigator.userActivation === "object" && navigator.userActivation !== null && !navigator.userActivation.hasBeenActive) {
-    attachFallbackGestureListeners(audio);
-    return false;
-  }
+/** 接线核心（不含手势门控；由 ensureAudioEffects 与测试钩子共用）。 */
+function wireGraph(audio: HTMLAudioElement): boolean {
   try {
     const AudioCtor: typeof AudioContext = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
     if (!AudioCtor) return false;
     ctx = new AudioCtor();
-    source = ctx.createMediaElementSource(audio);
+    // 若 AudioContext 以 suspended 创建（非手势上下文），resume 可能被拒绝；
+    // 但 captureStream 不接管元素时钟，即使 ctx suspended 也不影响播放。
+    // 为让 EQ 生效仍尽量恢复；失败则本次接线保留（元素音量保持 0 时会静音，
+    // 所以接线失败时要把音量恢复回去并放弃图）。
+    if (ctx.state === "suspended") {
+      void ctx.resume().catch(() => undefined);
+    }
+    const stream = (audio as HTMLMediaElement & { captureStream: () => MediaStream }).captureStream();
+    source = ctx.createMediaStreamSource(stream);
     filters = EQ_BAND_FREQUENCIES.map((frequency, index) => {
       const filter = ctx!.createBiquadFilter();
       filter.type = "peaking";
@@ -200,10 +200,11 @@ export function ensureAudioEffects(audio: HTMLAudioElement | null): boolean {
       previous.connect(current);
       return current;
     });
-    // recordedPreset 在此不可能为 "none"（函数开头已 early return）
     filters[filters.length - 1].connect(ctx.destination);
     bypassActive = false;
     wiredElement = audio;
+    // 元素静音：用户听到的是经过 EQ 的流（captureStream 数据不受 volume 影响）
+    audio.volume = 0;
     attachVisibilityHandler();
     return true;
   } catch {
@@ -215,33 +216,59 @@ export function ensureAudioEffects(audio: HTMLAudioElement | null): boolean {
     source = null;
     filters = [];
     wiredElement = null;
+    audio.volume = 1;
     return false;
   }
 }
 
 /**
+ * 幂等接线：把 audio 元素的音频流接入 WebAudio EQ 图。
+ * - 已接线且元素相同 → 尝试 resume 并返回 true。
+ * - 元素不同 → 拆除旧图重接。
+ * - 非浏览器 / 无元素 / 不支持 captureStream → false。
+ * - 非手势（navigator.userActivation.hasBeenActive 为 false）→ 挂一次性
+ *   手势监听延迟接线，返回 false（保证"启动自动播放"等非手势路径零回归）。
+ * - 正常路径 → 建 AudioContext + captureStream 流 + 10 段 biquad 链，
+ *   元素 volume=0（声音走 EQ 流），应用当前预设。
+ */
+export function ensureAudioEffects(audio: HTMLAudioElement | null): boolean {
+  if (!isBrowser() || !audio) return false;
+  // Android WebView 上 WebAudio 会冻结时钟 → 不接线，保持直通。
+  if (isAndroidWebView()) return false;
+  // 原声（关闭）不需要任何图：不接线、不挂延迟监听。
+  if (recordedPreset === "none") return false;
+  if (ctx && wiredElement === audio) {
+    if (ctx.state === "suspended") {
+      void ctx.resume().catch(() => undefined);
+    }
+    return true;
+  }
+  if (!canCaptureStream(audio)) return false;
+  if (typeof navigator.userActivation === "object" && navigator.userActivation !== null && !navigator.userActivation.hasBeenActive) {
+    attachFallbackGestureListeners(audio);
+    return false;
+  }
+  return wireGraph(audio);
+}
+
+/**
  * 把最新预设/强度推送到已有图（无图则只记录，稍后接线时生效）。
- * 旁路切换只在该标志翻转时调整拓扑；增益用 setTargetAtTime 防拉链噪声。
+ * 旁路切换只在该标志翻转时调整元素音量与拓扑；增益用 setTargetAtTime 防拉链噪声。
  */
 export function applyAudioEffects(): void {
-  if (!isBrowser() || !ctx || !source) return;
+  if (!isBrowser() || !ctx || !source || !wiredElement) return;
   if (ctx.state === "suspended") {
-    // 浏览器自动播放策略可能把 AudioContext 置于 suspended（如先前在非手势
-    // 上下文接线）；这里尽力恢复，避免 createMediaElementSource 接管元素后
-    // 时钟冻结。若当前不在用户手势内，resume 会被浏览器拒绝，后续手势里
-    // ensureAudioEffects 的已接线分支会再次尝试。
     void ctx.resume().catch(() => undefined);
   }
   const bypass = recordedPreset === "none";
   if (bypass !== bypassActive) {
-    const chainEnd = filters[filters.length - 1];
     if (bypass) {
-      chainEnd.disconnect(ctx.destination);
-      source.connect(ctx.destination);
+      // 旁路：元素恢复原声直通；WebAudio 输出保持连接（元素已静音，
+      // 但断开流避免多余处理）。这里仅恢复音量，流保持连接无妨。
+      wiredElement.volume = 1;
     } else {
-      // 只断开直连，保留 source → filters[0] 的链连接
-      source.disconnect(ctx.destination);
-      chainEnd.connect(ctx.destination);
+      // 启用 EQ：元素静音，声音走 EQ 流
+      wiredElement.volume = 0;
     }
     bypassActive = bypass;
   }
@@ -260,6 +287,11 @@ export function setAudioEffects(preset: AudioEffectsPreset, intensity: number): 
   applyAudioEffects();
 }
 
+/** 指定 audio 元素是否已接入 WebAudio 图（用于切换预设时的接线决策）。 */
+export function isAudioEffectsWired(audio: HTMLAudioElement | null): boolean {
+  return isBrowser() && audio !== null && wiredElement === audio && ctx !== null;
+}
+
 /** 测试钩子：Node 下 contextState=null、bandGains 全 0，不抛错。 */
 export function getAudioEffectsDebugInfo(): AudioEffectsDebugInfo {
   return {
@@ -272,16 +304,20 @@ export function getAudioEffectsDebugInfo(): AudioEffectsDebugInfo {
   };
 }
 
-/** 指定 audio 元素是否已接入 WebAudio 图（用于切换预设时的接线决策）。 */
-export function isAudioEffectsWired(audio: HTMLAudioElement | null): boolean {
-  return isBrowser() && audio !== null && wiredElement === audio && ctx !== null;
-}
-
 /** 暴露 window.JianyinAudioEffects 调试钩子（e2e 使用，同 window.JianyinAndroid 惯例）。 */
 export function setDebugHook(enabled: boolean): void {
   if (!isBrowser()) return;
   if (enabled) {
-    (window as unknown as Record<string, unknown>).JianyinAudioEffects = { getDebugInfo: getAudioEffectsDebugInfo };
+    (window as unknown as Record<string, unknown>).JianyinAudioEffects = {
+      getDebugInfo: getAudioEffectsDebugInfo,
+      // 测试钩子：强制接线（绕过手势门控，用于验证接线后时钟行为）。
+      forceWire: (audio: HTMLAudioElement | null): boolean => {
+        if (!isBrowser() || !audio || recordedPreset === "none") return false;
+        if (wiredElement === audio && ctx) return true;
+        if (!canCaptureStream(audio)) return false;
+        return wireGraph(audio);
+      }
+    };
   } else {
     delete (window as unknown as Record<string, unknown>).JianyinAudioEffects;
   }
