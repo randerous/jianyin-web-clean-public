@@ -1163,6 +1163,15 @@ h3 {
 
 .more-panel select {
   min-width: 128px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-3);
+  color: var(--text);
+}
+
+.more-panel select option {
+  background: var(--panel-2);
+  color: var(--text);
 }
 
 .speed-buttons {
@@ -2318,11 +2327,27 @@ h2 {
 .player-sheet .queue-actions button,
 .player-sheet .more-panel,
 .player-sheet .more-panel button,
-.player-sheet .more-panel label,
-.player-sheet .more-panel select {
+.player-sheet .more-panel label {
   border: 0;
   background: rgba(255, 255, 255, 0.12);
   color: #ffffff;
+}
+
+/* 播放器页固定深色背景：select 必须用深底浅字，否则白底白字不可读。
+   option 列表不继承背景色，需单独指定，避免浏览器默认白底 + 白字。 */
+.player-sheet .more-panel select {
+  border: 0;
+  background: rgba(0, 0, 0, 0.38);
+  color: #ffffff;
+}
+
+.player-sheet .more-panel select option {
+  background: #262d36;
+  color: #ffffff;
+}
+
+.player-sheet .more-panel input[type="range"] {
+  accent-color: var(--accent, #5ea2ff);
 }
 
 .player-sheet .more-panel {
