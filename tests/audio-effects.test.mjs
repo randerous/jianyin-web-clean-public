@@ -25,7 +25,7 @@ test("EQ_PRESETS table shape", () => {
   for (const preset of EQ_PRESETS) {
     assert.equal(preset.gains.length, EQ_BAND_COUNT);
     for (const gain of preset.gains) {
-      assert.ok(Math.abs(gain) <= 4, `${preset.id} band gain ${gain} exceeds ±4 dB`);
+      assert.ok(Math.abs(gain) <= 5, `${preset.id} band gain ${gain} exceeds ±5 dB`);
     }
   }
   const none = EQ_PRESETS.find((preset) => preset.id === "none");
@@ -37,13 +37,13 @@ test("EQ_BAND_FREQUENCIES are the 10 ISO centers", () => {
 });
 
 test("scaledBandGains: full intensity matches table exactly", () => {
-  assert.deepEqual(scaledBandGains("hiFi", 100), [3, 3, 2, 1, 0, -1.5, 0, 1.5, 3, 4]);
-  assert.deepEqual(scaledBandGains("full", 100), [4, 4, 3, 2, 1, 0, 0, 0, 1, 1]);
-  assert.deepEqual(scaledBandGains("rock", 100), [3, 4, 3, 1, 0, 0, 1.5, 3, 3, 2]);
+  assert.deepEqual(scaledBandGains("hiFi", 100), [-1, 1, 2, 3, 3, 1, 0, -1, -1, 0]);
+  assert.deepEqual(scaledBandGains("full", 100), [5, 4, 3, 1, 0, 0, -1, -1, 0, 0]);
+  assert.deepEqual(scaledBandGains("rock", 100), [4, 3, 2, 0, -1, -1, 0, 2, 3, 4]);
 });
 
 test("scaledBandGains: intensity scales linearly and clamps", () => {
-  assert.deepEqual(scaledBandGains("hiFi", 50), [1.5, 1.5, 1, 0.5, 0, -0.75, 0, 0.75, 1.5, 2]);
+  assert.deepEqual(scaledBandGains("hiFi", 50), [-0.5, 0.5, 1, 1.5, 1.5, 0.5, 0, -0.5, -0.5, 0]);
   assert.deepEqual(scaledBandGains("hiFi", 0), Array.from({ length: EQ_BAND_COUNT }, () => 0));
   assert.deepEqual(scaledBandGains("hiFi", 200), scaledBandGains("hiFi", 100), "over-100 intensity clamps to 100");
   assert.deepEqual(scaledBandGains("none", 100), Array.from({ length: EQ_BAND_COUNT }, () => 0), "none bypass stays flat at any intensity");

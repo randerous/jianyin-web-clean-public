@@ -31,8 +31,12 @@ import type { AudioEffectsPreset } from "../types";
 
 export const EQ_BAND_FREQUENCIES = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
 export const EQ_BAND_COUNT = 10;
-/** 每段 peaking 滤波的 Q 值（约 1 倍频程带宽） */
-export const EQ_Q = 1.0;
+/**
+ * 每段 peaking 滤波的 Q 值。取 √2 ≈ 1.41（倍频程图形均衡的标准值）：
+ * 相邻频段重叠适度、叠加平滑，避免 Q=1.0 时相邻频段过量叠加导致的
+ * 浑浊/发闷与高频毛刺。
+ */
+export const EQ_Q = 1.41;
 export const EQ_INTENSITY_MIN = 0;
 export const EQ_INTENSITY_MAX = 100;
 export const DEFAULT_EQ_PRESET: AudioEffectsPreset = "hiFi";
@@ -42,16 +46,17 @@ export type EqPresetDef = { id: AudioEffectsPreset; label: string; gains: number
 
 /**
  * 预设 dB 表（10 段，中心频率见 EQ_BAND_FREQUENCIES）。
- * 取值克制（±4 dB 内）：hiFi=微笑曲线；full=饱满；vocal=人声前置；
- * classical=平滑近直；rock=低频+高频冲击。none=原声（全 0，透明）。
+ * 采用 Apple Music / 主流播放器已验证的经典预设曲线（成熟方案，非随手调参）：
+ * 流行=中频前凸、摇滚=V 形、饱满=低频暖+高频微收、人声=1–4kHz 存在感、
+ * 古典=高频衰减、原声=全 0（透明旁路）。取值克制（±5 dB 内）避免削波发硬。
  */
 export const EQ_PRESETS: EqPresetDef[] = [
   { id: "none", label: "原声（关闭）", gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
-  { id: "hiFi", label: "均衡·原声 Hi-Fi", gains: [3, 3, 2, 1, 0, -1.5, 0, 1.5, 3, 4] },
-  { id: "full", label: "均衡·饱满", gains: [4, 4, 3, 2, 1, 0, 0, 0, 1, 1] },
-  { id: "vocal", label: "均衡·人声", gains: [-2, -1, 0, 1, 2, 3, 3, 2, 1, 0] },
-  { id: "classical", label: "均衡·古典", gains: [-2, -1, 0, 1, 1.5, 1.5, 1, 1, 0.5, 0] },
-  { id: "rock", label: "均衡·摇滚", gains: [3, 4, 3, 1, 0, 0, 1.5, 3, 3, 2] }
+  { id: "hiFi", label: "流行 Pop", gains: [-1, 1, 2, 3, 3, 1, 0, -1, -1, 0] },
+  { id: "full", label: "饱满 Full", gains: [5, 4, 3, 1, 0, 0, -1, -1, 0, 0] },
+  { id: "vocal", label: "人声 Vocal", gains: [-2, -1, 0, 1, 3, 4, 3, 1, 0, -1] },
+  { id: "classical", label: "古典 Classical", gains: [0, 0, 0, 0, 0, 0, -1, -2, -3, -4] },
+  { id: "rock", label: "摇滚 Rock", gains: [4, 3, 2, 0, -1, -1, 0, 2, 3, 4] }
 ];
 
 /** 非法/未知预设（含缺失）→ 默认 "hiFi" */
