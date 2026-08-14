@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.34 - 2026-08-14
+
+- 修复 Android 均衡器完全不可用：静音直通路径改用 `audio.muted`（与淡入淡出的
+  `volume` 互不干扰），修复换歌/淡入淡出后音量被重置导致"原声+EQ 双路叠加、EQ 无效"。
+- 换歌（src 变化）时自动重接均衡图，修复 captureStream 旧流随旧 src 失效导致切歌后 EQ 无声。
+- 移除错误的 Android 音效禁用逻辑（Android 与桌面端使用同一 captureStream 路径）。
+- 移除酷我音乐源（128k），搜索回归 FLAC + 网易云 + B站 三源聚合。
+
 ## 1.0.33 - 2026-08-13
 
 - 修复切换音效后播放卡死：改用 `audio.captureStream()` 方案替代
