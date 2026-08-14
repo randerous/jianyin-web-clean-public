@@ -219,6 +219,17 @@ function wireGraph(audio: HTMLAudioElement): boolean {
  */
 export function ensureAudioEffects(audio: HTMLAudioElement | null): boolean {
   if (!isBrowser() || !audio) return false;
+  // 原声（关闭）：本不应经过 WebAudio。若从未接线则直接返回 false（元素直通播放，
+  // 零 WebAudio 介入，避免 createMediaElementSource 接管导致的爆音/断流）；
+  // 若之前已接线（createMediaElementSource 无法解除接管），保持 0 增益透明即可。
+  if (recordedPreset === "none") {
+    if (!ctx || wiredElement !== audio) return false;
+    if (ctx.state === "suspended") {
+      void ctx.resume().catch(() => undefined);
+    }
+    applyAudioEffects();
+    return true;
+  }
   if (ctx && wiredElement === audio) {
     if (ctx.state === "suspended") {
       void ctx.resume().catch(() => undefined);
