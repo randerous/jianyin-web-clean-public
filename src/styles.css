@@ -1142,9 +1142,8 @@ h3 {
   padding: 14px;
   border: 1px solid var(--line);
   border-radius: 12px;
-  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  background: var(--panel);
   backdrop-filter: blur(24px) saturate(1.2);
-  -webkit-backdrop-filter: blur(24px) saturate(1.2);
   box-shadow: var(--shadow);
 }
 
@@ -2338,7 +2337,6 @@ h2 {
   border: 1px solid rgba(255, 255, 255, 0.16);
   background: rgba(24, 16, 13, 0.94);
   backdrop-filter: blur(24px) saturate(1.2);
-  -webkit-backdrop-filter: blur(24px) saturate(1.2);
   color: #ffffff;
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.36);
 }
