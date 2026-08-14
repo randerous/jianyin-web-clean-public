@@ -2326,12 +2326,27 @@ h2 {
 }
 
 .player-sheet .queue-actions select,
-.player-sheet .queue-actions button,
-.player-sheet .more-panel,
+.player-sheet .queue-actions button {
+  border: 0;
+  background: rgba(255, 255, 255, 0.12);
+  color: #ffffff;
+}
+
+/* 更多选项面板：深色毛玻璃（高不透明度 + backdrop blur），
+   模糊背后的歌词，保证设置项清晰可读。 */
+.player-sheet .more-panel {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: rgba(24, 16, 13, 0.94);
+  backdrop-filter: blur(24px) saturate(1.2);
+  -webkit-backdrop-filter: blur(24px) saturate(1.2);
+  color: #ffffff;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.36);
+}
+
 .player-sheet .more-panel button,
 .player-sheet .more-panel label {
   border: 0;
-  background: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.14);
   color: #ffffff;
 }
 
@@ -2350,10 +2365,6 @@ h2 {
 
 .player-sheet .more-panel input[type="range"] {
   accent-color: var(--accent, #5ea2ff);
-}
-
-.player-sheet .more-panel {
-  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.36);
 }
 
 .round-play {
