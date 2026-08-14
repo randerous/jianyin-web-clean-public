@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.35 - 2026-08-14
+
+- 修复 Android 切换音效后无声音：改回 `createMediaElementSource` 接管元素。
+  Android WebView 的 `captureStream()` 抓取的是音量/静音之后的音频（桌面 Chrome
+  抓音量之前），因此"captureStream + 静音直通"在 Android 上会把流也静音掉。
+  `createMediaElementSource` 直接接管元素（无需静音），并保证 AudioContext 保持
+  running（仅手势内接线 + 从不主动挂起），避免元素时钟冻结。桌面与 Android 一致。
+
 ## 1.0.34 - 2026-08-14
 
 - 修复 Android 均衡器完全不可用：静音直通路径改用 `audio.muted`（与淡入淡出的
