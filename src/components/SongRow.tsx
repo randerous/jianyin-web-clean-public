@@ -6,7 +6,6 @@ export function sourceLabel(source: Song["source"]) {
   if (source === "netease") return "网易云";
   if (source === "bili") return "Bilibili";
   if (source === "flac") return "测试源";
-  if (source === "kuwo") return "酷我";
   return "本地";
 }
 

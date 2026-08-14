@@ -24,7 +24,6 @@ type Props = {
   sleepTimerUntil: number | null;
   eqPreset: AudioEffectsPreset;
   eqIntensity: number;
-  eqDisabled?: boolean;
   playlists: Playlist[];
   selectedKeys: Set<string>;
   onClose: () => void;
@@ -162,15 +161,9 @@ export default function Player(props: Props) {
                 {[0.5, 1, 1.5].map((speed) => <button key={speed} onClick={() => props.onPlaybackSpeed(speed)}>{speed.toFixed(1)}x</button>)}
               </div>
               <label><Waves /> 进度条样式 <select value={props.progressStyle} onChange={(event) => props.onProgressStyle(event.target.value as ProgressStyle)} aria-label="进度条样式"><option value="default">默认样式</option><option value="round">圆条样式</option><option value="audio">音频波形图样式</option></select></label>
-              {props.eqDisabled ? (
-                <label><SlidersHorizontal /> 音效 <span className="muted">当前设备（Android WebView）不支持音效，播放保持原声</span></label>
-              ) : (
-                <>
-                  <label><SlidersHorizontal /> 音效 <select value={props.eqPreset} onChange={(event) => props.onEqPreset(event.target.value as AudioEffectsPreset)} aria-label="均衡器预设">{EQ_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}</select></label>
-                  <label><SlidersHorizontal /> 均衡器强度 <input type="range" min={0} max={100} step={1} value={props.eqIntensity} onChange={(event) => props.onEqIntensity(Number(event.target.value))} aria-label="均衡器强度" /> <span className="muted">{props.eqIntensity}%</span></label>
-                  <p className="muted">均衡器使用浏览器原生 10 段 ISO 滤波器（WebAudio）；选择"原声（关闭）"时完全绕过，不产生任何处理。</p>
-                </>
-              )}
+              <label><SlidersHorizontal /> 音效 <select value={props.eqPreset} onChange={(event) => props.onEqPreset(event.target.value as AudioEffectsPreset)} aria-label="均衡器预设">{EQ_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}</select></label>
+              <label><SlidersHorizontal /> 均衡器强度 <input type="range" min={0} max={100} step={1} value={props.eqIntensity} onChange={(event) => props.onEqIntensity(Number(event.target.value))} aria-label="均衡器强度" /> <span className="muted">{props.eqIntensity}%</span></label>
+              <p className="muted">均衡器使用浏览器原生 10 段 ISO 滤波器（WebAudio）；选择"原声（关闭）"时完全绕过，不产生任何处理。</p>
             </div>}
           </div>
         </header>

@@ -50,7 +50,7 @@ import {
   resolveNeteaseSong,
   searchBili,
   searchFlac,
-  searchKuwo,
+  searchNetease,
   syncBiliAccountPlaylists,
   syncNeteaseAccountPlaylists
 } from "./lib/api";
@@ -276,9 +276,6 @@ function coverAfterSongResolved(playlist: Playlist, originalKey: string, resolve
 
 export default function App() {
   const initial = useMemo(loadState, []);
-  // Android WebView 上 WebAudio 接管 audio 元素会冻结播放时钟（环境限制），
-  // 音效 EQ 不可用，播放保持直通；桌面端正常。
-  const eqDisabled = /Android/i.test(typeof navigator !== "undefined" ? navigator.userAgent : "");
   const [tab, setTab] = useState<Tab>("home");
   const [playlists, setPlaylists] = useState(initial.playlists);
   const [favorites, setFavorites] = useState(initial.favorites);
@@ -823,31 +820,13 @@ export default function App() {
     }
   }, [eqIntensity, eqPreset]);
 
-  // EQ 切换必须在用户手势内同步接线：change 事件处理栈内 navigator.userActivation
-  // 仍为激活态，此时 new AudioContext() 才会以 running 创建；若在 useEffect 里
-  // 接线，浏览器按自动播放策略以 suspended 创建，createMediaElementSource 接管
-  // 元素后时钟冻结、声音卡死（原声 none 不接线所以正常）。
-  // 另：对**正在播放**的元素调用 createMediaElementSource 会冻结元素时钟，
-  // 因此从原声（未接线）切到其他预设时需先暂停 → 接线 → 恢复播放；
-  // ensureAudioEffects 接线前自动 pause、接线后不自动恢复（由本函数恢复，
-  // 保证「接线 → play」在元素暂停态下完成，时钟才正常推进）。
+  // EQ 切换：captureStream 不接管元素时钟，接线/拆线都不需要暂停元素，
+  // 对正在播放的元素直接 ensureAudioEffects 即可（内部对 src 变化自动重接）。
   const ensureWiredWhilePlaying = (preset: AudioEffectsPreset) => {
     if (preset === "none") return;
     const audio = audioRef.current;
     if (!audio || isAudioEffectsWired(audio)) return;
-    const position = audio.currentTime;
-    const wasPlaying = !audio.paused;
     ensureAudioEffects(audio);
-    if (wasPlaying) {
-      if (position > 0) {
-        try {
-          audio.currentTime = position;
-        } catch {
-          // 元数据就绪后自动恢复
-        }
-      }
-      void audio.play().catch(() => undefined);
-    }
   };
   const handleEqPresetChange = (preset: AudioEffectsPreset) => {
     setEqPreset(preset);
@@ -1308,6 +1287,9 @@ export default function App() {
         audio.playbackRate = playbackSpeed;
         audio.currentTime = startAt;
         await audio.play();
+        // 换歌后 src 已更新：确保均衡图接在当前 src 的流上
+        // （captureStream 旧流随旧 src 失效，ensureAudioEffects 会自动重接）。
+        ensureAudioEffects(audio);
       }
       if (requestId !== playRequestRef.current) {
         if (audioMutationOwnerRef.current === requestId) {
@@ -1898,22 +1880,23 @@ export default function App() {
     setSelected(new Set());
     setSearching(true);
     try {
-      // 三源聚合（均免费无需登录）：FLAC 直链库（质量最高，翻唱/翻录为主）
-      // → 酷我音乐（版权原曲完整可播，MP3 128k，如周杰伦）
-      // → B站（免费，海量版权曲目合集/现场/MV，音质受限于视频源）。
-      const [flacResult, kuwoSongs, biliSongs] = await Promise.allSettled([
+      // 三源聚合（均免费无需登录）：
+      // FLAC 直链库（无损/320k，质量最高，翻唱/翻录为主）
+      // → 网易云（320k 正版，免登录可播非 VIP 曲目）
+      // → B站（免费版权曲目合集/现场/MV，音质受限于视频源，兜底）。
+      const [flacResult, neteaseSongs, biliSongs] = await Promise.allSettled([
         searchFlac(text, page),
-        searchKuwo(text),
+        searchNetease(text),
         searchBili(text)
       ]);
       if (searchRunRef.current !== runId) return;
       const flacSongs = flacResult.status === "fulfilled" ? flacResult.value.songs : [];
-      const kuwoList = kuwoSongs.status === "fulfilled" ? (kuwoSongs.value ?? []) : [];
+      const neteaseList = neteaseSongs.status === "fulfilled" ? (neteaseSongs.value ?? []) : [];
       const biliList = biliSongs.status === "fulfilled" ? (biliSongs.value ?? []) : [];
-      // 去重（按名称+歌手）：FLAC > 酷我 > B站，同曲保留更高质量的源。
+      // 去重（按名称+歌手）：FLAC > 网易云 > B站，同曲保留更高质量的源。
       const seenKeys = new Set<string>();
       const merged: Song[] = [];
-      for (const song of [...flacSongs, ...kuwoList, ...biliList]) {
+      for (const song of [...flacSongs, ...neteaseList, ...biliList]) {
         const key = `${song.name}|${song.artist}`.toLocaleLowerCase();
         if (seenKeys.has(key)) continue;
         seenKeys.add(key);
@@ -2247,6 +2230,7 @@ export default function App() {
           setPosition(event.currentTarget.currentTime);
         }}
         onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
+        onPlaying={() => ensureAudioEffects(audioRef.current)}
         onEnded={handleAudioEnded}
         onPause={markPausedPlayback}
         onError={() => void retryCurrentSongAfterAudioError()}
@@ -2457,7 +2441,6 @@ export default function App() {
           onProgressStyle={setProgressStyle}
           eqPreset={eqPreset}
           eqIntensity={eqIntensity}
-          eqDisabled={eqDisabled}
           onEqPreset={handleEqPresetChange}
           onEqIntensity={handleEqIntensityChange}
           onSleepTimer={(seconds) => {

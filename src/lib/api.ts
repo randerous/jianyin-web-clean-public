@@ -77,9 +77,9 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 export function normalizeRemoteSong(value: RemoteSong, index = 0): Song | null {
   const id = asString(value.id);
   if (!id) return null;
-  const source = value.source === "bili" ? "bili" : value.source === "flac" ? "flac" : value.source === "kuwo" ? "kuwo" : "netease";
+  const source = value.source === "bili" ? "bili" : value.source === "flac" ? "flac" : "netease";
   return {
-    id: source === "bili" || source === "flac" || source === "kuwo" ? id : id.startsWith("netease_") ? id : `netease_${id}`,
+    id: source === "bili" || source === "flac" ? id : id.startsWith("netease_") ? id : `netease_${id}`,
     name: asString(value.name, "未知歌曲"),
     artist: asString(value.artist, "未知歌手"),
     url: normalizeRemoteUrl(value.url),
@@ -116,12 +116,6 @@ export async function searchNetease(keyword: string, quality: PlayQuality = "exh
 
 export async function searchBili(keyword: string) {
   const data = await fetchJson<{ songs?: RemoteSong[] }>(`/api/bili/search?keyword=${encodeURIComponent(keyword)}&limit=30`);
-  return (data.songs ?? []).map(normalizeRemoteSong).filter((song): song is Song => Boolean(song));
-}
-
-/** 酷我音乐（免费免登录，周杰伦等版权原曲完整可播，MP3 128k） */
-export async function searchKuwo(keyword: string) {
-  const data = await fetchJson<{ songs?: RemoteSong[] }>(`/api/kuwo/search?keyword=${encodeURIComponent(keyword)}`);
   return (data.songs ?? []).map(normalizeRemoteSong).filter((song): song is Song => Boolean(song));
 }
 
