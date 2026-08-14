@@ -2169,6 +2169,155 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 	  }
 	});
 
+	// ---- 酷我音乐（免费免登录，周杰伦等版权原曲完整可播；MP3 128k） ----
+	const KUWO_SEARCH_URL = "http://search.kuwo.cn/r.s";
+	const KUWO_PLAY_URL = "http://antiserver.kuwo.cn/anti.s";
+	const kuwoSearchCache = new Map();
+	const kuwoSearchInFlight = new Map();
+	const kuwoStreamCache = new Map();
+	const KUWO_MIN_FULL_SONG_MS = 90_000;
+	const KUWO_HEADERS = {
+	  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+	  "Referer": "http://www.kuwo.cn/"
+	};
+
+	function parseKuwoSearchResponse(raw) {
+	  // 酷我返回 Python dict 风格（单引号）文本，容错解析：
+	  // 独立提取各字段后按顺序对齐（同一条目字段出现顺序一致）。
+	  try {
+	    const nameRe = /'NAME':'((?:[^'\\]|\\.)*)'/g;
+	    const artistRe = /'ARTIST':'((?:[^'\\]|\\.)*)'/g;
+	    const ridRe = /'DC_TARGETID':'(\d+)'/g;
+	    const durRe = /'DURATION':'(\d+)'/g;
+	    const names = [...raw.matchAll(nameRe)].map((m) => m[1]);
+	    const artists = [...raw.matchAll(artistRe)].map((m) => m[1]);
+	    const rids = [...raw.matchAll(ridRe)].map((m) => m[1]);
+	    const durs = [...raw.matchAll(durRe)].map((m) => m[1]);
+	    const count = Math.max(names.length, artists.length, rids.length, durs.length);
+	    const items = [];
+	    for (let i = 0; i < count; i += 1) {
+	      items.push({
+	        NAME: decodeUnicodeEscapes(names[i] ?? ""),
+	        ARTIST: decodeUnicodeEscapes(artists[i] ?? ""),
+	        DC_TARGETID: rids[i] ?? "",
+	        DURATION: durs[i] ?? ""
+	      });
+	    }
+	    return items;
+	  } catch {
+	    return [];
+	  }
+	}
+
+	function decodeUnicodeEscapes(value) {
+	  return cleanText(value).replace(/\\u0026/g, "&").replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+	}
+
+	function mapKuwoSong(item) {
+	  const rid = cleanText(item?.DC_TARGETID);
+	  const durationSec = Number(item?.DURATION || 0);
+	  const durationMs = durationSec > 0 ? durationSec * 1000 : 0;
+	  if (!rid || durationMs <= KUWO_MIN_FULL_SONG_MS) return null;
+	  const artist = cleanText(item?.ARTIST).replace(/\\u0026/g, "&");
+	  return {
+	    id: `kuwo_${rid}`,
+	    name: cleanText(item?.NAME).replace(/\\u0026/g, "&"),
+	    artist,
+	    url: `/api/kuwo/stream/${encodeURIComponent(rid)}`,
+	    pic: "",
+	    source: "kuwo",
+	    remotePlayable: true,
+	    verifiedPlayable: true,
+	    durationMs,
+	    br: 128000,
+	    level: "128k",
+	    audioType: "mp3",
+	    quality: "128k"
+	  };
+	}
+
+	app.get("/api/kuwo/search", async (req, res) => {
+	  const keyword = cleanText(req.query.keyword);
+	  if (!keyword) {
+	    res.status(400).json({ error: "keyword_required", message: "keyword is required" });
+	    return;
+	  }
+	  const cacheKey = keyword.toLowerCase();
+	  const cached = kuwoSearchCache.get(cacheKey);
+	  if (cached && cached.expiresAt > Date.now()) {
+	    res.json({ songs: cached.songs, cached: true });
+	    return;
+	  }
+	  const pending = kuwoSearchInFlight.get(cacheKey);
+	  if (pending) {
+	    const data = await pending;
+	    res.json({ songs: data.songs, cached: true });
+	    return;
+	  }
+	  const request = (async () => {
+	    const url = `${KUWO_SEARCH_URL}?all=${encodeURIComponent(keyword)}&ft=music&itemset=web_2013&client=kt&pn=0&rn=20&rformat=json&encoding=utf8`;
+	    const response = await fetchImpl(url, { headers: KUWO_HEADERS });
+	    const text = await response.text();
+	    const songs = parseKuwoSearchResponse(text).map(mapKuwoSong).filter(Boolean).slice(0, 20);
+	    return { songs };
+	  })().then((data) => {
+	    kuwoSearchCache.set(cacheKey, { songs: data.songs, expiresAt: Date.now() + 10 * 60_000 });
+	    return data;
+	  }).finally(() => {
+	    kuwoSearchInFlight.delete(cacheKey);
+	  });
+	  kuwoSearchInFlight.set(cacheKey, request);
+	  try {
+	    const data = await request;
+	    res.json({ songs: data.songs, cached: false });
+	  } catch (error) {
+	    res.status(502).json({ error: "kuwo_search_failed", message: errorMessage(error) });
+	  }
+	});
+
+	app.get("/api/kuwo/stream/:rid", async (req, res) => {
+	  const rid = cleanText(req.params.rid).replace(/^kuwo_/, "");
+	  if (!/^\d+$/.test(rid)) {
+	    res.status(400).json({ error: "invalid_kuwo_rid", message: "invalid Kuwo rid" });
+	    return;
+	  }
+	  try {
+	    const cached = kuwoStreamCache.get(rid);
+	    let playUrl = cached && cached.expiresAt > Date.now() ? cached.url : "";
+	    if (!playUrl) {
+	      const url = `${KUWO_PLAY_URL}?type=convert_url&rid=MUSIC_${rid}&format=mp3&response=url`;
+	      const response = await fetchImpl(url, { headers: KUWO_HEADERS });
+	      playUrl = cleanText(await response.text());
+	      if (playUrl) kuwoStreamCache.set(rid, { url: playUrl, expiresAt: Date.now() + 30 * 60_000 });
+	    }
+	    if (!playUrl || !/^https?:\/\//.test(playUrl)) {
+	      res.status(404).json({ error: "kuwo_stream_unavailable", message: "酷我音频暂不可用" });
+	      return;
+	    }
+	    const upstream = await fetchImpl(playUrl, {
+	      headers: {
+	        ...KUWO_HEADERS,
+	        Accept: "audio/*,*/*;q=0.8",
+	        ...(req.headers.range ? { Range: req.headers.range } : {})
+	      },
+	      redirect: "follow"
+	    });
+	    if (!upstream.ok || !upstream.body) {
+	      res.status(502).json({ error: "kuwo_upstream_failed", message: "酷我音频源失败" });
+	      return;
+	    }
+	    res.status(upstream.status);
+	    for (const header of ["content-type", "content-length", "content-range", "accept-ranges"]) {
+	      const value = upstream.headers.get(header);
+	      if (value) res.setHeader(header, value);
+	    }
+	    res.setHeader("Cache-Control", "no-store");
+	    pipeUpstreamBody(upstream, res, "kuwo_stream_failed");
+	  } catch (error) {
+	    res.status(502).json({ error: "kuwo_stream_failed", message: errorMessage(error) });
+	  }
+	});
+
 	app.get("/api/flac/search", async (req, res) => {
 	  const keyword = cleanText(req.query.keyword);
 	  if (!keyword) {

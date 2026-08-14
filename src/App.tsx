@@ -50,6 +50,7 @@ import {
   resolveNeteaseSong,
   searchBili,
   searchFlac,
+  searchKuwo,
   syncBiliAccountPlaylists,
   syncNeteaseAccountPlaylists
 } from "./lib/api";
@@ -1897,20 +1898,22 @@ export default function App() {
     setSelected(new Set());
     setSearching(true);
     try {
-      // 主源：FLAC 直链库；补充源：B站（B站有大量版权曲目合集/现场/官方 MV，
-      // 如周杰伦等网易云/FLAC 均搜不到的曲目），按「FLAC 优先 + B站补充」聚合。
-      const [flacResult, biliSongs] = await Promise.allSettled([
+      // 三源聚合（均免费无需登录）：FLAC 直链库（质量最高，翻唱/翻录为主）
+      // → 酷我音乐（版权原曲完整可播，MP3 128k，如周杰伦）
+      // → B站（免费，海量版权曲目合集/现场/MV，音质受限于视频源）。
+      const [flacResult, kuwoSongs, biliSongs] = await Promise.allSettled([
         searchFlac(text, page),
+        searchKuwo(text),
         searchBili(text)
       ]);
       if (searchRunRef.current !== runId) return;
       const flacSongs = flacResult.status === "fulfilled" ? flacResult.value.songs : [];
+      const kuwoList = kuwoSongs.status === "fulfilled" ? (kuwoSongs.value ?? []) : [];
       const biliList = biliSongs.status === "fulfilled" ? (biliSongs.value ?? []) : [];
-      // 去重：同一首歌（按名称+歌手）B站合集与 FLAC 同时存在时保留 FLAC；
-      // B站结果放在 FLAC 之后，作为补充可播放项。
+      // 去重（按名称+歌手）：FLAC > 酷我 > B站，同曲保留更高质量的源。
       const seenKeys = new Set<string>();
       const merged: Song[] = [];
-      for (const song of [...flacSongs, ...biliList]) {
+      for (const song of [...flacSongs, ...kuwoList, ...biliList]) {
         const key = `${song.name}|${song.artist}`.toLocaleLowerCase();
         if (seenKeys.has(key)) continue;
         seenKeys.add(key);

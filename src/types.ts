@@ -1,4 +1,4 @@
-export type Source = "local" | "netease" | "bili" | "flac";
+export type Source = "local" | "netease" | "bili" | "flac" | "kuwo";
 
 export type Song = {
   id: string;

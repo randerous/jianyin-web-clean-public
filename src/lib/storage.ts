@@ -24,7 +24,7 @@ function asSong(value: unknown): Song | null {
   const spoofedLegacyLocal = legacyLocal && value.source !== undefined && value.source !== "local";
   const source = legacyLocal
     ? "local"
-    : value.source === "netease" || value.source === "bili" || value.source === "flac" || value.source === "local" ? value.source : localKey ? "local" : "netease";
+    : value.source === "netease" || value.source === "bili" || value.source === "flac" || value.source === "kuwo" || value.source === "local" ? value.source : localKey ? "local" : "netease";
   const name = asString(value.name, "未知歌曲");
   const artist = asString(value.artist, "未知歌手");
   const explicitSharedId = spoofedLegacyLocal ? "" : canonicalSharedId("shared_song", asString(value.sharedId));
@@ -44,7 +44,7 @@ function asSong(value: unknown): Song | null {
     lrc: typeof value.lrc === "string" ? value.lrc : undefined,
     localKey: localKey || undefined,
     coverKey: coverKey || undefined,
-    remotePlayable: Boolean(value.remotePlayable) || source === "netease" || source === "bili" || source === "flac",
+    remotePlayable: Boolean(value.remotePlayable) || source === "netease" || source === "bili" || source === "flac" || source === "kuwo",
     verifiedPlayable: Boolean(value.verifiedPlayable) || Boolean(asString(value.url)),
     durationMs: typeof value.durationMs === "number" && Number.isFinite(value.durationMs) ? value.durationMs : undefined,
     br: typeof value.br === "number" && Number.isFinite(value.br) ? value.br : null,
@@ -72,7 +72,7 @@ function isDownloadedSong(song: Song) {
 }
 
 function candidateDownloadKey(song: Song) {
-  if (!song.id || (song.source !== "netease" && song.source !== "bili" && song.source !== "flac")) return "";
+  if (!song.id || (song.source !== "netease" && song.source !== "bili" && song.source !== "flac" && song.source !== "kuwo")) return "";
   return `download_${song.source}_${song.id}`.replace(/[^a-zA-Z0-9_.-]/g, "_");
 }
 
@@ -90,7 +90,7 @@ function asPlaylist(value: unknown): Playlist | null {
   const spoofedLegacyLocal = legacyLocal && value.source !== undefined && value.source !== "local";
   const source = legacyLocal
     ? "local"
-    : value.source === "netease" || value.source === "bili" || value.source === "flac" ? value.source : "local";
+    : value.source === "netease" || value.source === "bili" || value.source === "flac" || value.source === "kuwo" ? value.source : "local";
   const explicitSharedId = spoofedLegacyLocal ? "" : canonicalSharedId("shared_playlist", asString(value.sharedId));
   const sharedId = explicitSharedId || (source === "local" && id.startsWith("local_")
     ? stableLegacySharedId("shared_playlist", id)
