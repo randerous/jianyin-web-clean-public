@@ -3,30 +3,30 @@ import type { AudioEffectsPreset } from "../types";
 /**
  * WebAudio 音效系统（10 段 ISO 均衡）。
  *
- * 实现方式：**不接管 audio 元素**，而是用 `audio.captureStream()` 取元素
- * 的音频流副本 → `MediaStreamAudioSourceNode` → 10 段 peaking biquad → destination；
- * 同时把元素 **muted 置 true**（元素直通静音，用户听到的是经过 EQ 的流）。
+ * 实现方式：用 `createMediaElementSource(audio)` 把元素的音频**接管**进
+ * WebAudio 图（元素不再直出声音，无需任何 volume/muted 静音技巧）：
+ * element → 10 段 peaking biquad 链 → destination。
  *
- * 为什么不用 createMediaElementSource：
- * - Chromium 系（桌面 Chrome/Edge/Android WebView）中，createMediaElementSource
- *   接管元素后，若 AudioContext 以 suspended 创建（非手势自动播放路径），
- *   元素时钟会永久冻结（切换音效后播放位置停住，pause/resume 均无法恢复）。
- *   captureStream 只是复制流，不接管元素，时钟完全正常，即使 ctx suspended
- *   也不影响元素本身的播放。
- * - 已验证：captureStream 的数据不受元素 volume 影响（volume=0 时流内仍有
- *   完整音频能量）。因此这里用 **muted（而非 volume）** 静音元素直通路径：
- *   muted 与 volume 是两个独立属性，互不干扰——交叉淡入淡出（fade）可自由
- *   操作 volume，不会把"直通静音"顶掉，也不会出现"原声 + EQ 双路叠加"。
+ * 为什么是 createMediaElementSource 而不是 captureStream：
+ * - Android WebView 的 `captureStream()` 抓的是**音量/静音之后**的音频
+ *   （实测 volume=0 或 muted=true 时流内能量都是 0，桌面 Chrome 却不是），
+ *   因此"captureStream + 静音直通路径"在 Android 上会把流也静音掉 → 无声音。
+ * - createMediaElementSource 直接接管元素，无需静音，桌面与 Android 行为一致。
+ *
+ * 关于"切换音效卡死"（元素时钟冻结）：
+ * - 冻结只在 **AudioContext 处于 suspended 时**发生：createMediaElementSource
+ *   接管后元素时钟由 WebAudio 图驱动，图被挂起就没人消费音频 → 时钟停住。
+ * - 因此本模块只做两件事保证不冻结：① 仅在真实用户手势内接线（AudioContext
+ *   以 running 创建）；② 一旦 ctx 被挂起立即 resume，并且**从不主动 suspend**
+ *   （音乐播放器需要在后台继续播放，visibilitychange 只负责恢复）。
  *
  * 设计要点：
- * - 模块级单例持有全部 WebAudio 状态；顶层不触碰 window/AudioContext，
- *   每个 DOM 调用都有守卫，因此本模块可在 Node（node:test）中直接 import。
- * - AudioContext 懒创建；ensureAudioEffects 按 navigator.userActivation
- *   门控：非手势播放延迟到下一个真实手势再接线（保证"自动播放"零回归）。
- * - 幂等接线以「元素同一性 + 当前 src」做守卫：换歌（src 变化）时自动
- *   拆旧图重接，避免 captureStream 的旧流随旧 src 失效而 EQ 无声。
- * - 旁路（"原声/关闭"）：元素 muted 恢复 false（原声直通），WebAudio 输出
- *   保持连接但元素已静音，等于完全旁路。
+ * - createMediaElementSource 对同一元素只能调用一次，且换 src 无需重接
+ *   （源节点绑定的是元素本身，src 变化自动跟随），所以接线以「元素同一性」
+ *   幂等，不跟踪 src。
+ * - "原声（关闭）" 预设 = 全 0 增益（peaking 0dB 完全透明），图保持连接，
+ *   切换预设只改增益，不会出现双路叠加或静音。
+ * - 模块级单例；顶层不触碰 window/AudioContext，Node（node:test）可 import。
  */
 
 export const EQ_BAND_FREQUENCIES = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
@@ -43,7 +43,7 @@ export type EqPresetDef = { id: AudioEffectsPreset; label: string; gains: number
 /**
  * 预设 dB 表（10 段，中心频率见 EQ_BAND_FREQUENCIES）。
  * 取值克制（±4 dB 内）：hiFi=微笑曲线；full=饱满；vocal=人声前置；
- * classical=平滑近直；rock=低频+高频冲击。none=原声（全 0）。
+ * classical=平滑近直；rock=低频+高频冲击。none=原声（全 0，透明）。
  */
 export const EQ_PRESETS: EqPresetDef[] = [
   { id: "none", label: "原声（关闭）", gains: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
@@ -71,9 +71,10 @@ export function clampIntensity(value: unknown): number {
   return DEFAULT_EQ_INTENSITY;
 }
 
-/** 强度缩放：gain_db[i] = preset.gains[i] * (intensity / 100) */
+/** 强度缩放：gain_db[i] = preset.gains[i] * (intensity / 100)；none → 全 0。 */
 export function scaledBandGains(preset: AudioEffectsPreset, intensity: number): number[] {
   const def = EQ_PRESETS.find((item) => item.id === preset) ?? EQ_PRESETS[1];
+  if (def.id === "none") return EQ_BAND_FREQUENCIES.map(() => 0);
   const ratio = clampIntensity(intensity) / 100;
   return def.gains.map((gain) => gain * ratio + 0);
 }
@@ -89,11 +90,9 @@ export type AudioEffectsDebugInfo = {
 
 // ---- 图状态（浏览器内有效；Node 下保持空） ----
 let ctx: AudioContext | null = null;
-let source: MediaStreamAudioSourceNode | null = null;
+let source: MediaElementAudioSourceNode | null = null;
 let filters: BiquadFilterNode[] = [];
 let wiredElement: HTMLAudioElement | null = null;
-let wiredSrc = "";
-let bypassActive = false;
 let recordedPreset: AudioEffectsPreset = DEFAULT_EQ_PRESET;
 let recordedIntensity = DEFAULT_EQ_INTENSITY;
 let fallbackListenersAttached = false;
@@ -103,14 +102,8 @@ function isBrowser() {
   return typeof window !== "undefined";
 }
 
-/** 元素是否支持 captureStream（Chromium/Safari 均支持） */
-function canCaptureStream(audio: HTMLAudioElement | null): audio is HTMLAudioElement {
-  return audio !== null && typeof (audio as HTMLMediaElement & { captureStream?: () => MediaStream }).captureStream === "function";
-}
-
-/** 元素当前 src（含尚未完成 metadata 时的空字符串）。 */
-function elementSrc(audio: HTMLAudioElement): string {
-  return audio.currentSrc || audio.src || "";
+function currentGains(): number[] {
+  return scaledBandGains(recordedPreset, recordedIntensity);
 }
 
 function teardownGraph() {
@@ -131,26 +124,18 @@ function teardownGraph() {
   if (ctx) {
     void ctx.close().catch(() => undefined);
   }
-  if (wiredElement) {
-    // 图拆除后元素直通原声（muted 只用于 EQ 静音，不碰 volume）
-    wiredElement.muted = false;
-  }
   ctx = null;
   source = null;
   filters = [];
   wiredElement = null;
-  wiredSrc = "";
-  bypassActive = false;
 }
 
+// 音乐播放器需要后台继续播放：只恢复、从不挂起（挂起会冻结被接管的元素时钟）。
 function attachVisibilityHandler() {
   if (visibilityListenerAttached || !isBrowser()) return;
   visibilityListenerAttached = true;
   document.addEventListener("visibilitychange", () => {
-    if (!ctx) return;
-    if (document.visibilityState === "hidden") {
-      void ctx.suspend().catch(() => undefined);
-    } else if (ctx.state === "suspended") {
+    if (ctx && ctx.state === "suspended") {
       void ctx.resume().catch(() => undefined);
     }
   });
@@ -177,37 +162,36 @@ function wireGraph(audio: HTMLAudioElement): boolean {
     const AudioCtor: typeof AudioContext = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
     if (!AudioCtor) return false;
     ctx = new AudioCtor();
-    // 非手势上下文可能以 suspended 创建；captureStream 不接管元素时钟，
-    // 即使 ctx suspended 也不影响元素播放。为让 EQ 生效仍尽量恢复。
-    if (ctx.state === "suspended") {
-      void ctx.resume().catch(() => undefined);
-    }
-    const stream = (audio as HTMLMediaElement & { captureStream: () => MediaStream }).captureStream();
-    source = ctx.createMediaStreamSource(stream);
-    filters = EQ_BAND_FREQUENCIES.map((frequency, index) => {
+    // 接管元素：createMediaElementSource 对同一元素仅可调用一次；
+    // 接线后元素音频全部走 WebAudio 图（无需静音），换 src 自动跟随。
+    source = ctx.createMediaElementSource(audio);
+    filters = EQ_BAND_FREQUENCIES.map((frequency) => {
       const filter = ctx!.createBiquadFilter();
       filter.type = "peaking";
       filter.frequency.value = frequency;
       filter.Q.value = EQ_Q;
-      // 首次接线直设增益，避免爬升伪影
-      filter.gain.value = scaledBandGains(recordedPreset, recordedIntensity)[index];
+      filter.gain.value = 0;
       return filter;
     });
-    filters.reduce((previous, current) => {
-      previous.connect(current);
-      return current;
-    });
-    filters[filters.length - 1].connect(ctx.destination);
-    bypassActive = false;
+    let node: AudioNode = source;
+    for (const filter of filters) {
+      node.connect(filter);
+      node = filter;
+    }
+    node.connect(ctx.destination);
     wiredElement = audio;
-    wiredSrc = elementSrc(audio);
-    // 静音元素直通路径：用户听到的是经过 EQ 的流（captureStream 数据不受
-    // muted/volume 影响；muted 与 fade 的 volume 互不干扰）
-    audio.muted = true;
+    // 首次接线直设增益，避免爬升伪影
+    const gains = currentGains();
+    filters.forEach((filter, index) => {
+      filter.gain.value = gains[index];
+    });
+    if (ctx.state === "suspended") {
+      void ctx.resume().catch(() => undefined);
+    }
     attachVisibilityHandler();
     return true;
   } catch {
-    // NotSupportedError 等：不接线，保持直通（与未启用音效时行为一致）
+    // InvalidStateError（元素已被接管）等：放弃图，保持直通。
     if (ctx) {
       void ctx.close().catch(() => undefined);
       ctx = null;
@@ -215,38 +199,28 @@ function wireGraph(audio: HTMLAudioElement): boolean {
     source = null;
     filters = [];
     wiredElement = null;
-    wiredSrc = "";
-    audio.muted = false;
     return false;
   }
 }
 
 /**
- * 幂等接线：把 audio 元素的音频流接入 WebAudio EQ 图。
- * - 已接线且元素相同且 src 未变 → 尝试 resume 并返回 true。
- * - 元素不同或 src 变化 → 拆除旧图重接（换歌后 captureStream 旧流已失效）。
- * - 非浏览器 / 无元素 / 不支持 captureStream → false。
+ * 幂等接线：把 audio 元素接入 WebAudio EQ 图。
+ * - 已接线且元素相同 → resume（若挂起）并刷新增益。
+ * - 元素不同 → 直接对新元素接线（旧元素随其生命周期结束）。
+ * - 非浏览器 / 无元素 → false。
  * - 非手势（navigator.userActivation.hasBeenActive 为 false）→ 挂一次性
  *   手势监听延迟接线，返回 false（保证"启动自动播放"等非手势路径零回归）。
- * - 正常路径 → 建 AudioContext + captureStream 流 + 10 段 biquad 链，
- *   元素 muted=true（声音走 EQ 流），应用当前预设。
+ * - 正常路径 → 建 AudioContext + createMediaElementSource + 10 段 biquad 链。
  */
 export function ensureAudioEffects(audio: HTMLAudioElement | null): boolean {
   if (!isBrowser() || !audio) return false;
-  // 原声（关闭）不需要任何图：不接线、不挂延迟监听。
-  if (recordedPreset === "none") return false;
   if (ctx && wiredElement === audio) {
-    if (elementSrc(audio) !== wiredSrc) {
-      // 换歌（src 变化）：旧 captureStream 流已随旧 src 失效，重接。
-      teardownGraph();
-    } else {
-      if (ctx.state === "suspended") {
-        void ctx.resume().catch(() => undefined);
-      }
-      return true;
+    if (ctx.state === "suspended") {
+      void ctx.resume().catch(() => undefined);
     }
+    applyAudioEffects();
+    return true;
   }
-  if (!canCaptureStream(audio)) return false;
   if (typeof navigator.userActivation === "object" && navigator.userActivation !== null && !navigator.userActivation.hasBeenActive) {
     attachFallbackGestureListeners(audio);
     return false;
@@ -256,26 +230,14 @@ export function ensureAudioEffects(audio: HTMLAudioElement | null): boolean {
 
 /**
  * 把最新预设/强度推送到已有图（无图则只记录，稍后接线时生效）。
- * 旁路切换只在该标志翻转时调整元素 muted 与拓扑；增益用 setTargetAtTime 防拉链噪声。
+ * 增益用 setTargetAtTime 防拉链噪声；none 预设 = 全 0（透明旁路）。
  */
 export function applyAudioEffects(): void {
-  if (!isBrowser() || !ctx || !source || !wiredElement) return;
+  if (!isBrowser() || !ctx || !source || !wiredElement || !filters.length) return;
   if (ctx.state === "suspended") {
     void ctx.resume().catch(() => undefined);
   }
-  const bypass = recordedPreset === "none";
-  if (bypass !== bypassActive) {
-    if (bypass) {
-      // 旁路：元素恢复原声直通；WebAudio 输出保持连接（元素 muted 恢复 false）
-      wiredElement.muted = false;
-    } else {
-      // 启用 EQ：元素静音，声音走 EQ 流
-      wiredElement.muted = true;
-    }
-    bypassActive = bypass;
-  }
-  if (bypass) return;
-  const gains = scaledBandGains(recordedPreset, recordedIntensity);
+  const gains = currentGains();
   const now = ctx.currentTime;
   filters.forEach((filter, index) => {
     filter.gain.setTargetAtTime(gains[index], now, 0.02);
@@ -291,7 +253,7 @@ export function setAudioEffects(preset: AudioEffectsPreset, intensity: number): 
 
 /** 指定 audio 元素是否已接入 WebAudio 图（用于切换预设时的接线决策）。 */
 export function isAudioEffectsWired(audio: HTMLAudioElement | null): boolean {
-  return isBrowser() && audio !== null && wiredElement === audio && ctx !== null && elementSrc(audio) === wiredSrc;
+  return isBrowser() && audio !== null && wiredElement === audio && ctx !== null;
 }
 
 /** 测试钩子：Node 下 contextState=null、bandGains 全 0，不抛错。 */
@@ -300,7 +262,7 @@ export function getAudioEffectsDebugInfo(): AudioEffectsDebugInfo {
     contextState: ctx ? ctx.state : null,
     preset: recordedPreset,
     intensity: recordedIntensity,
-    bypass: bypassActive,
+    bypass: recordedPreset === "none",
     bandGains: filters.length ? filters.map((filter) => filter.gain.value) : Array.from({ length: EQ_BAND_COUNT }, () => 0),
     bandFrequencies: [...EQ_BAND_FREQUENCIES]
   };
@@ -312,11 +274,10 @@ export function setDebugHook(enabled: boolean): void {
   if (enabled) {
     (window as unknown as Record<string, unknown>).JianyinAudioEffects = {
       getDebugInfo: getAudioEffectsDebugInfo,
-      // 测试钩子：强制接线（绕过手势门控，用于验证接线后时钟行为）。
+      // 测试钩子：强制接线（绕过手势门控，用于验证接线后行为）。
       forceWire: (audio: HTMLAudioElement | null): boolean => {
-        if (!isBrowser() || !audio || recordedPreset === "none") return false;
-        if (wiredElement === audio && ctx && elementSrc(audio) === wiredSrc) return true;
-        if (!canCaptureStream(audio)) return false;
+        if (!isBrowser() || !audio) return false;
+        if (wiredElement === audio && ctx) return true;
         return wireGraph(audio);
       }
     };
@@ -325,7 +286,7 @@ export function setDebugHook(enabled: boolean): void {
   }
 }
 
-// 便于热更新/页面卸载时回收（HMR 重建元素时旧接线随旧元素 GC）
+// 页面卸载时回收（HMR 重建元素时旧接线随旧元素 GC）
 if (typeof window !== "undefined") {
   window.addEventListener("pagehide", () => teardownGraph(), { once: true });
 }

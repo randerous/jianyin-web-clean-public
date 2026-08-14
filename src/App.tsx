@@ -820,8 +820,8 @@ export default function App() {
     }
   }, [eqIntensity, eqPreset]);
 
-  // EQ 切换：captureStream 不接管元素时钟，接线/拆线都不需要暂停元素，
-  // 对正在播放的元素直接 ensureAudioEffects 即可（内部对 src 变化自动重接）。
+  // EQ 切换：createMediaElementSource 接管元素，接线只需一次（换 src 自动跟随），
+  // 切换预设只改增益；对正在播放的元素直接 ensureAudioEffects 即可（幂等）。
   const ensureWiredWhilePlaying = (preset: AudioEffectsPreset) => {
     if (preset === "none") return;
     const audio = audioRef.current;
@@ -1287,9 +1287,6 @@ export default function App() {
         audio.playbackRate = playbackSpeed;
         audio.currentTime = startAt;
         await audio.play();
-        // 换歌后 src 已更新：确保均衡图接在当前 src 的流上
-        // （captureStream 旧流随旧 src 失效，ensureAudioEffects 会自动重接）。
-        ensureAudioEffects(audio);
       }
       if (requestId !== playRequestRef.current) {
         if (audioMutationOwnerRef.current === requestId) {
@@ -2230,7 +2227,6 @@ export default function App() {
           setPosition(event.currentTarget.currentTime);
         }}
         onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
-        onPlaying={() => ensureAudioEffects(audioRef.current)}
         onEnded={handleAudioEnded}
         onPause={markPausedPlayback}
         onError={() => void retryCurrentSongAfterAudioError()}
