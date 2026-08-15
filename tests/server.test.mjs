@@ -242,7 +242,7 @@ test("update endpoint exposes only the fixed GitHub release metadata", async () 
     releaseCalls += 1;
     if (url === "https://api.github.com/repos/randerous/jianyin-web-clean-public/releases?per_page=100") {
       return new Response(JSON.stringify([
-        { tag_name: "v1.0.33", published_at: "2026-07-21T00:00:00Z", body: "Latest release" },
+        { tag_name: "v1.0.39", published_at: "2026-07-21T00:00:00Z", body: "Latest release" },
         { tag_name: "v1.0.32", published_at: "2026-07-20T00:00:00Z", body: "Current release" },
         { tag_name: "v1.0.29", published_at: "2026-07-18T00:00:00Z", body: "Older release" },
         { tag_name: "v1.0.28", published_at: "2026-07-17T00:00:00Z", body: "Older release" },
@@ -252,20 +252,20 @@ test("update endpoint exposes only the fixed GitHub release metadata", async () 
     }
     assert.equal(url, "https://api.github.com/repos/randerous/jianyin-web-clean-public/releases/latest");
     return new Response(JSON.stringify({
-      tag_name: "v1.0.33",
-      html_url: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.33",
+      tag_name: "v1.0.39",
+      html_url: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.39",
       published_at: "2026-07-21T00:00:00Z",
       body: "Latest release",
       assets: [
         {
           name: "app-release.apk",
-          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.33/app-release.apk",
+          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.39/app-release.apk",
           digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
           size: 123
         },
         {
           name: "jianyin-windows-launcher.exe",
-          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.33/jianyin-windows-launcher.exe",
+          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.39/jianyin-windows-launcher.exe",
           digest: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
           size: 456
         },
@@ -282,16 +282,16 @@ test("update endpoint exposes only the fixed GitHub release metadata", async () 
   const first = await getJson(`${baseUrl}/api/update/latest`);
   const second = await getJson(`${baseUrl}/api/update/latest`);
   assert.equal(first.response.status, 200);
-  assert.equal(first.body.currentVersion, "1.0.32");
-  assert.equal(first.body.latestVersion, "1.0.33");
+  assert.equal(first.body.currentVersion, "1.0.38");
+  assert.equal(first.body.latestVersion, "1.0.39");
   assert.equal(first.body.available, true);
-  assert.deepEqual(first.body.releaseNotes.map((note) => note.tag), ["v1.0.33"]);
+  assert.deepEqual(first.body.releaseNotes.map((note) => note.tag), ["v1.0.39"]);
   assert.deepEqual(first.body.releaseNotes.map((note) => note.notes), ["Latest release"]);
   assert.equal(first.body.canApply, false);
   assert.equal(first.body.assets.apk.sha256, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
   assert.equal(first.body.assets.apk.size, 123);
   assert.equal(first.body.assets.windowsLauncher.sha256, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
-  assert.equal(second.body.tag, "v1.0.33");
+  assert.equal(second.body.tag, "v1.0.39");
   assert.equal(releaseCalls, 2);
 });
 
@@ -313,12 +313,12 @@ test("packaged Windows server advertises update apply without a git checkout", a
   const fetchImpl = async (url) => {
     if (url.endsWith("/releases/latest")) {
       return new Response(JSON.stringify({
-        tag_name: "v1.0.33",
+        tag_name: "v1.0.39",
         published_at: "2026-07-21T00:00:00Z",
         body: "Windows launcher update",
         assets: [{
           name: "jianyin-windows-launcher.exe",
-          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.33/jianyin-windows-launcher.exe",
+          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.39/jianyin-windows-launcher.exe",
           digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
           size: 123
         }]
