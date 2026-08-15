@@ -40,7 +40,6 @@ export type Theme = "light" | "dark";
 export type PlayQuality = "jymaster" | "sky" | "jyeffect" | "hires" | "lossless" | "exhigh" | "standard";
 export type ProgressStyle = "default" | "round" | "audio";
 export type LyricSource = "network" | "embedded";
-export type AudioEffectsPreset = "none" | "hiFi" | "full" | "vocal" | "classical" | "rock";
 
 export type PersistedState = {
   playlists: Playlist[];
@@ -58,8 +57,6 @@ export type PersistedState = {
   autoLyricsEnabled: boolean;
   playbackSpeed: number;
   fadeEnabled: boolean;
-  eqPreset: AudioEffectsPreset;
-  eqIntensity: number;
   autoCacheEnabled: boolean;
   keepQueueOnExit: boolean;
   autoPlayOnStart: boolean;

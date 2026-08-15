@@ -86,10 +86,6 @@ export function testState() {
     autoLyricsEnabled: true,
     playbackSpeed: 1,
     fadeEnabled: false,
-    // e2e 默认旁路：headless 下 createMediaElementSource 会冻结元素时钟，
-    // 现有播放测试保持 8/2 行为；EQ 专项测试显式启用
-    eqPreset: "none",
-    eqIntensity: 100,
     autoCacheEnabled: false,
     keepQueueOnExit: true,
     autoPlayOnStart: false,

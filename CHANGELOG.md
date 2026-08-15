@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.38 - 2026-08-15
+
+- 完全移除均衡器/音效功能（WebAudio EQ）。播放路径恢复为纯 HTMLAudioElement
+  直通，不再有任何 WebAudio 接管、captureStream 或静音旁路逻辑，从根上消除
+  音效模块引入的爆音/断流/切音效无声音/切音效卡死等问题。
+- 旧版本遗留的 eqPreset/eqIntensity 存储字段会被自动忽略，不影响升级。
+
 ## 1.0.37 - 2026-08-14
 
 - 修复「原声（关闭）」下播放出现爆音/断流：该模式下不再接线 WebAudio，

@@ -30,7 +30,6 @@ import { ChangeEvent, FormEvent, MouseEvent, useCallback, useEffect, useMemo, us
 import Modal from "./components/Modal";
 import Player from "./components/Player";
 import SongRow from "./components/SongRow";
-import { ensureAudioEffects, isAudioEffectsWired, setAudioEffects, setDebugHook } from "./lib/audio-effects";
 import { applySharedTombstoneClears, deriveSharedTombstoneClears } from "./lib/shared-state";
 import {
   checkProxy,
@@ -83,7 +82,7 @@ import {
   validateBackup
 } from "./lib/storage";
 import { FAVORITES_ID, RECENT_HISTORY_LIMIT, cover, recommendedKeywords } from "./data/seed";
-import type { AccountState, AudioEffectsPreset, BackupPreview, LyricSource, PersistedState, PlayQuality, Playlist, ProgressStyle, SharedState, SharedTombstones, Song, Theme } from "./types";
+import type { AccountState, BackupPreview, LyricSource, PersistedState, PlayQuality, Playlist, ProgressStyle, SharedState, SharedTombstones, Song, Theme } from "./types";
 
 type Tab = "home" | "search" | "mine";
 type PlayMode = "sequence" | "repeat" | "shuffle";
@@ -292,8 +291,6 @@ export default function App() {
   const [autoLyricsEnabled, setAutoLyricsEnabled] = useState(initial.autoLyricsEnabled);
   const [playbackSpeed, setPlaybackSpeed] = useState(initial.playbackSpeed);
   const [fadeEnabled, setFadeEnabled] = useState(initial.fadeEnabled);
-  const [eqPreset, setEqPreset] = useState<AudioEffectsPreset>(initial.eqPreset);
-  const [eqIntensity, setEqIntensity] = useState(initial.eqIntensity);
   const [autoCacheEnabled, setAutoCacheEnabled] = useState(initial.autoCacheEnabled);
   const [keepQueueOnExit, setKeepQueueOnExit] = useState(initial.keepQueueOnExit);
   const [autoPlayOnStart, setAutoPlayOnStart] = useState(initial.autoPlayOnStart);
@@ -412,8 +409,6 @@ export default function App() {
     autoLyricsEnabled,
     playbackSpeed,
     fadeEnabled,
-    eqPreset,
-    eqIntensity,
     autoCacheEnabled,
     keepQueueOnExit,
     autoPlayOnStart,
@@ -424,7 +419,7 @@ export default function App() {
     sharedTombstones: sharedTombstonesRef.current,
     sharedTombstoneClears: sharedTombstoneClearsRef.current,
     updatedAt: lastStateUpdatedAtRef.current || undefined
-  }), [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, eqIntensity, eqPreset, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
+  }), [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
   if (lastPersistedSnapshotRef.current !== persistedSnapshot) {
     lastPersistedSnapshotRef.current = persistedSnapshot;
     latestPersistedStateRef.current = persistedSnapshot;
@@ -783,8 +778,6 @@ export default function App() {
       autoLyricsEnabled,
       playbackSpeed,
       fadeEnabled,
-      eqPreset,
-      eqIntensity,
       autoCacheEnabled,
       keepQueueOnExit,
       autoPlayOnStart,
@@ -807,43 +800,7 @@ export default function App() {
     if (sharedDataChanged && sharedRemoteKnownRef.current && latestSharedStateRef.current) {
       sharedStateWriterRef.current!.enqueue(latestSharedStateRef.current);
     }
-  }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, eqIntensity, eqPreset, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, stateHydrated, theme]);
-
-  useEffect(() => {
-    setAudioEffects(eqPreset, eqIntensity);
-    setDebugHook(true);
-    // 播放中切换预设/强度时，若图尚未建立（如非手势启动的自动播放），
-    // 在可安全运行的情况下补接线；ensureAudioEffects 自带手势门控，无法运行则保持直通。
-    if (eqPreset !== "none") {
-      const audio = audioRef.current;
-      if (audio && !audio.paused) ensureAudioEffects(audio);
-    }
-  }, [eqIntensity, eqPreset]);
-
-  // EQ 切换：createMediaElementSource 接管元素，接线只需一次（换 src 自动跟随），
-  // 切换预设只改增益；对正在播放的元素直接 ensureAudioEffects 即可（幂等）。
-  const ensureWiredWhilePlaying = (preset: AudioEffectsPreset) => {
-    if (preset === "none") return;
-    const audio = audioRef.current;
-    if (!audio || isAudioEffectsWired(audio)) return;
-    ensureAudioEffects(audio);
-  };
-  const handleEqPresetChange = (preset: AudioEffectsPreset) => {
-    setEqPreset(preset);
-    setAudioEffects(preset, eqIntensity);
-    if (preset !== "none") {
-      const audio = audioRef.current;
-      if (audio && !audio.paused) ensureWiredWhilePlaying(preset);
-    }
-  };
-  const handleEqIntensityChange = (intensity: number) => {
-    setEqIntensity(intensity);
-    setAudioEffects(eqPreset, intensity);
-    if (eqPreset !== "none") {
-      const audio = audioRef.current;
-      if (audio && !audio.paused) ensureWiredWhilePlaying(eqPreset);
-    }
-  };
+  }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, stateHydrated, theme]);
 
   useEffect(() => {
     const retryLatestSharedState = (keepalive: boolean) => {
@@ -1202,9 +1159,6 @@ export default function App() {
     const requestId = playRequestRef.current + 1;
     playRequestRef.current = requestId;
     userStartedPlaybackRef.current = true;
-    // 在首个 await 前同步接线 WebAudio 均衡图（常见路径都在用户手势内，
-    // 保证 AudioContext 以 running 状态创建；非手势时内部自动延迟）。
-    ensureAudioEffects(audioRef.current);
     const pauseGeneration = playbackPauseRef.current;
     let playbackAttempted = false;
     let sourceChanged = false;
@@ -1405,7 +1359,6 @@ export default function App() {
   const primePlaybackElement = useCallback((song: Song, startAt: number) => {
     const audio = audioRef.current;
     if (!audio || !song.url) return;
-    ensureAudioEffects(audio);
     if (song.localKey && !song.url.startsWith("blob:")) return;
     const targetSrc = new URL(song.url, window.location.href).href;
     if (audio.src !== targetSrc) audio.src = song.url;
@@ -1948,11 +1901,11 @@ export default function App() {
   }, [trackObjectUrl]);
 
   const backup = useCallback(async () => {
-    const state: PersistedState = { playlists, favorites, history, downloadHistory, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, eqPreset, eqIntensity, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart, autoUpdateEnabled, androidStatusNotificationEnabled, updatedAt: Date.now() };
+    const state: PersistedState = { playlists, favorites, history, downloadHistory, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart, autoUpdateEnabled, androidStatusNotificationEnabled, updatedAt: Date.now() };
     const payload = await makeBackup(state);
     downloadJson(`jianyin_web_clean_${new Date().toISOString().replace(/[:.]/g, "-")}.json`, payload);
     setToast(payload.localFiles?.length ? `已导出备份，包含 ${payload.localFiles.length} 个本地音频` : "已导出备份");
-  }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, eqIntensity, eqPreset, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
+  }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
 
   const applyHydratedRestore = useCallback((hydrated: { state: PersistedState; urls: string[] }) => {
     lastStateUpdatedAtRef.current = Math.max(lastStateUpdatedAtRef.current, hydrated.state.updatedAt ?? 0);
@@ -1971,8 +1924,6 @@ export default function App() {
     setAutoLyricsEnabled(hydrated.state.autoLyricsEnabled);
     setPlaybackSpeed(hydrated.state.playbackSpeed);
     setFadeEnabled(hydrated.state.fadeEnabled);
-    setEqPreset(hydrated.state.eqPreset);
-    setEqIntensity(hydrated.state.eqIntensity);
     setAutoCacheEnabled(hydrated.state.autoCacheEnabled);
     setKeepQueueOnExit(hydrated.state.keepQueueOnExit);
     setAutoPlayOnStart(hydrated.state.autoPlayOnStart);
@@ -2021,8 +1972,6 @@ export default function App() {
         autoLyricsEnabled,
         playbackSpeed,
         fadeEnabled,
-        eqPreset,
-        eqIntensity,
         autoCacheEnabled,
         keepQueueOnExit,
         autoPlayOnStart,
@@ -2040,7 +1989,7 @@ export default function App() {
     } finally {
       setRestoreBusy(false);
     }
-  }, [androidStatusNotificationEnabled, applyHydratedRestore, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, eqIntensity, eqPreset, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playbackSpeed, playlists, progressStyle, queue, queueIndex, restoreBusy, restorePreview, searchHistory, theme]);
+  }, [androidStatusNotificationEnabled, applyHydratedRestore, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playbackSpeed, playlists, progressStyle, queue, queueIndex, restoreBusy, restorePreview, searchHistory, theme]);
 
   const resolveDownloadable = useCallback(async (song: Song) => {
     if (song.localKey) return resolvePlayable(song);
@@ -2435,10 +2384,6 @@ export default function App() {
           selectedKeys={selected}
           onPlaybackSpeed={setPlaybackSpeed}
           onProgressStyle={setProgressStyle}
-          eqPreset={eqPreset}
-          eqIntensity={eqIntensity}
-          onEqPreset={handleEqPresetChange}
-          onEqIntensity={handleEqIntensityChange}
           onSleepTimer={(seconds) => {
             setSleepTimerUntil(Date.now() + seconds * 1000);
             setToast(`已设置定时关闭：${seconds < 60 ? `${seconds} 秒` : `${Math.round(seconds / 60)} 分钟`}`);

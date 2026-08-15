@@ -368,12 +368,6 @@ test("backup restores local audio in a clean context", async ({ page, browser })
 
   const clean = await browser.newContext();
   const cleanPage = await clean.newPage();
-  // clean context 无注入时 EQ 走产品默认 hiFi，headless 下接线会冻结元素时钟；
-  // 注入 eqPreset none（与 clean 状态其余字段等价），该测试不涉及 EQ。
-  // 注意：init script 闭包不能引用测试模块作用域（storageKey 必须经 arg 传入）
-  await cleanPage.addInitScript(({ key, value }) => {
-    localStorage.setItem(key, JSON.stringify(value));
-  }, { key: storageKey, value: { eqPreset: "none" } });
   await cleanPage.goto("/");
   await cleanPage.getByRole("navigation").getByRole("button", { name: "我的" }).click();
   const chooserPromise = cleanPage.waitForEvent("filechooser");
