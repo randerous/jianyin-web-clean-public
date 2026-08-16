@@ -16,7 +16,7 @@ const defaultGradleUserHome = resolve(platformCacheRoot, "gradle-user-home");
 const defaultGradleBuildRoot = resolve(platformCacheRoot, "gradle-build");
 const gradleVolume = "/Volumes/JianyinGradle";
 const gradleSparseBundle = resolve(root, "..", "gradle-cache-apfs.sparsebundle");
-const APFS_FILESYSTEM_TYPE = 25;
+const APFS_FILESYSTEM_TYPES = new Set([25, 26]);
 const aliyunMavenMarker = "// JIANYIN_ALIYUN_MAVEN_MIRRORS";
 const aliyunMavenRepositories = [
   'maven { url "https://maven.aliyun.com/repository/google" }',
@@ -111,7 +111,7 @@ export function resolveGradleUserHome(env = {}) {
 function isUsableGradleDirectory(path) {
   try {
     const filesystem = statfsSync(path);
-    return process.platform !== "darwin" || filesystem.type === APFS_FILESYSTEM_TYPE;
+    return process.platform !== "darwin" || APFS_FILESYSTEM_TYPES.has(filesystem.type);
   } catch (error) {
     if (error?.code === "ENOENT") return false;
     throw error;
