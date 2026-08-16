@@ -309,6 +309,7 @@ export default function App() {
   const [remoteResults, setRemoteResults] = useState<Song[]>([]);
   const [searchOfflineResults, setSearchOfflineResults] = useState(false);
   const [searchPageInfo, setSearchPageInfo] = useState({ page: 1, pageSize: FLAC_SEARCH_PAGE_SIZE, total: null as number | null, hasMore: false });
+  const [searchSourceStats, setSearchSourceStats] = useState<{ flac: number; netease: number; bili: number } | null>(null);
   const [searching, setSearching] = useState(false);
   const [proxyOnline, setProxyOnline] = useState(false);
   const [toast, setToast] = useState("");
@@ -1840,19 +1841,30 @@ export default function App() {
         searchBili(text)
       ]);
       if (searchRunRef.current !== runId) return;
+      const allOnlineFailed = flacResult.status === "rejected" && neteaseSongs.status === "rejected" && biliSongs.status === "rejected";
+      if (allOnlineFailed) throw new Error("所有在线音乐源均不可用");
       const flacSongs = flacResult.status === "fulfilled" ? flacResult.value.songs : [];
       const neteaseList = neteaseSongs.status === "fulfilled" ? (neteaseSongs.value ?? []) : [];
       const biliList = biliSongs.status === "fulfilled" ? (biliSongs.value ?? []) : [];
-      // 去重（按名称+歌手）：FLAC > 网易云 > B站，同曲保留更高质量的源。
+      // 去重（按名称+歌手+来源档位）：
+      // FLAC 始终排在最前；同名同歌手时额外保留一条非 FLAC 原曲候选，
+      // 避免无损翻唱把网易云/B站的正版原曲顶掉。非 FLAC 内网易云 > B站。
+      const normalizeMatchText = (value: string) => value
+        .toLocaleLowerCase()
+        .replace(/\s+/g, "")
+        .replace(/[（(【\[].*?[）)】\]]/g, "")
+        .trim();
       const seenKeys = new Set<string>();
       const merged: Song[] = [];
       for (const song of [...flacSongs, ...neteaseList, ...biliList]) {
-        const key = `${song.name}|${song.artist}`.toLocaleLowerCase();
-        if (seenKeys.has(key)) continue;
-        seenKeys.add(key);
+        const identity = `${normalizeMatchText(song.name)}|${normalizeMatchText(song.artist)}`;
+        const bucket = song.source === "flac" ? `${identity}|flac` : `${identity}|original`;
+        if (seenKeys.has(bucket)) continue;
+        seenKeys.add(bucket);
         merged.push(song);
       }
       setRemoteResults(merged);
+      setSearchSourceStats({ flac: flacSongs.length, netease: neteaseList.length, bili: biliList.length });
       const flacPage = flacResult.status === "fulfilled" ? flacResult.value : null;
       setSearchPageInfo({
         page: flacPage?.page ?? page,
@@ -1867,6 +1879,7 @@ export default function App() {
       const normalized = text.toLocaleLowerCase();
       const localMatches = allLibrarySongs(playlists, history).filter((song) => [song.name, song.artist].some((value) => value.toLocaleLowerCase().includes(normalized)));
       setRemoteResults(localMatches);
+      setSearchSourceStats(null);
       setSearchPageInfo({ page: 1, pageSize: FLAC_SEARCH_PAGE_SIZE, total: localMatches.length, hasMore: false });
       setSearchOfflineResults(true);
       setProxyOnline(false);
@@ -2233,6 +2246,7 @@ export default function App() {
             searchHasMore={searchPageInfo.hasMore}
             offlineResults={searchOfflineResults}
             proxyOnline={proxyOnline}
+            sourceStats={searchSourceStats}
             playlists={playlists}
             selected={selected}
             favoriteKeys={favoriteKeys}
@@ -2689,6 +2703,7 @@ function SearchScreen(props: {
   searchHasMore: boolean;
   offlineResults: boolean;
   proxyOnline: boolean;
+  sourceStats: { flac: number; netease: number; bili: number } | null;
   playlists: Playlist[];
   selected: Set<string>;
   favoriteKeys: Set<string>;
@@ -2737,6 +2752,9 @@ function SearchScreen(props: {
         <button className="primary-button" type="submit">{props.searching ? "搜索中" : "搜索"}</button>
       </form>
       <p className="network-line">{props.offlineResults ? `离线本地结果 · ${props.results.length} 首` : props.proxyOnline ? "测试源接口已连接；默认优先 FLAC，失败自动回退 320k。" : "测试源暂不可用，请稍后再试。"}</p>
+      {!props.offlineResults && props.sourceStats && (
+        <p className="network-line">本次聚合：FLAC {props.sourceStats.flac} 首 · 网易云 {props.sourceStats.netease} 首 · B站 {props.sourceStats.bili} 首；同名曲会同时保留翻唱与原曲。</p>
+      )}
       <div className="chips">
         {recommendedKeywords.map((item) => <button key={item} onClick={() => { props.setQuery(item); props.onSearch(item); }}>{item}</button>)}
         {props.history.map((item) => <button key={`h-${item}`} onClick={() => { props.setQuery(item); props.onSearch(item); }}>{item}</button>)}

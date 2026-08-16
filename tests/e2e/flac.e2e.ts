@@ -3,6 +3,13 @@ import { fs, storageKey, projectRoot, toneFile, coverFile, fullSongFile, lrcFile
 
 test.beforeEach(async ({ page }) => {
   await reset(page);
+  // FLAC 专项用例只关注测试源本身：隔离网易云/B站实时结果，避免聚合搜索被在线源污染。
+  await page.route("**/api/netease/search**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ songs: [] }) });
+  });
+  await page.route("**/api/bili/search**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ songs: [] }) });
+  });
 });
 
 test("flac mocked search resolves url and lyrics", async ({ page }) => {

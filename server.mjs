@@ -72,6 +72,8 @@ const BILI_VIEW_URL = "https://api.bilibili.com/x/web-interface/view";
 const BILI_FAV_FOLDER_URL = "https://api.bilibili.com/x/v3/fav/folder/created/list-all";
 const BILI_FAV_INFO_URL = "https://api.bilibili.com/x/v3/fav/folder/info";
 const BILI_FAV_RESOURCE_URL = "https://api.bilibili.com/x/v3/fav/resource/list";
+const BILI_UPSTREAM_TIMEOUT_MS = 8_000;
+const BILI_PAGE_EXPAND_LIMIT = 12;
 const FLAC_BASE_URL = "https://flac.music.hi.cn";
 const FLAC_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 	const resolvedUrlCache = new Map();
@@ -1031,20 +1033,22 @@ function writeSharedState(state, baseRevision, writeId) {
 	  return parts.reduce((total, part) => total * 60 + part, 0) * 1000;
 	}
 
-	function mapBiliSearchItem(item, index = 0) {
-	  const bvid = cleanText(item?.bvid);
-	  const cid = Number(item?.cid ?? item?.pages?.[0]?.cid ?? 0);
-	  const durationMs = parseBiliDuration(item?.duration);
-	  if (!bvid || !cid || durationMs <= MIN_FULL_SONG_MS) return null;
+	function biliPartTitle(part) {
+	  const text = stripHtml(part).trim();
+	  const withoutIndex = text.replace(/^\d{1,4}\s*[.、\-—_]\s*/, "").trim();
+	  return withoutIndex || text;
+	}
+
+	function mapBiliSong({ bvid, cid, name, artist, pic, durationMs, verifiedPlayable = false }) {
 	  return {
 	    id: `bili_${bvid}_${cid}`,
-	    name: stripHtml(item?.title) || "Bilibili 视频",
-	    artist: stripHtml(item?.owner?.name ?? item?.author ?? item?.owner) || "Bilibili",
+	    name: stripHtml(name) || "Bilibili 视频",
+	    artist: stripHtml(artist) || "Bilibili",
 	    url: `/api/bili/stream/${encodeURIComponent(bvid)}?cid=${encodeURIComponent(String(cid))}&quality=high`,
-	    pic: cleanText(item?.pic).replace(/^\/\//, "https://"),
+	    pic: cleanText(pic).replace(/^\/\//, "https://"),
 	    source: "bili",
 	    remotePlayable: true,
-	    verifiedPlayable: true,
+	    verifiedPlayable,
 	    durationMs,
 	    bvid,
 	    cid,
@@ -1053,6 +1057,50 @@ function writeSharedState(state, baseRevision, writeId) {
 	    audioType: "dash",
 	    quality: "high"
 	  };
+	}
+
+	function mapBiliSearchItem(item, info = null) {
+	  const bvid = cleanText(item?.bvid ?? info?.bvid);
+	  const cid = Number(item?.cid ?? info?.cid ?? 0);
+	  const numericDuration = Number(item?.durationMs);
+	  const durationMs = Number.isFinite(numericDuration) && numericDuration > 0
+	    ? numericDuration
+	    : parseBiliDuration(item?.duration);
+	  const pic = cleanText(item?.pic ?? info?.pic);
+	  const artist = item?.owner?.name ?? item?.author ?? item?.owner ?? info?.owner;
+	  if (!bvid || !cid || durationMs <= MIN_FULL_SONG_MS) return null;
+	  const pages = Array.isArray(info?.pages)
+	    ? info.pages.filter((page) => Number(page?.cid ?? 0) > 0)
+	    : [];
+	  if (pages.length > 1) {
+	    const songs = [];
+	    for (const [pageIndex, page] of pages.entries()) {
+	      if (songs.length >= BILI_PAGE_EXPAND_LIMIT) break;
+	      const pageCid = Number(page.cid);
+	      const pageDurationMs = Number(page.durationMs ?? 0);
+	      if (!pageCid || !Number.isFinite(pageDurationMs) || pageDurationMs <= MIN_FULL_SONG_MS) continue;
+	      const pageName = biliPartTitle(page.part);
+	      songs.push(mapBiliSong({
+	        bvid,
+	        cid: pageCid,
+	        name: pageName || `${stripHtml(info?.title) || stripHtml(item?.title) || "Bilibili 视频"} · P${pageIndex + 1}`,
+	        artist,
+	        pic,
+	        durationMs: pageDurationMs,
+	        verifiedPlayable: false
+	      }));
+	    }
+	    if (songs.length) return songs;
+	  }
+	  return mapBiliSong({
+	    bvid,
+	    cid,
+	    name: info?.title ?? item?.title,
+	    artist,
+	    pic,
+	    durationMs,
+	    verifiedPlayable: false
+	  });
 	}
 
 	function selectBiliStream(streams, preferred = "high") {
@@ -1068,16 +1116,25 @@ function writeSharedState(state, baseRevision, writeId) {
 	async function getBiliVideoInfo(bvid) {
 	  const url = new URL(BILI_VIEW_URL);
 	  url.searchParams.set("bvid", bvid);
-	  const body = await fetchJsonUrl(url.toString(), apiHeaders(biliAccountCookie));
+	  const body = await withTimeout(
+	    fetchJsonUrl(url.toString(), apiHeaders(biliAccountCookie)),
+	    BILI_UPSTREAM_TIMEOUT_MS,
+	    "bili view"
+	  );
 	  if (body.code !== 0) throw new Error(body.message || "Bili video unavailable");
-	  const pages = body.data?.pages ?? [];
+	  const pages = (body.data?.pages ?? []).map((page) => ({
+	    cid: Number(page?.cid ?? 0),
+	    part: cleanText(page?.part),
+	    durationMs: Number(page?.duration ?? 0) * 1000
+	  })).filter((page) => page.cid > 0);
 	  return {
 	    bvid: cleanText(body.data?.bvid, bvid),
 	    cid: Number(body.data?.cid ?? pages[0]?.cid ?? 0),
 	    title: cleanText(body.data?.title, "Bilibili 视频"),
 	    pic: cleanText(body.data?.pic),
 	    owner: cleanText(body.data?.owner?.name, "Bilibili"),
-	    durationMs: Number(body.data?.duration ?? 0) * 1000
+	    durationMs: Number(body.data?.duration ?? 0) * 1000,
+	    pages
 	  };
 	}
 
@@ -1093,7 +1150,11 @@ function writeSharedState(state, baseRevision, writeId) {
 	    fourk: "0",
 	    platform: "pc"
 	  });
-	  const body = await fetchJsonUrl(url, apiHeaders(biliAccountCookie));
+	  const body = await withTimeout(
+	    fetchJsonUrl(url, apiHeaders(biliAccountCookie)),
+	    BILI_UPSTREAM_TIMEOUT_MS,
+	    "bili playurl"
+	  );
 	  if (body.code !== 0) throw new Error(body.message || "Bili audio unavailable");
 	  const stream = selectBiliStream(body.data?.dash?.audio ?? [], preferred);
 	  const streamUrl = cleanText(stream?.baseUrl || stream?.base_url || stream?.url);
@@ -2149,21 +2210,40 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 	      page_size: String(Math.max(limit, 30)),
 	      search_type: "video"
 	    });
-	    const body = await fetchJsonUrl(url, apiHeaders(biliAccountCookie));
+	    const body = await withTimeout(
+	      fetchJsonUrl(url, apiHeaders(biliAccountCookie)),
+	      BILI_UPSTREAM_TIMEOUT_MS,
+	      "bili search"
+	    );
 	    if (body.code !== 0) throw new Error(body.message || "Bili search failed");
 	    const raw = Array.isArray(body.data?.result)
 	      ? body.data.result
 	      : body.data?.result?.list ?? [];
-	    const enriched = await Promise.allSettled(raw.slice(0, Math.max(limit, 30)).map(async (item, index) => {
-	      if (item.cid) return mapBiliSearchItem(item, index);
+	    const enriched = await Promise.allSettled(raw.slice(0, Math.max(limit, 30)).map(async (item) => {
+	      if (item.cid) return mapBiliSearchItem(item, null);
 	      const info = await getBiliVideoInfo(cleanText(item.bvid));
-	      return mapBiliSearchItem({ ...item, cid: info.cid, duration: info.durationMs / 1000, pic: item.pic || info.pic, owner: { name: item.author || info.owner } }, index);
+	      return mapBiliSearchItem(item, info);
 	    }));
-	    const songs = enriched
-	      .map((result) => result.status === "fulfilled" ? result.value : null)
-	      .filter(Boolean)
-	      .slice(0, limit);
-	    res.json({ songs, filtered: Math.max(0, raw.length - songs.length) });
+	    const seenIds = new Set();
+	    const songs = [];
+	    let videosWithSongs = 0;
+	    for (const result of enriched) {
+	      if (result.status !== "fulfilled" || !result.value) continue;
+	      const mapped = Array.isArray(result.value) ? result.value : [result.value];
+	      if (!mapped.length) continue;
+	      videosWithSongs += 1;
+	      for (const song of mapped) {
+	        if (seenIds.has(song.id) || songs.length >= limit) continue;
+	        seenIds.add(song.id);
+	        songs.push(song);
+	      }
+	    }
+	    res.json({
+	      songs,
+	      filtered: Math.max(0, raw.length - videosWithSongs),
+	      sourceVideos: raw.length,
+	      expandedVideos: raw.filter((item) => !item.cid).length
+	    });
 	  } catch (error) {
 	    res.status(502).json({ error: "bili_search_failed", message: errorMessage(error) });
 	  }
