@@ -209,3 +209,51 @@ test("player queue can reorder songs and local lrc/cover persist", async ({ page
   await page.locator(".now-playing").click();
   await expect(page.locator(".player-sheet")).toContainText("custom lrc line");
 });
+
+test("WebAudio EQ is opt-in, applies presets on desktop, and transparently bypasses without stopping playback", async ({ page }) => {
+  type EqDebug = {
+    supported: boolean;
+    supportReason: string;
+    contextState: string | null;
+    wired: boolean;
+    preset: string;
+    intensity: number;
+    bypass: boolean;
+    bandGains: number[];
+    bandFrequencies: number[];
+  };
+  const eqInfo = () => page.evaluate(() => {
+    const hook = (window as unknown as { JianyinAudioEffects?: { getDebugInfo: () => EqDebug } }).JianyinAudioEffects;
+    return hook ? hook.getDebugInfo() : null;
+  });
+  const expectElementPlaying = () => expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.paused)).toBe(false);
+
+  await playFirstHomeSong(page);
+  await expectElementPlaying();
+  const player = await openPlayer(page);
+  await player.getByRole("button", { name: "更多选项" }).click();
+
+  // 默认关闭：未接线、旁路，元素直通。
+  await expect.poll(eqInfo).toMatchObject({ supported: true, wired: false, preset: "none", bypass: true });
+
+  // 打开 hiFi：在播放中同步接线并应用预设，播放不能停。
+  await player.getByLabel("均衡器预设").selectOption("hiFi");
+  await expect.poll(eqInfo).toMatchObject({ supported: true, contextState: "running", preset: "hiFi", intensity: 100, bypass: false, wired: true });
+  await expect.poll(async () => (await eqInfo())?.bandGains).toEqual([-1, 1, 2, 3, 3, 1, 0, -1, -1, 0]);
+  await expectElementPlaying();
+
+  // 切到 vocal：只改增益，不重新接线。
+  await player.getByLabel("均衡器预设").selectOption("vocal");
+  await expect.poll(eqInfo).toMatchObject({ preset: "vocal", wired: true, bypass: false });
+  await expect.poll(async () => (await eqInfo())?.bandGains).toEqual([-2, -1, 0, 1, 3, 4, 3, 1, 0, -1]);
+
+  // 强度 50% 线性缩放。
+  await player.getByLabel("均衡器强度").fill("50");
+  await expect.poll(async () => (await eqInfo())?.bandGains).toEqual([-1, -0.5, 0, 0.5, 1.5, 2, 1.5, 0.5, 0, -0.5]);
+
+  // 切回原声：图保留但参数归零（透明旁路），播放继续。
+  await player.getByLabel("均衡器预设").selectOption("none");
+  await expect.poll(eqInfo).toMatchObject({ preset: "none", wired: true, bypass: true });
+  await expect.poll(async () => (await eqInfo())?.bandGains).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+  await expectElementPlaying();
+});

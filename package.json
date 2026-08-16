@@ -1,6 +1,6 @@
 {
   "name": "jianyin-web-clean",
-  "version": "1.0.39",
+  "version": "1.0.40",
   "private": true,
   "type": "module",
   "scripts": {
@@ -12,7 +12,7 @@
     "android:open": "cap open android",
     "preview": "node server.mjs",
     "test": "npm run test:unit && npm run test:api && npm run test:e2e",
-    "test:unit": "node --test tests/android-build-script.test.mjs tests/shared-state-writer.test.mjs tests/shared-state.test.mjs tests/storage.test.mjs",
+    "test:unit": "node --test tests/android-build-script.test.mjs tests/audio-effects.test.mjs tests/shared-state-writer.test.mjs tests/shared-state.test.mjs tests/storage.test.mjs",
     "test:api": "node scripts/run-api-tests.mjs",
     "test:e2e": "playwright test --config playwright.config.ts && node scripts/generate-test-status.mjs",
     "test:perf": "npm run build && npm run test:perf:run",
