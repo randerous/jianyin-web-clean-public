@@ -30,6 +30,7 @@ import { ChangeEvent, FormEvent, MouseEvent, useCallback, useEffect, useMemo, us
 import Modal from "./components/Modal";
 import Player from "./components/Player";
 import SongRow from "./components/SongRow";
+import { ensureAudioEffects, setAudioEffects, setDebugHook } from "./lib/audio-effects";
 import { applySharedTombstoneClears, deriveSharedTombstoneClears } from "./lib/shared-state";
 import {
   checkProxy,
@@ -82,7 +83,7 @@ import {
   validateBackup
 } from "./lib/storage";
 import { FAVORITES_ID, RECENT_HISTORY_LIMIT, cover, recommendedKeywords } from "./data/seed";
-import type { AccountState, BackupPreview, LyricSource, PersistedState, PlayQuality, Playlist, ProgressStyle, SharedState, SharedTombstones, Song, Theme } from "./types";
+import type { AccountState, AudioEffectsPreset, BackupPreview, LyricSource, PersistedState, PlayQuality, Playlist, ProgressStyle, SharedState, SharedTombstones, Song, Theme } from "./types";
 
 type Tab = "home" | "search" | "mine";
 type PlayMode = "sequence" | "repeat" | "shuffle";
@@ -291,6 +292,8 @@ export default function App() {
   const [autoLyricsEnabled, setAutoLyricsEnabled] = useState(initial.autoLyricsEnabled);
   const [playbackSpeed, setPlaybackSpeed] = useState(initial.playbackSpeed);
   const [fadeEnabled, setFadeEnabled] = useState(initial.fadeEnabled);
+  const [eqPreset, setEqPreset] = useState<AudioEffectsPreset>(initial.eqPreset);
+  const [eqIntensity, setEqIntensity] = useState(initial.eqIntensity);
   const [autoCacheEnabled, setAutoCacheEnabled] = useState(initial.autoCacheEnabled);
   const [keepQueueOnExit, setKeepQueueOnExit] = useState(initial.keepQueueOnExit);
   const [autoPlayOnStart, setAutoPlayOnStart] = useState(initial.autoPlayOnStart);
@@ -410,6 +413,8 @@ export default function App() {
     autoLyricsEnabled,
     playbackSpeed,
     fadeEnabled,
+    eqPreset,
+    eqIntensity,
     autoCacheEnabled,
     keepQueueOnExit,
     autoPlayOnStart,
@@ -420,7 +425,7 @@ export default function App() {
     sharedTombstones: sharedTombstonesRef.current,
     sharedTombstoneClears: sharedTombstoneClearsRef.current,
     updatedAt: lastStateUpdatedAtRef.current || undefined
-  }), [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
+  }), [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, eqIntensity, eqPreset, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
   if (lastPersistedSnapshotRef.current !== persistedSnapshot) {
     lastPersistedSnapshotRef.current = persistedSnapshot;
     latestPersistedStateRef.current = persistedSnapshot;
@@ -779,6 +784,8 @@ export default function App() {
       autoLyricsEnabled,
       playbackSpeed,
       fadeEnabled,
+      eqPreset,
+      eqIntensity,
       autoCacheEnabled,
       keepQueueOnExit,
       autoPlayOnStart,
@@ -801,7 +808,41 @@ export default function App() {
     if (sharedDataChanged && sharedRemoteKnownRef.current && latestSharedStateRef.current) {
       sharedStateWriterRef.current!.enqueue(latestSharedStateRef.current);
     }
-  }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, stateHydrated, theme]);
+  }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, eqIntensity, eqPreset, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, stateHydrated, theme]);
+
+  // EQ 设置持久化与调试钩子。接线只发生在用户手势 handler / playSong 内，
+  // 绝不在 useEffect 里接线（AudioContext 会以 suspended 创建并冻结元素时钟）。
+  useEffect(() => {
+    setAudioEffects(eqPreset, eqIntensity);
+    setDebugHook(true);
+  }, [eqIntensity, eqPreset]);
+
+  const handleEqPresetChange = (preset: AudioEffectsPreset) => {
+    setEqPreset(preset);
+    setAudioEffects(preset, eqIntensity);
+    if (preset !== "none") {
+      const audio = audioRef.current;
+      if (audio) {
+        const result = ensureAudioEffects(audio);
+        if (!result.ok && (result.reason === "android" || result.reason === "unsupported")) {
+          setToast("当前设备不支持均衡器，已保持原声播放");
+        }
+      }
+    }
+  };
+  const handleEqIntensityChange = (intensity: number) => {
+    setEqIntensity(intensity);
+    setAudioEffects(eqPreset, intensity);
+    if (eqPreset !== "none") {
+      const audio = audioRef.current;
+      if (audio) {
+        const result = ensureAudioEffects(audio);
+        if (!result.ok && (result.reason === "android" || result.reason === "unsupported")) {
+          setToast("当前设备不支持均衡器，已保持原声播放");
+        }
+      }
+    }
+  };
 
   useEffect(() => {
     const retryLatestSharedState = (keepalive: boolean) => {
@@ -1160,6 +1201,8 @@ export default function App() {
     const requestId = playRequestRef.current + 1;
     playRequestRef.current = requestId;
     userStartedPlaybackRef.current = true;
+    // 在首个 await 前同步接线（用户点击播放属手势；非手势时模块会挂监听延迟接线）。
+    ensureAudioEffects(audioRef.current);
     const pauseGeneration = playbackPauseRef.current;
     let playbackAttempted = false;
     let sourceChanged = false;
@@ -1360,6 +1403,7 @@ export default function App() {
   const primePlaybackElement = useCallback((song: Song, startAt: number) => {
     const audio = audioRef.current;
     if (!audio || !song.url) return;
+    ensureAudioEffects(audio);
     if (song.localKey && !song.url.startsWith("blob:")) return;
     const targetSrc = new URL(song.url, window.location.href).href;
     if (audio.src !== targetSrc) audio.src = song.url;
@@ -1914,11 +1958,11 @@ export default function App() {
   }, [trackObjectUrl]);
 
   const backup = useCallback(async () => {
-    const state: PersistedState = { playlists, favorites, history, downloadHistory, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart, autoUpdateEnabled, androidStatusNotificationEnabled, updatedAt: Date.now() };
+    const state: PersistedState = { playlists, favorites, history, downloadHistory, queue, queueIndex, searchHistory, theme, playQuality, downloadQuality, progressStyle, lyricSource, autoLyricsEnabled, playbackSpeed, fadeEnabled, eqPreset, eqIntensity, autoCacheEnabled, keepQueueOnExit, autoPlayOnStart, autoUpdateEnabled, androidStatusNotificationEnabled, updatedAt: Date.now() };
     const payload = await makeBackup(state);
     downloadJson(`jianyin_web_clean_${new Date().toISOString().replace(/[:.]/g, "-")}.json`, payload);
     setToast(payload.localFiles?.length ? `已导出备份，包含 ${payload.localFiles.length} 个本地音频` : "已导出备份");
-  }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
+  }, [androidStatusNotificationEnabled, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, eqIntensity, eqPreset, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playQuality, playbackSpeed, playlists, progressStyle, queue, queueIndex, searchHistory, theme]);
 
   const applyHydratedRestore = useCallback((hydrated: { state: PersistedState; urls: string[] }) => {
     lastStateUpdatedAtRef.current = Math.max(lastStateUpdatedAtRef.current, hydrated.state.updatedAt ?? 0);
@@ -1937,6 +1981,8 @@ export default function App() {
     setAutoLyricsEnabled(hydrated.state.autoLyricsEnabled);
     setPlaybackSpeed(hydrated.state.playbackSpeed);
     setFadeEnabled(hydrated.state.fadeEnabled);
+    setEqPreset(hydrated.state.eqPreset);
+    setEqIntensity(hydrated.state.eqIntensity);
     setAutoCacheEnabled(hydrated.state.autoCacheEnabled);
     setKeepQueueOnExit(hydrated.state.keepQueueOnExit);
     setAutoPlayOnStart(hydrated.state.autoPlayOnStart);
@@ -1985,6 +2031,8 @@ export default function App() {
         autoLyricsEnabled,
         playbackSpeed,
         fadeEnabled,
+        eqPreset,
+        eqIntensity,
         autoCacheEnabled,
         keepQueueOnExit,
         autoPlayOnStart,
@@ -2002,7 +2050,7 @@ export default function App() {
     } finally {
       setRestoreBusy(false);
     }
-  }, [androidStatusNotificationEnabled, applyHydratedRestore, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playbackSpeed, playlists, progressStyle, queue, queueIndex, restoreBusy, restorePreview, searchHistory, theme]);
+  }, [androidStatusNotificationEnabled, applyHydratedRestore, autoCacheEnabled, autoLyricsEnabled, autoPlayOnStart, autoUpdateEnabled, downloadHistory, downloadQuality, eqIntensity, eqPreset, fadeEnabled, favorites, history, keepQueueOnExit, lyricSource, playbackSpeed, playlists, progressStyle, queue, queueIndex, restoreBusy, restorePreview, searchHistory, theme]);
 
   const resolveDownloadable = useCallback(async (song: Song) => {
     if (song.localKey) return resolvePlayable(song);
@@ -2398,6 +2446,10 @@ export default function App() {
           selectedKeys={selected}
           onPlaybackSpeed={setPlaybackSpeed}
           onProgressStyle={setProgressStyle}
+          eqPreset={eqPreset}
+          eqIntensity={eqIntensity}
+          onEqPreset={handleEqPresetChange}
+          onEqIntensity={handleEqIntensityChange}
           onSleepTimer={(seconds) => {
             setSleepTimerUntil(Date.now() + seconds * 1000);
             setToast(`已设置定时关闭：${seconds < 60 ? `${seconds} 秒` : `${Math.round(seconds / 60)} 分钟`}`);

@@ -1,8 +1,9 @@
-import { ArrowLeft, ChevronDown, ChevronUp, Disc3, Download, FileText, Gauge, Heart, Image, ListMusic, MoreVertical, Pause, Play, Repeat, Repeat1, Shuffle, SkipBack, SkipForward, Timer, Waves, X } from "lucide-react";
+import { ArrowLeft, ChevronDown, ChevronUp, Disc3, Download, FileText, Gauge, Heart, Image, ListMusic, MoreVertical, Pause, Play, Repeat, Repeat1, Shuffle, SkipBack, SkipForward, SlidersHorizontal, Timer, Waves, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
+import { EQ_PRESETS, getAudioEffectsSupport } from "../lib/audio-effects";
 import { activeLyricIndex, formatTime, parseLrc } from "../lib/lyrics";
 import { songKey } from "../lib/storage";
-import type { Playlist, ProgressStyle, Song } from "../types";
+import type { AudioEffectsPreset, Playlist, ProgressStyle, Song } from "../types";
 
 type PlayerMode = "sequence" | "repeat" | "shuffle";
 
@@ -21,6 +22,8 @@ type Props = {
   autoLyricsEnabled: boolean;
   lyricsLoading: boolean;
   sleepTimerUntil: number | null;
+  eqPreset: AudioEffectsPreset;
+  eqIntensity: number;
   playlists: Playlist[];
   selectedKeys: Set<string>;
   onClose: () => void;
@@ -34,6 +37,8 @@ type Props = {
   onDownload: () => void;
   onPlaybackSpeed: (value: number) => void;
   onProgressStyle: (value: ProgressStyle) => void;
+  onEqPreset: (value: AudioEffectsPreset) => void;
+  onEqIntensity: (value: number) => void;
   onSleepTimer: (seconds: number) => void;
   onFloatingLyric: () => void;
   onFetchLyrics: () => void;
@@ -76,6 +81,7 @@ export default function Player(props: Props) {
   const active = lyrics.length ? Math.max(0, activeLyricIndex(lyrics, props.position)) : -1;
   const selectedQueueSongs = props.queue.filter((item) => props.selectedKeys.has(songKey(item)));
   const sleepLabel = props.sleepTimerUntil ? `剩余 ${Math.max(0, Math.ceil((props.sleepTimerUntil - Date.now()) / 1000))} 秒` : "未设置";
+  const eqSupport = getAudioEffectsSupport();
   const pickLrc = () => {
     props.onPickLrc();
     setMenuOpen(false);
@@ -156,6 +162,13 @@ export default function Player(props: Props) {
                 {[0.5, 1, 1.5].map((speed) => <button key={speed} onClick={() => props.onPlaybackSpeed(speed)}>{speed.toFixed(1)}x</button>)}
               </div>
               <label><Waves /> 进度条样式 <select value={props.progressStyle} onChange={(event) => props.onProgressStyle(event.target.value as ProgressStyle)} aria-label="进度条样式"><option value="default">默认样式</option><option value="round">圆条样式</option><option value="audio">音频波形图样式</option></select></label>
+              <label><SlidersHorizontal /> 均衡器预设 <select value={props.eqPreset} onChange={(event) => props.onEqPreset(event.target.value as AudioEffectsPreset)} aria-label="均衡器预设" disabled={!eqSupport.supported}>{EQ_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}</select></label>
+              <label><SlidersHorizontal /> 均衡器强度 <input type="range" min={0} max={100} step={1} value={props.eqIntensity} onChange={(event) => props.onEqIntensity(Number(event.target.value))} aria-label="均衡器强度" disabled={!eqSupport.supported} /> <span className="muted">{props.eqIntensity}%</span></label>
+              <p className="muted">{eqSupport.supported
+                ? "Apple Music 同款经典预设（10 段 ISO 均衡）；原声（关闭）默认完全直通。"
+                : eqSupport.reason === "android"
+                  ? "Android WebView 不支持稳定均衡器，当前保持原声直通。"
+                  : "当前浏览器不支持 WebAudio 均衡器，当前保持原声直通。"}</p>
             </div>}
           </div>
         </header>
