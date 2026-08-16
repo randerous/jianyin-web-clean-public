@@ -497,6 +497,16 @@ public class MainActivity extends BridgeActivity {
         }
 
         @JavascriptInterface
+        public String getEqualizerStatus() {
+            return NativeAudioEffects.status();
+        }
+
+        @JavascriptInterface
+        public String setEqualizer(String preset, int intensity) {
+            return NativeAudioEffects.apply(preset, intensity);
+        }
+
+        @JavascriptInterface
         public void downloadAndInstallUpdate(String url, String fileName, String sha256, String versionTag) {
             activity.runOnUiThread(() -> activity.downloadAndInstallUpdate(url, fileName, sha256, versionTag));
         }

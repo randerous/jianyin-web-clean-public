@@ -29,11 +29,11 @@ test("launcher stores state and logs under LocalAppData", () => {
   assert.match(source, /JIANYIN_STATE_PATH/);
 });
 
-test("launcher ignores the 1.0.20 runtime cache after upgrading to 1.0.40", async (t) => {
+test("launcher ignores the 1.0.20 runtime cache after upgrading to 1.0.41", async (t) => {
   const versionMatch = source.match(/private const string RuntimeVersion = "([^"]+)";/);
   assert.ok(versionMatch, "launcher must declare an embedded runtime version");
   const runtimeVersion = versionMatch[1];
-  assert.equal(runtimeVersion, "1.0.40");
+  assert.equal(runtimeVersion, "1.0.41");
   assert.match(
     source,
     /var target = Path\.Combine\(DataDir, "runtime", RuntimeVersion, "app"\);\s+var marker = Path\.Combine\(target, "\.ready"\);\s+if \(File\.Exists\(marker\)\) return target;/,

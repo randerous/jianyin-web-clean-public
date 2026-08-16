@@ -164,11 +164,13 @@ export default function Player(props: Props) {
               <label><Waves /> 进度条样式 <select value={props.progressStyle} onChange={(event) => props.onProgressStyle(event.target.value as ProgressStyle)} aria-label="进度条样式"><option value="default">默认样式</option><option value="round">圆条样式</option><option value="audio">音频波形图样式</option></select></label>
               <label><SlidersHorizontal /> 均衡器预设 <select value={props.eqPreset} onChange={(event) => props.onEqPreset(event.target.value as AudioEffectsPreset)} aria-label="均衡器预设" disabled={!eqSupport.supported}>{EQ_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}</select></label>
               <label><SlidersHorizontal /> 均衡器强度 <input type="range" min={0} max={100} step={1} value={props.eqIntensity} onChange={(event) => props.onEqIntensity(Number(event.target.value))} aria-label="均衡器强度" disabled={!eqSupport.supported} /> <span className="muted">{props.eqIntensity}%</span></label>
-              <p className="muted">{eqSupport.supported
-                ? "Apple Music 同款经典预设（10 段 ISO 均衡）；原声（关闭）默认完全直通。"
-                : eqSupport.reason === "android"
-                  ? "Android WebView 不支持稳定均衡器，当前保持原声直通。"
-                  : "当前浏览器不支持 WebAudio 均衡器，当前保持原声直通。"}</p>
+              <p className="muted">{eqSupport.reason === "android-native"
+                ? "Android 原生均衡器（系统输出混音，频段数随设备）；原声（关闭）时效果停用。"
+                : eqSupport.supported
+                  ? "Apple Music 同款经典预设（10 段 ISO 均衡）；原声（关闭）默认完全直通。"
+                  : eqSupport.reason === "android"
+                    ? "Android WebView 未提供原生均衡器桥，当前保持原声直通。"
+                    : "当前浏览器不支持 WebAudio 均衡器，当前保持原声直通。"}</p>
             </div>}
           </div>
         </header>

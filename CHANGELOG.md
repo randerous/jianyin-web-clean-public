@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.41 - 2026-08-16
+
+- Android APK 均衡器改为**系统原生**实现：`android.media.audiofx.Equalizer`
+  作用于系统输出混音（session 0），WebView 播放的音频同样经过该效果器。
+- 不再在 Android WebView 上做 WebAudio 接管，彻底避免 1.0.32–1.0.38 的
+  时钟冻结/无声/爆音/卡死问题。
+- JS 桥新增 `setEqualizer(preset, intensity)` / `getEqualizerStatus()`；
+  Android 端预设与强度实时生效，关闭时效果停用。
+- 预设曲线按设备实际频段中心频率从 10 段 ISO 曲线插值映射，兼容
+  5 段/多段原生均衡器；强度 0–100% 线性缩放。
+- 桌面端继续使用 v1.0.40 的 WebAudio 均衡器，行为不变。
+- FLAC 音乐源逻辑零改动。
+- 版本号 1.0.41 / versionCode 42 / Windows Launcher RuntimeVersion 1.0.41。
+
 ## 1.0.40 - 2026-08-16
 
 - 重新加入均衡器（10 段 ISO，Apple Music 同款经典预设：流行/饱满/人声/古典/摇滚）。

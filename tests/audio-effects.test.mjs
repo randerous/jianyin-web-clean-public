@@ -84,3 +84,43 @@ test("node environment (no window): support is false and all graph functions are
   assert.deepEqual(info.bandGains, Array.from({ length: EQ_BAND_COUNT }, () => 0));
   assert.deepEqual(info.bandFrequencies, EQ_BAND_FREQUENCIES);
 });
+
+test("android native bridge is preferred over WebAudio when present", () => {
+  const calls = [];
+  const bridge = {
+    setEqualizer(preset, intensity) {
+      calls.push([preset, intensity]);
+      return JSON.stringify({ available: true, enabled: preset !== "none", preset, intensity });
+    },
+    getEqualizerStatus() {
+      return JSON.stringify({ available: true, enabled: false, preset: "none", intensity: 100 });
+    }
+  };
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "window", { value: { JianyinAndroid: bridge }, configurable: true });
+  try {
+    Object.defineProperty(globalThis, "navigator", {
+      value: { userAgent: "Mozilla/5.0 (Linux; Android 14; wv) AppleWebKit/537.36 Chrome/124.0 Mobile Safari/537.36" },
+      configurable: true
+    });
+  } catch {
+    // Node versions with a non-configurable navigator getter skip this optional assertion.
+  }
+  try {
+    const support = getAudioEffectsSupport();
+    assert.equal(support.reason, "android-native");
+    assert.equal(support.supported, true);
+    setAudioEffects("vocal", 60);
+    assert.deepEqual(calls.at(-1), ["vocal", 60]);
+    const result = ensureAudioEffects({});
+    assert.deepEqual(result, { ok: true, wired: true, reason: "native" });
+    setAudioEffects("none", 100);
+    assert.deepEqual(calls.at(-1), ["none", 100]);
+  } finally {
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else delete globalThis.window;
+    if (previousNavigator) Object.defineProperty(globalThis, "navigator", previousNavigator);
+    else delete globalThis.navigator;
+  }
+});

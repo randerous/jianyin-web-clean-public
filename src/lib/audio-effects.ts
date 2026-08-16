@@ -42,7 +42,7 @@ export const EQ_PRESETS: EqPresetDef[] = [
 
 export type AudioEffectsSupport = {
   supported: boolean;
-  reason: "ok" | "android" | "unsupported";
+  reason: "ok" | "android" | "unsupported" | "android-native";
 };
 
 export function normalizeEqPreset(value: unknown): AudioEffectsPreset {
@@ -102,11 +102,37 @@ function isBrowser() {
   return typeof window !== "undefined";
 }
 
+type AndroidEqBridge = {
+  setEqualizer?: (preset: string, intensity: number) => string;
+  getEqualizerStatus?: () => string;
+};
+
+function androidEqBridge(): AndroidEqBridge | null {
+  if (!isBrowser()) return null;
+  const bridge = (window as unknown as { JianyinAndroid?: AndroidEqBridge }).JianyinAndroid;
+  return bridge && typeof bridge.setEqualizer === "function" ? bridge : null;
+}
+
 export function getAudioEffectsSupport(): AudioEffectsSupport {
   if (!isBrowser()) return { supported: false, reason: "unsupported" };
   try {
     const ua = navigator.userAgent.toLowerCase();
-    if (ua.includes("android")) return { supported: false, reason: "android" };
+    if (ua.includes("android")) {
+      const nativeBridge = androidEqBridge();
+      if (!nativeBridge) return { supported: false, reason: "android" };
+      try {
+        const status = nativeBridge.getEqualizerStatus?.();
+        if (typeof status === "string") {
+          const parsed = JSON.parse(status) as { available?: boolean };
+          return parsed.available === false
+            ? { supported: false, reason: "android" }
+            : { supported: true, reason: "android-native" };
+        }
+      } catch {
+        // Native bridge unavailable or returned malformed status.
+      }
+      return { supported: true, reason: "android-native" };
+    }
   } catch {
     // navigator unavailable in exotic contexts; fall through to WebAudio check
   }
@@ -227,7 +253,7 @@ function createGraph(audio: HTMLAudioElement): { ok: boolean; reason: string } {
 export type EnsureAudioEffectsResult = {
   ok: boolean;
   wired: boolean;
-  reason: "none" | "android" | "unsupported" | "wired" | "already-wired" | "pending-gesture" | "failed" | "no-audio";
+  reason: "none" | "android" | "unsupported" | "native" | "wired" | "already-wired" | "pending-gesture" | "failed" | "no-audio";
 };
 
 /**
@@ -235,10 +261,16 @@ export type EnsureAudioEffectsResult = {
  * - 预设为 none 且从未接线 → 不进入 WebAudio（元素直通）。
  * - 已接线同一元素 → 只刷参数（含透明旁路）。
  * - 首次接线尽量发生在用户手势内；否则挂一次性手势监听延迟接线。
+ * - Android WebView 存在原生桥时使用 android.media.audiofx.Equalizer
+ *   （系统输出混音），不接管 HTMLAudioElement。
  */
 export function ensureAudioEffects(audio: HTMLAudioElement | null): EnsureAudioEffectsResult {
   if (!isBrowser() || !audio) return { ok: false, wired: false, reason: "no-audio" };
   const support = getAudioEffectsSupport();
+  if (support.reason === "android-native") {
+    const applied = applyNative(recordedPreset, recordedIntensity);
+    return { ok: applied, wired: recordedPreset !== "none", reason: applied ? "native" : "unsupported" };
+  }
   if (!support.supported) {
     return { ok: false, wired: false, reason: support.reason === "android" ? "android" : "unsupported" };
   }
@@ -293,10 +325,25 @@ function wireGraph(audio: HTMLAudioElement): EnsureAudioEffectsResult {
   return { ok: true, wired: true, reason: "wired" };
 }
 
+function applyNative(preset: AudioEffectsPreset, intensity: number): boolean {
+  const bridge = androidEqBridge();
+  if (!bridge?.setEqualizer) return false;
+  try {
+    bridge.setEqualizer(preset, Math.round(intensity));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** 记录最新设置并应用（图已存在时立即生效）。 */
 export function setAudioEffects(preset: AudioEffectsPreset, intensity: number): void {
   recordedPreset = normalizeEqPreset(preset);
   recordedIntensity = clampIntensity(intensity);
+  if (getAudioEffectsSupport().reason === "android-native") {
+    applyNative(recordedPreset, recordedIntensity);
+    return;
+  }
   pushCurrentParameters();
 }
 
@@ -312,7 +359,7 @@ export function getAudioEffectsDebugInfo(): AudioEffectsDebugInfo {
     supported: support.supported,
     supportReason: support.reason,
     contextState: graph ? graph.ctx.state : null,
-    wired: Boolean(graph),
+    wired: support.reason === "android-native" ? recordedPreset !== "none" : Boolean(graph),
     preset: recordedPreset,
     intensity: recordedIntensity,
     bypass: recordedPreset === "none",
