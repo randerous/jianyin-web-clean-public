@@ -242,7 +242,7 @@ test("update endpoint exposes only the fixed GitHub release metadata", async () 
     releaseCalls += 1;
     if (url === "https://api.github.com/repos/randerous/jianyin-web-clean-public/releases?per_page=100") {
       return new Response(JSON.stringify([
-        { tag_name: "v1.0.39", published_at: "2026-07-21T00:00:00Z", body: "Latest release" },
+        { tag_name: "v1.0.40", published_at: "2026-07-21T00:00:00Z", body: "Latest release" },
         { tag_name: "v1.0.32", published_at: "2026-07-20T00:00:00Z", body: "Current release" },
         { tag_name: "v1.0.29", published_at: "2026-07-18T00:00:00Z", body: "Older release" },
         { tag_name: "v1.0.28", published_at: "2026-07-17T00:00:00Z", body: "Older release" },
@@ -252,20 +252,20 @@ test("update endpoint exposes only the fixed GitHub release metadata", async () 
     }
     assert.equal(url, "https://api.github.com/repos/randerous/jianyin-web-clean-public/releases/latest");
     return new Response(JSON.stringify({
-      tag_name: "v1.0.39",
-      html_url: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.39",
+      tag_name: "v1.0.40",
+      html_url: "https://github.com/randerous/jianyin-web-clean-public/releases/tag/v1.0.40",
       published_at: "2026-07-21T00:00:00Z",
       body: "Latest release",
       assets: [
         {
           name: "app-release.apk",
-          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.39/app-release.apk",
+          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.40/app-release.apk",
           digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
           size: 123
         },
         {
           name: "jianyin-windows-launcher.exe",
-          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.39/jianyin-windows-launcher.exe",
+          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.40/jianyin-windows-launcher.exe",
           digest: "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
           size: 456
         },
@@ -282,16 +282,16 @@ test("update endpoint exposes only the fixed GitHub release metadata", async () 
   const first = await getJson(`${baseUrl}/api/update/latest`);
   const second = await getJson(`${baseUrl}/api/update/latest`);
   assert.equal(first.response.status, 200);
-  assert.equal(first.body.currentVersion, "1.0.38");
-  assert.equal(first.body.latestVersion, "1.0.39");
+  assert.equal(first.body.currentVersion, "1.0.39");
+  assert.equal(first.body.latestVersion, "1.0.40");
   assert.equal(first.body.available, true);
-  assert.deepEqual(first.body.releaseNotes.map((note) => note.tag), ["v1.0.39"]);
+  assert.deepEqual(first.body.releaseNotes.map((note) => note.tag), ["v1.0.40"]);
   assert.deepEqual(first.body.releaseNotes.map((note) => note.notes), ["Latest release"]);
   assert.equal(first.body.canApply, false);
   assert.equal(first.body.assets.apk.sha256, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
   assert.equal(first.body.assets.apk.size, 123);
   assert.equal(first.body.assets.windowsLauncher.sha256, "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789");
-  assert.equal(second.body.tag, "v1.0.39");
+  assert.equal(second.body.tag, "v1.0.40");
   assert.equal(releaseCalls, 2);
 });
 
@@ -313,12 +313,12 @@ test("packaged Windows server advertises update apply without a git checkout", a
   const fetchImpl = async (url) => {
     if (url.endsWith("/releases/latest")) {
       return new Response(JSON.stringify({
-        tag_name: "v1.0.39",
+        tag_name: "v1.0.40",
         published_at: "2026-07-21T00:00:00Z",
         body: "Windows launcher update",
         assets: [{
           name: "jianyin-windows-launcher.exe",
-          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.39/jianyin-windows-launcher.exe",
+          browser_download_url: "https://github.com/randerous/jianyin-web-clean-public/releases/download/v1.0.40/jianyin-windows-launcher.exe",
           digest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
           size: 123
         }]
@@ -2242,6 +2242,62 @@ test("bili search signs WBI request and does not expose invalid json on upstream
   assert.equal(htmlFailure.body.error, "bili_search_failed");
   assert.match(htmlFailure.body.message, /Bili 接口不可用|风控/);
   assert.doesNotMatch(htmlFailure.body.message, /invalid json/i);
+});
+
+test("bili search expands multi-part compilations into individual songs and keeps search results unverified until playback resolution", async () => {
+  const json = (body) => new Response(JSON.stringify(body), { headers: { "content-type": "application/json" } });
+  const navBody = { code: 0, data: { isLogin: false, wbi_img: { img_url: "https://i0.hdslb.com/bfs/wbi/abcdefghijklmnopqrstuvwxyz1234567890abcdef.png", sub_url: "https://i0.hdslb.com/bfs/wbi/1234567890abcdefghijklmnopqrstuvwxyzabcdef.png" } } };
+  const fetchImpl = async (url) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === "/x/web-interface/nav") return json(navBody);
+    if (parsed.pathname === "/x/web-interface/wbi/search/type") {
+      return json({
+        code: 0,
+        data: {
+          result: [
+            { bvid: "BVmulti", title: "<em>周杰伦</em>50首精选合集", author: "UP", pic: "//pic.test/multi.jpg", duration: "222:28" },
+            { bvid: "BVshort", title: "太短", author: "UP", pic: "", duration: "00:30" }
+          ]
+        }
+      });
+    }
+    if (parsed.pathname === "/x/web-interface/view") {
+      const bvid = parsed.searchParams.get("bvid");
+      if (bvid === "BVmulti") {
+        return json({
+          code: 0,
+          data: {
+            bvid: "BVmulti",
+            cid: 11,
+            title: "周杰伦50首精选合集",
+            pic: "//pic.test/multi.jpg",
+            owner: { name: "UP" },
+            duration: 13348,
+            pages: [
+              { cid: 11, part: "001.晴天", duration: 270 },
+              { cid: 12, part: "002.夜曲", duration: 227 },
+              { cid: 13, part: "", duration: 180 }
+            ]
+          }
+        });
+      }
+      return json({ code: 0, data: { bvid: "BVshort", cid: 21, title: "太短", pic: "", owner: { name: "UP" }, duration: 30, pages: [{ cid: 21, part: "太短", duration: 30 }] } });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
+  const baseUrl = await startTestServer({ neteaseClient: {}, fetchImpl });
+
+  const search = await getJson(`${baseUrl}/api/bili/search?keyword=multi&limit=30`);
+
+  assert.equal(search.response.status, 200);
+  assert.deepEqual(search.body.songs.map((song) => [song.id, song.name, song.cid, song.verifiedPlayable]), [
+    ["bili_BVmulti_11", "晴天", 11, false],
+    ["bili_BVmulti_12", "夜曲", 12, false],
+    ["bili_BVmulti_13", "周杰伦50首精选合集 · P3", 13, false]
+  ]);
+  assert.equal(search.body.filtered, 1);
+  assert.equal(search.body.sourceVideos, 2);
+  assert.equal(search.body.expandedVideos, 2);
 });
 
 test("bili account rejects invalid cookies, sync failures, and logout clears auth", async () => {

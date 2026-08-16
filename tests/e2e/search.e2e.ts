@@ -136,6 +136,11 @@ test("failed online search keeps matching local-library results visible", async 
   await page.route("**/api/flac/search**", async (route) => {
     await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ message: "测试源暂不可用" }) });
   });
+  for (const pattern of ["**/api/netease/search**", "**/api/bili/search**"]) {
+    await page.route(pattern, async (route) => {
+      await route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ message: "在线源暂不可用" }) });
+    });
+  }
 
   await page.getByRole("navigation").getByRole("button", { name: "搜索" }).click();
   await page.getByPlaceholder("搜索音乐/歌手").fill("offline library");
@@ -209,4 +214,57 @@ test("new search clears stale loading immediately", async ({ page }) => {
   await page.keyboard.press("Enter");
   await expect(page.getByRole("button", { name: "Fresh Loading Result Test Artist · 测试源" })).toBeVisible();
   await expect(page.getByText("Stale Loading Result")).toHaveCount(0);
+});
+
+test("cross-source search keeps the FLAC cover and the Netease original for the same name and artist", async ({ page }) => {
+  const flacSong = {
+    id: "flac_cover_same",
+    name: "Same Song",
+    artist: "Same Artist",
+    pic: "/assets/icon.png",
+    cover: "/assets/icon.png",
+    url: "/api/flac/stream/cover?format=mp3&bitrate=320&time=t&sign=s",
+    source: "flac",
+    remotePlayable: true,
+    durationMs: 65000,
+    verifiedPlayable: true,
+    br: 320000,
+    level: "320k",
+    type: "mp3",
+    audioType: "mp3",
+    quality: "320k"
+  };
+  const neteaseSong = {
+    id: "netease_original_same",
+    name: "Same Song",
+    artist: "Same Artist",
+    pic: "/assets/icon.png",
+    cover: "/assets/icon.png",
+    url: "/api/netease/stream/original",
+    source: "netease",
+    remotePlayable: true,
+    durationMs: 65000,
+    verifiedPlayable: true,
+    br: 320000,
+    level: "320k",
+    type: "mp3",
+    audioType: "mp3",
+    quality: "320k"
+  };
+  await page.route("**/api/flac/search**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ songs: [flacSong], page: 1, limit: 30, total: 1, hasMore: false }) });
+  });
+  await page.route("**/api/netease/search**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ songs: [neteaseSong] }) });
+  });
+  await page.route("**/api/bili/search**", async (route) => {
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ songs: [] }) });
+  });
+
+  await page.getByRole("navigation").getByRole("button", { name: "搜索" }).click();
+  await page.getByPlaceholder("搜索音乐/歌手").fill("same song");
+  await page.keyboard.press("Enter");
+
+  await expect(page.getByRole("button", { name: "Same Song Same Artist · 测试源" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Same Song Same Artist · 网易云" })).toBeVisible();
 });

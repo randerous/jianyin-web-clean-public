@@ -87,7 +87,7 @@ export function normalizeRemoteSong(value: RemoteSong, index = 0): Song | null {
     source,
     lrc: typeof value.lrc === "string" ? value.lrc : undefined,
     remotePlayable: true,
-    verifiedPlayable: Boolean(value.verifiedPlayable) || Boolean(value.url),
+    verifiedPlayable: value.verifiedPlayable === false ? false : Boolean(value.verifiedPlayable) || Boolean(value.url),
     durationMs: typeof value.durationMs === "number" ? value.durationMs : undefined,
     br: typeof value.br === "number" ? value.br : null,
     level: typeof value.level === "string" ? value.level : null,
