@@ -24,6 +24,8 @@ jobs:
     env:
       # CI 直连 google()/mavenCentral()，跳过本地国内镜像注入。
       JIANYIN_SKIP_ALIYUN_MIRROR: "1"
+      # 性能阈值按本地硬件标定，共享 runner CPU 慢，CI 上放宽 3 倍只防数量级回归。
+      JIANYIN_PERF_THRESHOLD_FACTOR: "3"
     steps:
       - uses: actions/checkout@v4
         with:

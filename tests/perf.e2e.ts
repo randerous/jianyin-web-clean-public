@@ -62,10 +62,13 @@ function mark(label: string): () => number {
 }
 
 function expectPerformance(name: string, values: number[], thresholdMs: number) {
+  // 阈值按本地硬件标定；共享 CI runner CPU 慢，通过系数放宽，只防数量级回归。
+  const factor = Number(process.env.JIANYIN_PERF_THRESHOLD_FACTOR || "1") || 1;
+  const effectiveThreshold = Math.round(thresholdMs * Math.max(1, factor));
   expect(values, `${name} requires at least ${sampleCount} measured samples`).toHaveLength(sampleCount);
   const percentile = p95(values);
   console.log(`[${name}] samples=${values.join(",")}ms, P50=${p50(values)}ms, P95=${percentile}ms`);
-  expect(percentile, `${name} P95 exceeded ${thresholdMs}ms`).toBeLessThan(thresholdMs);
+  expect(percentile, `${name} P95 exceeded ${effectiveThreshold}ms`).toBeLessThan(effectiveThreshold);
 }
 
 /** 从首页播放一首本地歌曲 */
