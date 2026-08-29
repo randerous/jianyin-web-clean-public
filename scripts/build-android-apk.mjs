@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statfsSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -222,13 +222,19 @@ function runStreaming(label, command, args, options = {}) {
 
 function runForOutput(command, args, env) {
   const useCmd = process.platform === "win32" && /\.(cmd|bat)$/i.test(command);
-  return execFileSync(command, args, {
+  // apksigner/keytool 在部分环境下把结果写到 stderr，合并两个流避免解析到 0 个签名。
+  const result = spawnSync(command, args, {
     cwd: root,
     env,
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
     shell: useCmd
   });
+  if (result.error) throw result.error;
+  if (result.status !== 0) {
+    throw new Error(`Command failed: ${command} ${args.join(" ")} (exit ${result.status})\n${result.stdout ?? ""}${result.stderr ?? ""}`);
+  }
+  return `${result.stdout ?? ""}${result.stderr ?? ""}`;
 }
 
 function javaTool(env, name) {
