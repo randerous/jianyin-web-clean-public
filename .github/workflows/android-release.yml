@@ -86,6 +86,17 @@ jobs:
           test -f "$APK"
           sha256sum "$APK"
 
+      - name: Debug apksigner output on failure
+        if: failure()
+        run: |
+          echo "== build-tools apksigner binaries =="
+          ls /usr/local/lib/android/sdk/build-tools/*/apksigner 2>/dev/null || true
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          ls -la "$APK" || true
+          APKSIGNER=$(ls /usr/local/lib/android/sdk/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
+          echo "== $APKSIGNER verify output =="
+          "$APKSIGNER" verify --verbose --print-certs "$APK" 2>&1 | head -40 || true
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
