@@ -89,6 +89,17 @@ test("signer verification accepts only the established release certificate", () 
 
   assert.equal(extractKeytoolCertificateSha256(keytoolOutput), expectedSigner);
   assert.deepEqual(extractApkSignerSha256s(apksignerOutput), [expectedSigner]);
+  // apksigner 37+（build-tools 37.0.0）按 scheme 分块打印签名证书
+  const modernApksignerOutput = [
+    "Verifies",
+    "Verified using v1 scheme (JAR signing): false",
+    "Verified using v2 scheme (APK Signature Scheme v2): true",
+    "Number of signers: 1",
+    `V2 Signer: certificate DN: C=US, O=Android, CN=Android Debug`,
+    `V2 Signer: certificate SHA-256 digest: ${expectedSigner}`,
+    "V2 Signer: key algorithm: RSA"
+  ].join("\n");
+  assert.deepEqual(extractApkSignerSha256s(modernApksignerOutput), [expectedSigner]);
   assert.equal(assertExpectedReleaseSigner([expectedSigner], "Release artifact"), expectedSigner);
   assert.throws(
     () => assertExpectedReleaseSigner(["f".repeat(64)], "Release artifact"),

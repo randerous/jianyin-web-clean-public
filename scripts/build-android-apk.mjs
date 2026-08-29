@@ -271,8 +271,14 @@ export function extractKeytoolCertificateSha256(output) {
 }
 
 export function extractApkSignerSha256s(output) {
-  return [...String(output ?? "").matchAll(/Signer #\d+ certificate SHA-256 digest:\s*([0-9a-f:]+)/gi)]
+  const text = String(output ?? "");
+  const legacy = [...text.matchAll(/Signer #\d+ certificate SHA-256 digest:\s*([0-9a-f:]+)/gi)]
     .map((match) => normalizeSha256(match[1]));
+  if (legacy.length) return [...new Set(legacy)];
+  // apksigner 37+（build-tools 37.0.0）改为按签名 scheme 分块打印："V2 Signer: certificate SHA-256 digest:"
+  const modern = [...text.matchAll(/V\d+(?:\.\d+)? Signer: certificate SHA-256 digest:\s*([0-9a-f:]+)/gi)]
+    .map((match) => normalizeSha256(match[1]));
+  return [...new Set(modern)];
 }
 
 export function assertExpectedReleaseSigner(signers, label) {
