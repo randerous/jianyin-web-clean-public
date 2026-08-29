@@ -17,7 +17,7 @@ export default defineConfig({
   ],
   fullyParallel: false,
   workers: 1,
-  # CI 共享 runner 时序抖动会偶发触发 e2e flake；本地保持 0 次重试，不掩盖问题。
+  // CI 共享 runner 时序抖动会偶发触发 e2e flake；本地保持 0 次重试，不掩盖问题。
   retries: process.env.CI ? 2 : 0,
   use: {
     baseURL: "http://127.0.0.1:5189",
