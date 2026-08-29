@@ -1098,7 +1098,8 @@ test.describe("PERF-UI UI 渲染与交互响应性能", () => {
     metrics.progress_1000_updates_ms = values;
     console.log(`[PERF-UI-05] 1000 首详情下 20 次进度更新: ${values.join(",")}ms, longTasks=${phaseLongTasks.length}`);
     expectPerformance("PERF-UI-05", values, 600);
-    expect(phaseLongTasks.filter((entry) => entry.duration > 50)).toHaveLength(0);
+    const longTaskLimitMs = 50 * Math.max(1, Number(process.env.JIANYIN_PERF_THRESHOLD_FACTOR || "1") || 1);
+    expect(phaseLongTasks.filter((entry) => entry.duration > longTaskLimitMs)).toHaveLength(0);
   });
 
   test("PERF-UI-03 歌单内搜索", async ({ page }) => {
