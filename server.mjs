@@ -38,6 +38,55 @@ const sharedStatePath = process.env.JIANYIN_STATE_PATH
   : resolve(__dirname, ".jianyin-shared-state.json");
 const sharedStateLockTails = new Map();
 
+// 统一 TTL 缓存：收拢原先 8 个手写 Map（原先只懒过期、无容量上限，长驻进程内存缓慢增长）。
+// 条目即调用方传入的对象（原地附加 expiresAt），因此既有 get 读取代码（cached.data / cached.expiresAt）零改动。
+// - set 时惰性清扫过期条目并按插入序做 LRU 驱逐，max 限制内存上限
+// - get 触碰最近使用的条目（移到 Map 尾部），让驱逐优先淘汰冷数据
+export function createTtlCache(ttlMs, { max = 1000 } = {}) {
+  const store = new Map();
+  const cache = {
+    get(key) {
+      const entry = store.get(key);
+      if (!entry) return undefined;
+      if (entry.expiresAt <= Date.now()) {
+        store.delete(key);
+        return undefined;
+      }
+      store.delete(key);
+      store.set(key, entry);
+      return entry;
+    },
+    set(key, value) {
+      if (store.has(key)) store.delete(key);
+      value.expiresAt = Date.now() + ttlMs;
+      store.set(key, value);
+      cache.sweep();
+    },
+    has(key) {
+      return cache.get(key) !== undefined;
+    },
+    delete(key) {
+      store.delete(key);
+    },
+    clear() {
+      store.clear();
+    },
+    sweep() {
+      const now = Date.now();
+      for (const [key, entry] of store) {
+        if (entry.expiresAt <= now) store.delete(key);
+      }
+      while (store.size > max) {
+        store.delete(store.keys().next().value);
+      }
+    },
+    get size() {
+      return store.size;
+    }
+  };
+  return cache;
+}
+
 export async function createApp({ neteaseClient = defaultNetease, fetchImpl = globalThis.fetch, dev = false, hmrPort = port + 10000, statePath = sharedStatePath } = {}) {
 const app = express();
 const netease = neteaseClient;
@@ -76,18 +125,20 @@ const BILI_UPSTREAM_TIMEOUT_MS = 8_000;
 const BILI_PAGE_EXPAND_LIMIT = 12;
 const FLAC_BASE_URL = "https://flac.music.hi.cn";
 const FLAC_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
-	const resolvedUrlCache = new Map();
-	const searchCache = new Map();
-	const flacSearchCache = new Map();
+
+
+	const resolvedUrlCache = createTtlCache(RESOLVED_URL_TTL_MS);
+	const searchCache = createTtlCache(SEARCH_CACHE_TTL_MS);
+	const flacSearchCache = createTtlCache(SEARCH_CACHE_TTL_MS);
 	const flacSearchInFlight = new Map();
-	const playlistDetailCache = new Map();
+	const playlistDetailCache = createTtlCache(PLAYLIST_DETAIL_CACHE_TTL_MS);
 	const playlistDetailInFlight = new Map();
-	const hotSongsCache = new Map();
+	const hotSongsCache = createTtlCache(HOT_SONGS_CACHE_TTL_MS);
 	const hotSongsInFlight = new Map();
-	const radarSongsCache = new Map();
+	const radarSongsCache = createTtlCache(HOT_SONGS_CACHE_TTL_MS);
 	const radarSongsInFlight = new Map();
-	const biliStreamCache = new Map();
-	const flacStreamCache = new Map();
+	const biliStreamCache = createTtlCache(RESOLVED_URL_TTL_MS);
+	const flacStreamCache = createTtlCache(RESOLVED_URL_TTL_MS);
 	let latestUpdateCache = null;
 	let latestUpdateInFlight = null;
 	let flacCookie = "";
@@ -850,7 +901,7 @@ function writeSharedState(state, baseRevision, writeId) {
 	  const pending = flacSearchInFlight.get(cacheKey);
 	  if (pending) return { ...await pending, cached: true };
 	  const request = searchFlacSongsUncached(keyword, page, limit).then((data) => {
-	    flacSearchCache.set(cacheKey, { data, expiresAt: Date.now() + SEARCH_CACHE_TTL_MS });
+	    flacSearchCache.set(cacheKey, { data });
 	    return data;
 	  }).finally(() => {
 	    flacSearchInFlight.delete(cacheKey);
@@ -950,7 +1001,7 @@ function writeSharedState(state, baseRevision, writeId) {
 	    format: resolvedFormat,
 	    bitrate: resolvedBitrate
 	  };
-	  flacStreamCache.set(cacheKey, { data: resolved, expiresAt: Date.now() + RESOLVED_URL_TTL_MS });
+	  flacStreamCache.set(cacheKey, { data: resolved });
 	  return resolved;
 	}
 
@@ -1173,7 +1224,7 @@ function writeSharedState(state, baseRevision, writeId) {
 	    codec: cleanText(stream?.codecs, "dash"),
 	    qualityId: Number(stream?.id ?? 0) || null
 	  };
-	  biliStreamCache.set(cacheKey, { data, expiresAt: Date.now() + RESOLVED_URL_TTL_MS });
+	  biliStreamCache.set(cacheKey, { data });
 	  return data;
 	}
 
@@ -1285,7 +1336,7 @@ function playableRejectReason(data) {
 	    const data = result.body?.data?.[0] ?? {};
 	    if (data && Object.keys(data).length) lastData = data;
 	    if (isFullPlayableUrlData(data)) {
-	      resolvedUrlCache.set(cacheKey, { data, expiresAt: Date.now() + RESOLVED_URL_TTL_MS });
+	      resolvedUrlCache.set(cacheKey, { data });
 	      return data;
 	    }
 	  }
@@ -1337,7 +1388,7 @@ function playableRejectReason(data) {
 	      if (!id || !unresolved.has(id)) continue;
 	      lastSeen.set(id, data);
 	      if (isFullPlayableUrlData(data)) {
-	        resolvedUrlCache.set(`${authKey}:${quality}:${id}`, { data, expiresAt: Date.now() + RESOLVED_URL_TTL_MS });
+	        resolvedUrlCache.set(`${authKey}:${quality}:${id}`, { data });
 	        resolved.set(id, data);
 	        unresolved.delete(id);
 	      }
@@ -1495,7 +1546,7 @@ function playableRejectReason(data) {
 	      const verified = await mapVerifiedSongs(tracks, safeLimit, preferredQuality, cookie);
 	      songs = verified.length ? verified : tracks.slice(0, safeLimit).map(mapSong);
 	    }
-	    hotSongsCache.set(cacheKey, { songs, expiresAt: Date.now() + HOT_SONGS_CACHE_TTL_MS });
+	    hotSongsCache.set(cacheKey, { songs });
 	    return songs;
 	  })().finally(() => {
 	    hotSongsInFlight.delete(cacheKey);
@@ -1540,7 +1591,7 @@ function playableRejectReason(data) {
 	        songs = songs.slice(0, safeLimit).map(mapSong);
 	      }
 	    }
-	    radarSongsCache.set(cacheKey, { songs, expiresAt: Date.now() + HOT_SONGS_CACHE_TTL_MS });
+	    radarSongsCache.set(cacheKey, { songs });
 	    return songs;
 	  })().finally(() => {
 	    radarSongsInFlight.delete(cacheKey);
@@ -1629,7 +1680,7 @@ function playableRejectReason(data) {
 	      // Keep the endpoint available; the detail response may still contain usable tracks.
 	    }
 	  }
-	    playlistDetailCache.set(cacheKey, { playlist, expiresAt: Date.now() + PLAYLIST_DETAIL_CACHE_TTL_MS });
+	    playlistDetailCache.set(cacheKey, { playlist });
 	  return playlist;
 	  })().finally(() => {
 	    playlistDetailInFlight.delete(cacheKey);
@@ -1968,7 +2019,7 @@ app.get("/api/netease/search", async (req, res) => {
 	    const candidates = songs.slice(0, candidateLimit);
 	    const verified = await mapVerifiedSongs(candidates, limit, quality, neteaseAccountCookie);
 	    const data = { songs: verified, filtered: Math.max(0, candidates.length - verified.length), quality };
-	    searchCache.set(cacheKey, { data, expiresAt: Date.now() + SEARCH_CACHE_TTL_MS });
+	    searchCache.set(cacheKey, { data });
 	    res.json({ ...data, cached: false });
 	  } catch (error) {
 	    res.status(502).json({ error: "netease_search_failed", message: errorMessage(error) });
