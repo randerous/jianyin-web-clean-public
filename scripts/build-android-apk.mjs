@@ -396,10 +396,13 @@ async function assembleRelease(env) {
     }
   } catch (error) {
     const appleDoubleCount = countGeneratedAppleDoubleFiles();
-    if (!appleDoubleCount) throw error;
-
-    console.warn(`Found ${appleDoubleCount} AppleDouble metadata files after failed assemble. Cleaning and retrying once...`);
-    removeGeneratedAppleDoubleFiles();
+    if (appleDoubleCount) {
+      console.warn(`Found ${appleDoubleCount} AppleDouble metadata files after failed assemble. Cleaning and retrying once...`);
+      removeGeneratedAppleDoubleFiles();
+    } else {
+      // CI/本地网络抖动（如 maven classpath 解析瞬断）也会走到这里，重试一次自愈。
+      console.warn(`Gradle assemble failed. Retrying once in case of a transient network error...`);
+    }
     await runStreaming("Retry Android release APK assemble", command, ["assembleRelease"], { cwd: androidRoot, env });
     if (existsSync(externalApkPath)) {
       mkdirSync(dirname(apkPath), { recursive: true });
