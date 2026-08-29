@@ -548,9 +548,11 @@ test.describe("PERF-SEARCH 搜索性能", () => {
   });
 
   test("PERF-SEARCH-06 搜索失败 500", async ({ page }) => {
-    await page.route("**/api/flac/search**", async (route) => {
-      await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "search failed" }) });
-    });
+    for (const pattern of ["**/api/flac/search**", "**/api/netease/search**", "**/api/bili/search**"]) {
+      await page.route(pattern, async (route) => {
+        await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ message: "search failed" }) });
+      });
+    }
     const end = mark("search_error_ms");
     await page.getByRole("navigation").getByRole("button", { name: "搜索" }).click();
     await page.getByPlaceholder("搜索音乐/歌手").fill("fail");

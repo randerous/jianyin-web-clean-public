@@ -1,5 +1,6 @@
 import { Download, Heart, Play, Square, SquareCheckBig, Trash2 } from "lucide-react";
 import { memo } from "react";
+import { httpsCoverUrl } from "../lib/api";
 import type { Song } from "../types";
 
 export function sourceLabel(source: Song["source"]) {
@@ -26,7 +27,7 @@ function SongRow({ song, active, favorite, selectable, selected, onPlay, onFavor
   return (
     <div className={`song-row ${active ? "active" : ""}`}>
       <button className="song-hit" onClick={() => onPlay(song)} aria-label={`${song.name} ${song.artist} · ${sourceLabel(song.source)}`}>
-        <img src={song.cover || "/assets/icon.png"} alt="" />
+        <img src={httpsCoverUrl(song.cover) || "/assets/icon.png"} alt="" />
         <span>
           <strong>{song.name}</strong>
           <small>{song.artist} · {sourceLabel(song.source)}{song.needsImport ? " · 需重新导入" : ""}</small>

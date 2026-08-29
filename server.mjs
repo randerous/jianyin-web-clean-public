@@ -108,6 +108,13 @@ function cleanText(value, fallback = "") {
   return typeof value === "string" && value.trim() ? value.trim() : fallback;
 }
 
+// 网易云图片接口返回 http:// 链接，但域名本身支持 https；
+// Android WebView 以 https 加载页面且禁用混合内容，http 图会被整体拦截。
+function httpsPicUrl(value) {
+  const url = cleanText(value);
+  return /^http:\/\/[^/]*music\.126\.net\//i.test(url) ? `https://${url.slice("http://".length)}` : url;
+}
+
 function stripHtml(value) {
   return cleanText(value).replace(/<[^>]+>/g, "").replace(/&amp;/g, "&");
 }
@@ -1178,7 +1185,7 @@ function mapSong(song) {
     name: cleanText(song.name, "未知歌曲"),
     artist: artists.map((artist) => artist.name).filter(Boolean).join("/") || "未知歌手",
     url: "",
-    pic: cleanText(album.picUrl, ""),
+    pic: httpsPicUrl(album.picUrl),
     source: "netease",
     remotePlayable: true
   };
@@ -1370,8 +1377,8 @@ function playableRejectReason(data) {
 	      name: cleanText(track?.name, "未知歌曲"),
 	      artist: songArtistText(track) || "未知歌手",
 	      url: "",
-	      pic: cleanText(album.picUrl, ""),
-	      cover: cleanText(album.picUrl, ""),
+	      pic: httpsPicUrl(album.picUrl),
+	      cover: httpsPicUrl(album.picUrl),
 	      source: "flac",
 	      remotePlayable: true,
 	      verifiedPlayable: false
@@ -1409,7 +1416,7 @@ function playableRejectReason(data) {
 	  return {
 	    id: `netease_playlist_${String(playlist.id ?? "")}`,
 	    name: cleanText(playlist.name, "网易云公开歌单"),
-	    coverPic: cleanText(playlist.coverImgUrl, songs[0]?.pic ?? ""),
+	    coverPic: httpsPicUrl(playlist.coverImgUrl) || httpsPicUrl(songs[0]?.pic),
     songs,
     trackCount: playlistTrackCount(playlist, songs),
     source: "netease"
@@ -1423,7 +1430,7 @@ function playableRejectReason(data) {
 	  return {
 	    id: `netease_playlist_${String(playlist.id ?? "")}`,
 	    name: cleanText(playlist.name, "网易云公开歌单"),
-	    coverPic: cleanText(playlist.coverImgUrl, songs[0]?.pic ?? ""),
+	    coverPic: httpsPicUrl(playlist.coverImgUrl) || httpsPicUrl(songs[0]?.pic),
 	    songs,
 	    trackCount: playlistTrackCount(playlist, songs),
 	    creatorNickname: cleanText(playlist.creator?.nickname, ""),
@@ -1435,8 +1442,8 @@ function playableRejectReason(data) {
 	  return {
 	    id: `netease_playlist_${String(playlist.id ?? "")}`,
 	    name: cleanText(playlist.name, "网易云歌单"),
-	    cover: cleanText(playlist.coverImgUrl, cleanText(playlist.picUrl, "")),
-	    coverPic: cleanText(playlist.coverImgUrl, cleanText(playlist.picUrl, "")),
+	    cover: httpsPicUrl(playlist.coverImgUrl) || httpsPicUrl(playlist.picUrl),
+	    coverPic: httpsPicUrl(playlist.coverImgUrl) || httpsPicUrl(playlist.picUrl),
 	    trackCount: Number(playlist.trackCount ?? 0) || 0,
 	    creatorNickname: cleanText(playlist.creator?.nickname, "")
 	  };
@@ -1446,7 +1453,7 @@ function playableRejectReason(data) {
 	  return {
 	    id: String(playlist?.id ?? ""),
 	    name: cleanText(playlist?.name, "推荐歌单"),
-	    cover: cleanText(playlist?.picUrl, cleanText(playlist?.coverImgUrl, "")),
+	    cover: httpsPicUrl(playlist?.picUrl) || httpsPicUrl(playlist?.coverImgUrl),
 	    trackCount: Number(playlist?.trackCount ?? playlist?.songCount ?? 0) || 0,
 	    creatorNickname: cleanText(playlist?.creator?.nickname, "")
 	  };
@@ -1567,7 +1574,7 @@ function playableRejectReason(data) {
 	  return {
 	    id,
 	    name: "网易云推荐歌单",
-	    coverImgUrl: cleanText(tracks?.[0]?.al?.picUrl, ""),
+	    coverImgUrl: httpsPicUrl(tracks?.[0]?.al?.picUrl),
 	    tracks: Array.isArray(tracks) ? tracks : [],
 	    trackIds: Array.isArray(tracks) ? tracks.map((track) => ({ id: track?.id })).filter((item) => /^\d+$/.test(String(item.id ?? ""))) : []
 	  };
@@ -2256,7 +2263,7 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 	    return;
 	  }
 	  try {
-	    const limit = parseLimit(req.query.limit, 30, 30);
+	    const limit = parseLimit(req.query.limit, 30, 60);
 	    const page = parsePage(req.query.page);
 	    const { songs, rawCount, total, hasMore, cached } = await searchFlacSongs(keyword, page, limit);
 	    res.json({ songs, filtered: Math.max(0, rawCount - songs.length), page, limit, total, hasMore, cached });

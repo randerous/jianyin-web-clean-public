@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { EQ_PRESETS, getAudioEffectsSupport } from "../lib/audio-effects";
 import { activeLyricIndex, formatTime, parseLrc } from "../lib/lyrics";
 import { songKey } from "../lib/storage";
+import { httpsCoverUrl } from "../lib/api";
 import type { AudioEffectsPreset, Playlist, ProgressStyle, Song } from "../types";
 
 type PlayerMode = "sequence" | "repeat" | "shuffle";
@@ -119,7 +120,7 @@ export default function Player(props: Props) {
       {props.queue.map((item, index) => (
         <div className={`queue-row ${index === props.queueIndex ? "active" : ""}`} key={`${item.id}-${index}`}>
           <button className="queue-hit" onClick={() => props.onQueuePlay(index)} aria-label={`播放 ${item.name}`}>
-            <img src={item.cover || "/assets/icon.png"} alt="" />
+            <img src={httpsCoverUrl(item.cover) || "/assets/icon.png"} alt="" />
             <span>
               <strong>{item.name}</strong>
               <small>{item.artist} · {qualityText(item)}</small>
@@ -139,7 +140,7 @@ export default function Player(props: Props) {
   return (
     <main className="player-backdrop" aria-label="正在播放">
       <section className="player-sheet immersive-player" aria-label={props.song.name}>
-        <img className="player-bg" src={props.song.cover || "/assets/icon.png"} alt="" />
+        <img className="player-bg" src={httpsCoverUrl(props.song.cover) || "/assets/icon.png"} alt="" />
         <header className="player-head">
           <button className="icon-button player-back-button" onClick={props.onClose} aria-label="返回">
             <ArrowLeft />
@@ -183,7 +184,7 @@ export default function Player(props: Props) {
 
         <div className="player-grid">
           <button className={`album-stage player-pane ${view === "cover" ? "active" : ""}`} onClick={props.onFloatingLyric} aria-label={props.floatingLyric ? "关闭桌面歌词" : "开启桌面歌词"}>
-            <img src={props.song.cover || "/assets/icon.png"} alt="" />
+            <img src={httpsCoverUrl(props.song.cover) || "/assets/icon.png"} alt="" />
           </button>
           <div ref={lyricPanelRef} className={`lyric-panel player-pane ${view === "lyrics" ? "active" : ""}`}>
             {lyrics.length ? (

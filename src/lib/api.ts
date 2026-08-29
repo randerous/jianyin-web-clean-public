@@ -64,6 +64,13 @@ function normalizeRemoteUrl(value: unknown) {
   return url.startsWith("/api/") ? apiUrl(url) : url;
 }
 
+// 网易云图片接口返回 http:// 链接，但域名支持 https；
+// Android WebView 以 https 加载页面且禁用混合内容，http 图会被整体拦截。
+// 服务端已转换；这里对本地持久化的旧数据做同样兜底。
+export function httpsCoverUrl(value: string) {
+  return /^http:\/\/[^/]*music\.126\.net\//i.test(value) ? `https://${value.slice("http://".length)}` : value;
+}
+
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(apiUrl(url), init);
   const data = await response.json().catch(() => ({}));
@@ -83,7 +90,7 @@ export function normalizeRemoteSong(value: RemoteSong, index = 0): Song | null {
     name: asString(value.name, "未知歌曲"),
     artist: asString(value.artist, "未知歌手"),
     url: normalizeRemoteUrl(value.url),
-    cover: asString(value.cover, asString(value.pic, cover(index + 1))),
+    cover: httpsCoverUrl(asString(value.cover, asString(value.pic, ""))) || cover(index + 1),
     source,
     lrc: typeof value.lrc === "string" ? value.lrc : undefined,
     remotePlayable: true,
@@ -127,7 +134,7 @@ export type SearchPageResult = {
   hasMore: boolean;
 };
 
-export const FLAC_SEARCH_PAGE_SIZE = 30;
+export const FLAC_SEARCH_PAGE_SIZE = 60;
 const PLAYLIST_IMPORT_CACHE_TTL_MS = 10 * 60 * 1000;
 const playlistImportCache = new Map<string, { playlist: Playlist; at: number }>();
 const playlistImportInFlight = new Map<string, Promise<Playlist>>();
@@ -406,7 +413,7 @@ export async function importNeteasePlaylist(raw: string, quality: PlayQuality = 
       const playlist = {
         id: asString(data.playlist.id),
         name: asString(data.playlist.name, "网易云歌单"),
-        cover: asString(data.playlist.cover, asString(data.playlist.coverPic, data.playlist.songs?.[0]?.cover || cover(9))),
+        cover: httpsCoverUrl(asString(data.playlist.cover, asString(data.playlist.coverPic, data.playlist.songs?.[0]?.cover || ""))) || cover(9),
         songs: (data.playlist.songs ?? []).map((song, index) => normalizeRemoteSong(song, index)).filter((song): song is Song => Boolean(song)),
         source: "netease",
         trackCount: typeof data.playlist.trackCount === "number" ? data.playlist.trackCount : data.playlist.songs?.length ?? 0,
@@ -426,7 +433,7 @@ function normalizeRemotePlaylist(playlist: RemotePlaylist, index = 0): Playlist 
   return {
     id,
     name: asString(playlist.name, source === "bili" ? "Bili 收藏夹" : "网易云歌单"),
-    cover: asString(playlist.cover, asString(playlist.coverPic, playlist.songs?.[0]?.cover || cover(index + 1))),
+    cover: httpsCoverUrl(asString(playlist.cover, asString(playlist.coverPic, playlist.songs?.[0]?.cover || ""))) || cover(index + 1),
     songs: (playlist.songs ?? []).map((song, songIndex) => normalizeRemoteSong(song, songIndex)).filter((song): song is Song => Boolean(song)),
     source,
     trackCount: typeof playlist.trackCount === "number" ? playlist.trackCount : playlist.songs?.length ?? 0,
@@ -506,7 +513,7 @@ export async function fetchNeteaseHome(quality: PlayQuality = "exhigh", refresh 
       recommendedPlaylists: (data.recommendedPlaylists ?? []).map((playlist, index) => ({
         id: `netease_playlist_${asString(playlist.id)}`,
         name: asString(playlist.name, "推荐歌单"),
-        cover: asString(playlist.cover, asString(playlist.coverPic, asString(playlist.picUrl, cover(index + 1)))),
+        cover: httpsCoverUrl(asString(playlist.cover, asString(playlist.coverPic, asString(playlist.picUrl, "")))) || cover(index + 1),
         songs: (playlist.songs ?? []).map((song, songIndex) => normalizeRemoteSong(song, songIndex)).filter((song): song is Song => Boolean(song)),
         source: "netease",
         trackCount: typeof playlist.trackCount === "number" ? playlist.trackCount : 0,

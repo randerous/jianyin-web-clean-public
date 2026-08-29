@@ -52,7 +52,8 @@ import {
   searchFlac,
   searchNetease,
   syncBiliAccountPlaylists,
-  syncNeteaseAccountPlaylists
+  syncNeteaseAccountPlaylists,
+  httpsCoverUrl
 } from "./lib/api";
 import { activeLyricIndex, formatTime, parseLrc } from "./lib/lyrics";
 import { createSharedStateWriter } from "./lib/shared-state-writer";
@@ -251,6 +252,27 @@ function remoteCopyAfterDownloadDeleted(song: Song) {
 
 function allLibrarySongs(playlists: Playlist[], history: Song[]) {
   return uniqueSongs([...playlists.flatMap((playlist) => playlist.songs), ...history]);
+}
+
+// 搜索结果按组顺序合并去重：FLAC（测试源）组始终排在最前；
+// 同名同歌手时额外保留一条非 FLAC 原曲候选，避免无损翻唱把网易云/B站的正版原曲顶掉。
+// 非 FLAC 内按传入顺序去重（网易云 > B站）。
+function mergeSearchSongs(groups: Song[][]): Song[] {
+  const normalizeMatchText = (value: string) => value
+    .toLocaleLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[（(【\[].*?[）)】\]]/g, "")
+    .trim();
+  const seenKeys = new Set<string>();
+  const merged: Song[] = [];
+  for (const song of groups.flat()) {
+    const identity = `${normalizeMatchText(song.name)}|${normalizeMatchText(song.artist)}`;
+    const bucket = song.source === "flac" ? `${identity}|flac` : `${identity}|original`;
+    if (seenKeys.has(bucket)) continue;
+    seenKeys.add(bucket);
+    merged.push(song);
+  }
+  return merged;
 }
 
 function stateContentScore(state: Pick<SharedState, "playlists" | "favorites">) {
@@ -1105,7 +1127,7 @@ export default function App() {
     navigator.mediaSession.metadata = new MediaMetadata({
       title: currentSong.name,
       artist: currentSong.artist,
-      artwork: currentSong.cover ? [{ src: currentSong.cover, sizes: "512x512", type: "image/png" }] : []
+      artwork: currentSong.cover ? [{ src: httpsCoverUrl(currentSong.cover), sizes: "512x512", type: "image/png" }] : []
     });
     navigator.mediaSession.playbackState = playing ? "playing" : "paused";
   }, [currentSong, playing]);
@@ -1874,51 +1896,7 @@ export default function App() {
     setSearchHistory((items) => [text, ...items.filter((item) => item !== text)].slice(0, 12));
     setSelected(new Set());
     setSearching(true);
-    try {
-      // 三源聚合（均免费无需登录）：
-      // FLAC 直链库（无损/320k，质量最高，翻唱/翻录为主）
-      // → 网易云（320k 正版，免登录可播非 VIP 曲目）
-      // → B站（免费版权曲目合集/现场/MV，音质受限于视频源，兜底）。
-      const [flacResult, neteaseSongs, biliSongs] = await Promise.allSettled([
-        searchFlac(text, page),
-        searchNetease(text),
-        searchBili(text)
-      ]);
-      if (searchRunRef.current !== runId) return;
-      const allOnlineFailed = flacResult.status === "rejected" && neteaseSongs.status === "rejected" && biliSongs.status === "rejected";
-      if (allOnlineFailed) throw new Error("所有在线音乐源均不可用");
-      const flacSongs = flacResult.status === "fulfilled" ? flacResult.value.songs : [];
-      const neteaseList = neteaseSongs.status === "fulfilled" ? (neteaseSongs.value ?? []) : [];
-      const biliList = biliSongs.status === "fulfilled" ? (biliSongs.value ?? []) : [];
-      // 去重（按名称+歌手+来源档位）：
-      // FLAC 始终排在最前；同名同歌手时额外保留一条非 FLAC 原曲候选，
-      // 避免无损翻唱把网易云/B站的正版原曲顶掉。非 FLAC 内网易云 > B站。
-      const normalizeMatchText = (value: string) => value
-        .toLocaleLowerCase()
-        .replace(/\s+/g, "")
-        .replace(/[（(【\[].*?[）)】\]]/g, "")
-        .trim();
-      const seenKeys = new Set<string>();
-      const merged: Song[] = [];
-      for (const song of [...flacSongs, ...neteaseList, ...biliList]) {
-        const identity = `${normalizeMatchText(song.name)}|${normalizeMatchText(song.artist)}`;
-        const bucket = song.source === "flac" ? `${identity}|flac` : `${identity}|original`;
-        if (seenKeys.has(bucket)) continue;
-        seenKeys.add(bucket);
-        merged.push(song);
-      }
-      setRemoteResults(merged);
-      setSearchSourceStats({ flac: flacSongs.length, netease: neteaseList.length, bili: biliList.length });
-      const flacPage = flacResult.status === "fulfilled" ? flacResult.value : null;
-      setSearchPageInfo({
-        page: flacPage?.page ?? page,
-        pageSize: flacPage?.pageSize ?? FLAC_SEARCH_PAGE_SIZE,
-        total: flacPage?.total ?? null,
-        hasMore: flacPage?.hasMore ?? false
-      });
-      setSearchOfflineResults(false);
-      setProxyOnline(true);
-    } catch {
+    const showLocalFallback = () => {
       if (searchRunRef.current !== runId) return;
       const normalized = text.toLocaleLowerCase();
       const localMatches = allLibrarySongs(playlists, history).filter((song) => [song.name, song.artist].some((value) => value.toLocaleLowerCase().includes(normalized)));
@@ -1928,6 +1906,67 @@ export default function App() {
       setSearchOfflineResults(true);
       setProxyOnline(false);
       setToast(`在线搜索失败，当前显示本地曲库 ${localMatches.length} 首`);
+    };
+    const fetchExtraSources = async () => {
+      const [neteaseSongs, biliSongs] = await Promise.allSettled([searchNetease(text), searchBili(text)]);
+      if (searchRunRef.current !== runId) return null;
+      return {
+        neteaseList: neteaseSongs.status === "fulfilled" ? (neteaseSongs.value ?? []) : [],
+        biliList: biliSongs.status === "fulfilled" ? (biliSongs.value ?? []) : []
+      };
+    };
+    try {
+      // 测试源优先：FLAC 主结果带服务端缓存，单独等待、立即渲染，不阻塞在慢源上；
+      // 网易云/B站仅在测试源为空或失败时兜底等待，其余情况后台补充合并，不拖慢首屏。
+      let flacPage: Awaited<ReturnType<typeof searchFlac>>;
+      try {
+        flacPage = await searchFlac(text, page);
+      } catch {
+        const extra = await fetchExtraSources();
+        if (searchRunRef.current !== runId) return;
+        const neteaseList = extra?.neteaseList ?? [];
+        const biliList = extra?.biliList ?? [];
+        if (!neteaseList.length && !biliList.length) throw new Error("所有在线音乐源均不可用");
+        setRemoteResults(mergeSearchSongs([[], neteaseList, biliList]));
+        setSearchSourceStats({ flac: 0, netease: neteaseList.length, bili: biliList.length });
+        setSearchPageInfo({ page, pageSize: FLAC_SEARCH_PAGE_SIZE, total: null, hasMore: false });
+        setSearchOfflineResults(false);
+        setProxyOnline(true);
+        return;
+      }
+      if (searchRunRef.current !== runId) return;
+      const flacSongs = flacPage.songs;
+      setRemoteResults(flacSongs);
+      setSearchSourceStats({ flac: flacSongs.length, netease: 0, bili: 0 });
+      setSearchPageInfo({
+        page: flacPage.page,
+        pageSize: flacPage.pageSize,
+        total: flacPage.total,
+        hasMore: flacPage.hasMore
+      });
+      setSearchOfflineResults(false);
+      setProxyOnline(true);
+      if (page !== 1) return;
+      if (!flacSongs.length) {
+        // 测试源无结果：等补充源返回作为主结果。
+        const extra = await fetchExtraSources();
+        if (searchRunRef.current !== runId) return;
+        const neteaseList = extra?.neteaseList ?? [];
+        const biliList = extra?.biliList ?? [];
+        setRemoteResults(mergeSearchSongs([flacSongs, neteaseList, biliList]));
+        setSearchSourceStats({ flac: 0, netease: neteaseList.length, bili: biliList.length });
+        return;
+      }
+      // 测试源已有结果：后台补充网易云/B站（版权曲目兜底），完成后增量合并。
+      void (async () => {
+        const extra = await fetchExtraSources();
+        if (!extra || searchRunRef.current !== runId) return;
+        if (!extra.neteaseList.length && !extra.biliList.length) return;
+        setRemoteResults(mergeSearchSongs([flacSongs, extra.neteaseList, extra.biliList]));
+        setSearchSourceStats({ flac: flacSongs.length, netease: extra.neteaseList.length, bili: extra.biliList.length });
+      })();
+    } catch {
+      showLocalFallback();
     } finally {
       if (searchRunRef.current === runId) setSearching(false);
     }
@@ -2716,7 +2755,7 @@ function HomeScreen({ data, loading, openingPlaylistId, error, onPlay, onOpenPla
           const opening = openingPlaylistId === playlist.id;
           return (
           <button className="playlist-card cover-playlist" key={playlist.id} onClick={() => playlist.songs.length ? onOpenPlaylist(playlist.id) : onOpenRemotePlaylist(playlist)} disabled={opening}>
-            <img src={playlist.cover || "/assets/icon.png"} alt="" />
+            <img src={httpsCoverUrl(playlist.cover) || "/assets/icon.png"} alt="" />
             <span><strong>{playlist.name}</strong><small>{opening ? "打开中..." : `${playlistDisplayCount(playlist)} 首${playlist.creatorNickname ? ` · ${playlist.creatorNickname}` : ""}`}</small></span>
           </button>
           );
@@ -2731,7 +2770,7 @@ function CoverSong({ song, songs, onPlay, onDelete }: { song: Song; songs: Song[
   return (
     <div className="cover-card-wrap">
       <button className="cover-card haze-card" onClick={() => onPlay(song, songs)}>
-        <img src={song.cover || "/assets/icon.png"} alt="" />
+        <img src={httpsCoverUrl(song.cover) || "/assets/icon.png"} alt="" />
         <span className="cover-caption"><strong>{song.name}</strong><small>{song.artist}</small></span>
       </button>
       {onDelete && (
@@ -2921,7 +2960,7 @@ function MineScreen({ playlists, history, downloadHistory, onPlay, onDeleteDownl
       <div className="playlist-list">
             {playlists.map((playlist) => (
           <div className="playlist-row" key={playlist.id}>
-            <button onClick={() => onOpenPlaylist(playlist.id)}><img src={playlist.cover || "/assets/icon.png"} alt="" /><span><strong>{playlist.name}</strong><small>{playlistDisplayCount(playlist)} 首歌曲</small></span></button>
+            <button onClick={() => onOpenPlaylist(playlist.id)}><img src={httpsCoverUrl(playlist.cover) || "/assets/icon.png"} alt="" /><span><strong>{playlist.name}</strong><small>{playlistDisplayCount(playlist)} 首歌曲</small></span></button>
             <button className="icon-button danger" onClick={() => onDelete(playlist)} aria-label="删除歌单"><Trash2 /></button>
           </div>
         ))}
@@ -2969,7 +3008,7 @@ function PlaylistDetail({ playlist, saved, favoriteKeys, selected, onClose, onPl
       <section className="detail" role="dialog" aria-modal="true" aria-label={playlist.name}>
         <header className="detail-head">
           <button className="plain-button" onClick={onClose}>返回</button>
-          <img src={playlist.cover || "/assets/icon.png"} alt="" />
+          <img src={httpsCoverUrl(playlist.cover) || "/assets/icon.png"} alt="" />
           <div><h2>{playlist.name}</h2><p>{playlistDisplayCount(playlist)} 首歌曲 · {playlist.source === "netease" ? "网易云公开歌单" : "本地歌单"}</p></div>
         </header>
         <form className="search-box compact-search" onSubmit={(event) => event.preventDefault()}>
@@ -3015,7 +3054,7 @@ function NowPlaying({ song, playing, position, duration, onOpen, onToggle, onNex
     <div className="now-playing" onClick={onOpen} role="button" aria-label={`正在播放 ${song.name}`} tabIndex={0} onKeyDown={(event) => {
       if (event.key === "Enter" || event.key === " ") onOpen();
     }}>
-      <img src={song.cover || "/assets/icon.png"} alt="" />
+      <img src={httpsCoverUrl(song.cover) || "/assets/icon.png"} alt="" />
       <span className="now-playing-copy"><strong>{song.name}</strong><small>{song.artist}</small></span>
       <span className="now-playing-time" aria-label="播放时间">{formatTime(position)} / {formatTime(duration)}</span>
       <button className="icon-button" onClick={(event) => { event.stopPropagation(); onToggle(event); }} aria-label={playing ? "暂停" : "播放"} aria-pressed={playing}>{playing ? <Pause /> : <Play />}</button>
@@ -3032,7 +3071,7 @@ function LiveNowPlaying({ song, playing, position, duration, onOpen, onToggle, o
     <div className="now-playing live-now-playing" onClick={onOpen} role="button" tabIndex={0} onKeyDown={(event) => {
       if (event.key === "Enter" || event.key === " ") onOpen();
     }}>
-      <img src={song.cover || "/assets/icon.png"} alt="" />
+      <img src={httpsCoverUrl(song.cover) || "/assets/icon.png"} alt="" />
       <span className="now-playing-title"><strong>{song.name}</strong><small>{song.artist}</small></span>
       <span className="now-playing-wave" aria-hidden="true"><i /><i /><i /><i /><i /></span>
       <span className="now-playing-time"><b>{formatTime(position)}</b><span className="mini-progress"><i style={{ width: `${progressPercent}%` }} /></span><b>{formatTime(duration)}</b></span>

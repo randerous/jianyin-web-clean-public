@@ -20,15 +20,15 @@ test("release Android networking permits cleartext only for the embedded loopbac
   assert.match(manifest, /android:usesCleartextTraffic="false"/);
 });
 
-test("v1.0.41 release metadata is synchronized across web and Android", async () => {
+test("v1.0.42 release metadata is synchronized across web and Android", async () => {
   const [packageJson, gradle] = await Promise.all([
     readFile(resolve(root, "package.json"), "utf8"),
     readFile(resolve(root, "android/app/build.gradle"), "utf8")
   ]);
 
-  assert.equal(JSON.parse(packageJson).version, "1.0.41");
-  assert.match(gradle, /versionCode 42/);
-  assert.match(gradle, /versionName "1\.0.41"/);
+  assert.equal(JSON.parse(packageJson).version, "1.0.42");
+  assert.match(gradle, /versionCode 43/);
+  assert.match(gradle, /versionName "1\.0.42"/);
 });
 
 test("Android updater uses an ASCII User-Agent accepted by DownloadManager", async () => {
