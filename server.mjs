@@ -2263,7 +2263,7 @@ app.get("/api/netease/playlist/:id", async (req, res) => {
 	    return;
 	  }
 	  try {
-	    const limit = parseLimit(req.query.limit, 30, 60);
+	    const limit = parseLimit(req.query.limit, 100, 100);
 	    const page = parsePage(req.query.page);
 	    const { songs, rawCount, total, hasMore, cached } = await searchFlacSongs(keyword, page, limit);
 	    res.json({ songs, filtered: Math.max(0, rawCount - songs.length), page, limit, total, hasMore, cached });

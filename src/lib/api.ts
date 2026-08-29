@@ -134,7 +134,7 @@ export type SearchPageResult = {
   hasMore: boolean;
 };
 
-export const FLAC_SEARCH_PAGE_SIZE = 60;
+export const FLAC_SEARCH_PAGE_SIZE = 100;
 const PLAYLIST_IMPORT_CACHE_TTL_MS = 10 * 60 * 1000;
 const playlistImportCache = new Map<string, { playlist: Playlist; at: number }>();
 const playlistImportInFlight = new Map<string, Promise<Playlist>>();

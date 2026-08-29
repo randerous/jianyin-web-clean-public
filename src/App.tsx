@@ -1916,8 +1916,9 @@ export default function App() {
       };
     };
     try {
-      // 测试源优先：FLAC 主结果带服务端缓存，单独等待、立即渲染，不阻塞在慢源上；
-      // 网易云/B站仅在测试源为空或失败时兜底等待，其余情况后台补充合并，不拖慢首屏。
+      // 测试源为主：FLAC（带服务端缓存）单独等待、立即渲染；
+      // 只有 FLAC 完全没有结果（第一页）或请求失败时，才兜底等待网易云/B站；
+      // 测试源有结果时完全不请求其他源。
       let flacPage: Awaited<ReturnType<typeof searchFlac>>;
       try {
         flacPage = await searchFlac(text, page);
@@ -1946,25 +1947,13 @@ export default function App() {
       });
       setSearchOfflineResults(false);
       setProxyOnline(true);
-      if (page !== 1) return;
-      if (!flacSongs.length) {
-        // 测试源无结果：等补充源返回作为主结果。
-        const extra = await fetchExtraSources();
-        if (searchRunRef.current !== runId) return;
-        const neteaseList = extra?.neteaseList ?? [];
-        const biliList = extra?.biliList ?? [];
-        setRemoteResults(mergeSearchSongs([flacSongs, neteaseList, biliList]));
-        setSearchSourceStats({ flac: 0, netease: neteaseList.length, bili: biliList.length });
-        return;
-      }
-      // 测试源已有结果：后台补充网易云/B站（版权曲目兜底），完成后增量合并。
-      void (async () => {
-        const extra = await fetchExtraSources();
-        if (!extra || searchRunRef.current !== runId) return;
-        if (!extra.neteaseList.length && !extra.biliList.length) return;
-        setRemoteResults(mergeSearchSongs([flacSongs, extra.neteaseList, extra.biliList]));
-        setSearchSourceStats({ flac: flacSongs.length, netease: extra.neteaseList.length, bili: extra.biliList.length });
-      })();
+      if (page !== 1 || flacSongs.length) return;
+      const extra = await fetchExtraSources();
+      if (searchRunRef.current !== runId) return;
+      const neteaseList = extra?.neteaseList ?? [];
+      const biliList = extra?.biliList ?? [];
+      setRemoteResults(mergeSearchSongs([flacSongs, neteaseList, biliList]));
+      setSearchSourceStats({ flac: 0, netease: neteaseList.length, bili: biliList.length });
     } catch {
       showLocalFallback();
     } finally {
@@ -2844,7 +2833,9 @@ function SearchScreen(props: {
       </form>
       <p className="network-line">{props.offlineResults ? `离线本地结果 · ${props.results.length} 首` : props.proxyOnline ? "测试源接口已连接；默认优先 FLAC，失败自动回退 320k。" : "测试源暂不可用，请稍后再试。"}</p>
       {!props.offlineResults && props.sourceStats && (
-        <p className="network-line">本次聚合：FLAC {props.sourceStats.flac} 首 · 网易云 {props.sourceStats.netease} 首 · B站 {props.sourceStats.bili} 首；同名曲会同时保留翻唱与原曲。</p>
+        <p className="network-line">{props.sourceStats.netease || props.sourceStats.bili
+          ? `测试源无结果，已用兜底源：网易云 ${props.sourceStats.netease} 首 · B站 ${props.sourceStats.bili} 首。`
+          : `测试源结果 ${props.sourceStats.flac} 首。`}</p>
       )}
       <div className="chips">
         {recommendedKeywords.map((item) => <button key={item} onClick={() => { props.setQuery(item); props.onSearch(item); }}>{item}</button>)}

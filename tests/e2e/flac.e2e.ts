@@ -188,7 +188,7 @@ test("flac download caches the current song without interrupting playback", asyn
   await page.getByPlaceholder("搜索音乐/歌手").fill("Quality Song");
   await page.keyboard.press("Enter");
   await expect(page.getByRole("button", { name: "Quality Song Quality Artist · 测试源" })).toBeVisible();
-  expect(searchRequests.some((params) => params.get("keyword") === "Quality Song" && params.get("limit") === "60")).toBe(true);
+  expect(searchRequests.some((params) => params.get("keyword") === "Quality Song" && params.get("limit") === "100")).toBe(true);
   await page.getByRole("button", { name: "Quality Song Quality Artist · 测试源" }).click();
   await expect(page.locator(".now-playing")).toContainText("Quality Song");
   await expectAudioPlaying(page);
@@ -897,7 +897,7 @@ test("flac test source searches, filters, resolves, and plays full songs", async
   await page.getByRole("button", { name: "全选当前页" }).click();
   await expect(page.getByText("ThirtySecond")).toHaveCount(0);
   expect(searchRequests.map((params) => params.get("keyword"))).toEqual(["September Earth Wind Fire", "September Earth Wind Fire"]);
-  expect(searchRequests.map((params) => params.get("limit"))).toEqual(["60", "60"]);
+  expect(searchRequests.map((params) => params.get("limit"))).toEqual(["100", "100"]);
   expect(searchRequests.map((params) => params.get("page"))).toEqual(["1", "2"]);
   await page.getByRole("button", { name: "取消全选当前页" }).click();
   await expect(page.locator(".selection-bar")).toHaveCount(0);
@@ -994,7 +994,7 @@ test("flac playback refreshes expired search signature after fast-path stream fa
   await expect(page.locator(".now-playing")).toContainText("September");
   await expectAudioPlaying(page);
   expect(searchRequests.length).toBeGreaterThanOrEqual(2);
-  expect(searchRequests.map((params) => params.get("limit"))).toEqual(expect.arrayContaining(["60", "1"]));
+  expect(searchRequests.map((params) => params.get("limit"))).toEqual(expect.arrayContaining(["100", "1"]));
   expect(songRequests.some((query) => query.includes("sign=old-sign"))).toBe(true);
   expect(songRequests.some((query) => query.includes("sign=fresh-sign"))).toBe(true);
   expect(streamRequests.some((query) => query.includes("sign=old-sign"))).toBe(false);
@@ -1179,7 +1179,7 @@ test("flac playback refreshes stale signature after a long pause before resuming
   await expectAudioPlaying(page);
   await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.src)).toContain("fresh-sign");
   await expect.poll(() => page.locator("audio").evaluate((audio: HTMLAudioElement) => audio.currentTime)).toBeGreaterThan(21);
-  expect(searchRequests.map((params) => params.get("limit"))).toEqual(expect.arrayContaining(["60", "1"]));
+  expect(searchRequests.map((params) => params.get("limit"))).toEqual(expect.arrayContaining(["100", "1"]));
   expect(songRequests.some((query) => query.includes("sign=old-sign"))).toBe(true);
   expect(songRequests.some((query) => query.includes("sign=fresh-sign"))).toBe(true);
 });

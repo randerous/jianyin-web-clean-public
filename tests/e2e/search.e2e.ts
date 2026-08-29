@@ -216,25 +216,7 @@ test("new search clears stale loading immediately", async ({ page }) => {
   await expect(page.getByText("Stale Loading Result")).toHaveCount(0);
 });
 
-test("cross-source search keeps the FLAC cover and the Netease original for the same name and artist", async ({ page }) => {
-  const flacSong = {
-    id: "flac_cover_same",
-    name: "Same Song",
-    artist: "Same Artist",
-    pic: "/assets/icon.png",
-    cover: "/assets/icon.png",
-    url: "/api/flac/stream/cover?format=mp3&bitrate=320&time=t&sign=s",
-    source: "flac",
-    remotePlayable: true,
-    durationMs: 65000,
-    verifiedPlayable: true,
-    br: 320000,
-    level: "320k",
-    type: "mp3",
-    audioType: "mp3",
-    quality: "320k"
-  };
-  const neteaseSong = {
+test("empty flac results fall back to the Netease original", async ({ page }) => {  const neteaseSong = {
     id: "netease_original_same",
     name: "Same Song",
     artist: "Same Artist",
@@ -252,7 +234,7 @@ test("cross-source search keeps the FLAC cover and the Netease original for the 
     quality: "320k"
   };
   await page.route("**/api/flac/search**", async (route) => {
-    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ songs: [flacSong], page: 1, limit: 30, total: 1, hasMore: false }) });
+    await route.fulfill({ contentType: "application/json", body: JSON.stringify({ songs: [], page: 1, limit: 100, total: 0, hasMore: false }) });
   });
   await page.route("**/api/netease/search**", async (route) => {
     await route.fulfill({ contentType: "application/json", body: JSON.stringify({ songs: [neteaseSong] }) });
@@ -265,6 +247,51 @@ test("cross-source search keeps the FLAC cover and the Netease original for the 
   await page.getByPlaceholder("搜索音乐/歌手").fill("same song");
   await page.keyboard.press("Enter");
 
-  await expect(page.getByRole("button", { name: "Same Song Same Artist · 测试源" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Same Song Same Artist · 网易云" })).toBeVisible();
+});
+
+test("flac results alone never trigger fallback source requests", async ({ page }) => {
+  let fallbackCalls = 0;
+  await page.route("**/api/flac/search**", async (route) => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        songs: [{
+          id: "flac_main_result",
+          name: "Main Result",
+          artist: "Main Artist",
+          pic: "/assets/icon.png",
+          cover: "/assets/icon.png",
+          url: "/api/flac/stream/main?format=mp3&bitrate=320&time=t&sign=s",
+          source: "flac",
+          remotePlayable: true,
+          durationMs: 65000,
+          verifiedPlayable: true,
+          br: 320000,
+          level: "320k",
+          type: "mp3",
+          audioType: "mp3",
+          quality: "320k"
+        }],
+        page: 1,
+        limit: 100,
+        total: 1,
+        hasMore: false
+      })
+    });
+  });
+  for (const pattern of ["**/api/netease/search**", "**/api/bili/search**"]) {
+    await page.route(pattern, async (route) => {
+      fallbackCalls += 1;
+      await route.fulfill({ contentType: "application/json", body: JSON.stringify({ songs: [] }) });
+    });
+  }
+
+  await page.getByRole("navigation").getByRole("button", { name: "搜索" }).click();
+  await page.getByPlaceholder("搜索音乐/歌手").fill("main result");
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("button", { name: "Main Result Main Artist · 测试源" })).toBeVisible();
+  await page.waitForTimeout(600);
+
+  expect(fallbackCalls).toBe(0);
 });
