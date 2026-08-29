@@ -89,13 +89,15 @@ jobs:
       - name: Debug apksigner output on failure
         if: failure()
         run: |
-          echo "== build-tools apksigner binaries =="
-          ls /usr/local/lib/android/sdk/build-tools/*/apksigner 2>/dev/null || true
-          APK=android/app/build/outputs/apk/release/app-release.apk
-          ls -la "$APK" || true
-          APKSIGNER=$(ls /usr/local/lib/android/sdk/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
-          echo "== $APKSIGNER verify output =="
-          "$APKSIGNER" verify --verbose --print-certs "$APK" 2>&1 | head -40 || true
+          echo "== outputs tree =="
+          find android/app/build/outputs -maxdepth 5 2>/dev/null || echo "(no outputs dir)"
+          echo "== external gradle build root APKs =="
+          find "$HOME/.cache/JianyinGradle/gradle-build" -maxdepth 10 -name "*.apk" 2>/dev/null || true
+          ls -la "$HOME/.cache/JianyinGradle/gradle-build/app/outputs/apk/release/" 2>/dev/null || true
+          echo "== local.properties =="
+          cat android/local.properties 2>/dev/null || true
+          echo "== which apkPath would exist =="
+          ls -la android/app/build/outputs/apk/release/ 2>/dev/null || echo "(missing release dir)"
 
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4

@@ -305,7 +305,11 @@ export function verifyReleaseKeystore(env) {
 
 export function verifyApkSignature(env) {
   const output = runForOutput(findAndroidBuildTool(env, "apksigner"), ["verify", "--verbose", "--print-certs", apkPath], env);
-  const signer = assertExpectedReleaseSigner(extractApkSignerSha256s(output), "Release APK");
+  const signers = extractApkSignerSha256s(output);
+  if (signers.length !== 1) {
+    console.error(`[verifyApkSignature] apksigner did not report exactly one signer. Raw output:\n${output}`);
+  }
+  const signer = assertExpectedReleaseSigner(signers, "Release APK");
   console.log(`Verified release APK signer SHA-256: ${signer}`);
 }
 
