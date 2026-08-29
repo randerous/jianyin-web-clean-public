@@ -120,3 +120,11 @@ export type BackupPreview = {
   localFileCount: number;
   localFileBytes: number;
 };
+
+export type Tab = "home" | "search" | "mine";
+
+export type HomeData = {
+  radarSongs: Song[];
+  hotSongs: Song[];
+  recommendedPlaylists: Playlist[];
+};
