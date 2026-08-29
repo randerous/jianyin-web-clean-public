@@ -491,12 +491,20 @@ export async function main() {
   writeAndroidLocalProperties(env);
   run("Build desktop/web assets", commandName("npm"), ["run", "build"], { env });
   run("Sync Capacitor Android project", commandName("npx"), ["cap", "sync", "android"], { env });
-  const mirrorFilesUpdated = injectAliyunMavenMirrors();
-  console.log(`Aliyun Maven mirror present in generated Gradle files (${mirrorFilesUpdated} updated).`);
+  if (shouldInjectAliyunMirror(env)) {
+    const mirrorFilesUpdated = injectAliyunMavenMirrors();
+    console.log(`Aliyun Maven mirror present in generated Gradle files (${mirrorFilesUpdated} updated).`);
+  } else {
+    console.log("Skipping Aliyun Maven mirror injection (JIANYIN_SKIP_ALIYUN_MIRROR=1).");
+  }
   run("Prepare embedded Android Node backend", process.execPath, [resolve(root, "scripts", "prepare-android-embedded-backend.mjs")], { env });
   removeGeneratedAppleDoubleFiles();
   await assembleRelease(env);
   verifyApk(env);
+}
+
+export function shouldInjectAliyunMirror(env = process.env) {
+  return env.JIANYIN_SKIP_ALIYUN_MIRROR !== "1";
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) await main();

@@ -1,0 +1,118 @@
+name: Android release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build (optional; defaults to current checkout)"
+        required: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    env:
+      # CI 直连 google()/mavenCentral()，跳过本地国内镜像注入。
+      JIANYIN_SKIP_ALIYUN_MIRROR: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK components
+        run: |
+          sdkmanager --install "platform-tools" "platforms;android-36" "build-tools;35.0.0" "ndk;28.2.13676358"
+          yes | sdkmanager --licenses
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/JianyinGradle/gradle-user-home
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/gradle/wrapper/gradle-wrapper.properties', 'package-lock.json') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Decode release keystore
+        run: |
+          install -d "$RUNNER_TEMP/keystore"
+          printf '%s' "$JIANYIN_RELEASE_KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/keystore/release.keystore"
+          echo "JIANYIN_RELEASE_KEYSTORE=$RUNNER_TEMP/keystore/release.keystore" >> "$GITHUB_ENV"
+        env:
+          JIANYIN_RELEASE_KEYSTORE_B64: ${{ secrets.JIANYIN_RELEASE_KEYSTORE_B64 }}
+
+      - name: Run full test suite
+        run: npm run test:all
+
+      - name: Build signed release APK
+        run: npm run android:apk
+
+      - name: Verify APK metadata
+        run: |
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          test -f "$APK"
+          sha256sum "$APK"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-${{ inputs.tag || github.ref_name }}
+          path: android/app/build/outputs/apk/release/app-release.apk
+          if-no-files-found: error
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          APK=android/app/build/outputs/apk/release/app-release.apk
+          SHA256=$(sha256sum "$APK" | awk '{print $1}')
+          NOTES=$(awk -v tag="## ${TAG#v} " '
+            $0 ~ "^" tag { flag = 1; next }
+            /^## / && flag { exit }
+            flag { print }
+          ' CHANGELOG.md)
+          {
+            echo "## ${TAG}"
+            echo
+            if [ -n "$NOTES" ]; then printf '%s\n' "$NOTES"; else echo "- 发布说明见 CHANGELOG.md。"; fi
+            echo
+            echo "### 资产"
+            echo
+            echo "- app-release.apk（签名与历史版本一致，可直接覆盖安装）"
+            echo "- SHA-256: ${SHA256}"
+          } > "$RUNNER_TEMP/release-notes.md"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+          fi
+          gh release create "$TAG" "$APK" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "${TAG} Android APK" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --latest

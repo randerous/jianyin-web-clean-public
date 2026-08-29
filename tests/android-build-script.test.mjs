@@ -9,7 +9,8 @@ import {
   extractApkSignerSha256s,
   extractKeytoolCertificateSha256,
   injectAliyunMavenMirrors,
-  resolveGradleUserHome
+  resolveGradleUserHome,
+  shouldInjectAliyunMirror
 } from "../scripts/build-android-apk.mjs";
 
 const source = await readFile(new URL("../scripts/build-android-apk.mjs", import.meta.url), "utf8");
@@ -60,6 +61,14 @@ test("Aliyun Maven mirrors are injected idempotently after Capacitor sync", asyn
   const syncIndex = source.indexOf('run("Sync Capacitor Android project"');
   const injectionIndex = source.indexOf("injectAliyunMavenMirrors();");
   assert.ok(injectionIndex > syncIndex, "mirror injection must occur after Capacitor sync");
+});
+
+test("Aliyun Maven mirror injection can be skipped for CI builds", () => {
+  assert.equal(shouldInjectAliyunMirror({}), true);
+  assert.equal(shouldInjectAliyunMirror({ JIANYIN_SKIP_ALIYUN_MIRROR: "1" }), false);
+  const gateIndex = source.indexOf("if (shouldInjectAliyunMirror(env))");
+  const injectionIndex = source.indexOf("injectAliyunMavenMirrors()");
+  assert.ok(gateIndex !== -1 && injectionIndex !== -1 && gateIndex < injectionIndex, "skip gate must wrap mirror injection");
 });
 
 test("Android release builds verify the expected keystore signer before building", () => {
