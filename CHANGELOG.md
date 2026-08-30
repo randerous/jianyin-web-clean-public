@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.44 - 2026-08-30
+
+- 架构重构（行为等价，全量测试通过）：
+  - 服务端 8 个手写 TTL 缓存 Map 收拢为 `createTtlCache`（TTL 不变，
+    新增 1000 条 LRU 上限与惰性清扫，防长驻进程内存增长）。
+  - `App.tsx` 3098 → 2661 行：首页/搜索/我的/歌单详情/播放条等 12 个
+    展示组件拆分到 `src/screens/` 与 `src/components/`，props 接口不变。
+- 加固"删除未缓存下载条目"e2e：删除前消化 reload 对账写入并重置计数基线，
+  消除 CI 慢机上的时序 flake（删除触发的真实冗余写仍会被断言捕获）。
+- 新增 tag 触发的 Android release workflow：全量测试 → 签名构建 → 自动发布。
+- Windows 桌面版同步 1.0.44 运行环境（RuntimeVersion 1.0.44），本版重新提供
+  `jianyin-windows-launcher.exe`。
+- 版本号 1.0.44 / versionCode 45。
+
 ## 1.0.43 - 2026-08-29
 
 - 搜索回归「测试源为主，搜不到才兜底」：测试源有结果时**完全不请求**网易云/B站；
