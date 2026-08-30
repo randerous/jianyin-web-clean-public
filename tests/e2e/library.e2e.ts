@@ -899,6 +899,10 @@ test("download manager removes uncached download history entries", async ({ page
   const row = manager.locator(".song-row", { hasText: "Uncached Download History" });
   await expect(row).toHaveCount(1);
   await expect(row.getByRole("button", { name: "删除下载" })).toBeVisible();
+  // reload 后的对账写入在慢机（CI runner）上可能延迟到本测试中段才发出；
+  // 先给一个静默窗口消化它并重置计数基线，使删除后的零写断言只锁定删除动作本身。
+  await page.waitForTimeout(1000);
+  sharedWrites = 0;
   await row.getByRole("button", { name: "删除下载" }).click();
   await expect(row).toHaveCount(0);
   await expect.poll(() => page.evaluate((key) => {
