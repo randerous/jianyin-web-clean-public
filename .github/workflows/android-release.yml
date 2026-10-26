@@ -19,7 +19,10 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # 固定 24.04：ubuntu-latest 已滚动到 26.04，而 Playwright 1.60.0
+    # 只支持到 ubuntu24.04（install --with-deps 会报
+    # "Playwright does not support chromium on ubuntu26.04-x64"）。
+    runs-on: ubuntu-24.04
     timeout-minutes: 75
     env:
       # CI 直连 google()/mavenCentral()，跳过本地国内镜像注入。
