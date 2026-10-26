@@ -122,3 +122,49 @@ test("Android release builds verify the generated APK signer", () => {
   assert.ok(verificationIndex > assembleIndex, "APK verification must run after assembly");
   assert.match(source, /function verifyApk\(env\) \{[\s\S]*?verifyApkSignature\(env\);/);
 });
+
+test("assembleRelease defines the external APK path outside the try block", () => {
+  // 重试分支（catch）也会用它拷贝产物；若声明在 try 内，重试时抛
+  // ReferenceError: externalApkPath is not defined，构建以退出码 1 结束。
+  const fnStart = source.indexOf("async function assembleRelease(env) {");
+  assert.ok(fnStart >= 0, "assembleRelease must exist");
+  const tryIndex = source.indexOf("\n  try {", fnStart);
+  const declaration = source.indexOf("const externalApkPath =", fnStart);
+  assert.ok(tryIndex > fnStart, "assembleRelease must contain a try block");
+  assert.ok(
+    declaration > fnStart && declaration < tryIndex,
+    "externalApkPath must be declared before the try block so the catch retry path can use it"
+  );
+});
+
+test("Gradle repositories prefer official sources before the Aliyun mirror", async () => {
+  // maven.aliyun.com 实测返回 502 时 Gradle 会连带禁用整个 repository 并中止构建，
+  // 因此官方源必须排在镜像之前。
+  const gradle = await readFile(resolve(import.meta.dirname, "..", "android", "build.gradle"), "utf8");
+  // 逐个匹配 "repositories {" 到其配对右括号之间的正文。
+  const bodies = [];
+  const openRe = /repositories\s*\{/g;
+  let match;
+  while ((match = openRe.exec(gradle))) {
+    let depth = 1;
+    let index = match.index + match[0].length;
+    const start = index;
+    while (index < gradle.length && depth > 0) {
+      if (gradle[index] === "{") depth += 1;
+      else if (gradle[index] === "}") depth -= 1;
+      index += 1;
+    }
+    bodies.push(gradle.slice(start, index - 1));
+  }
+  assert.ok(bodies.length >= 2, "expected buildscript and allprojects repository blocks");
+  for (const raw of bodies) {
+    // 去掉行注释：正文注释里也会出现 maven.aliyun.com 字样，直接 indexOf 会误判。
+    // 只剥「整行注释」，不能按 // 切：URL 里的 https:// 也含 //。
+    const body = raw.split("\n").filter((line) => !line.trim().startsWith("//")).join("\n");
+    const google = body.indexOf("google()");
+    const aliyun = body.indexOf("maven.aliyun.com");
+    assert.ok(google >= 0, "each block must declare google()");
+    assert.ok(aliyun >= 0, "each block must keep the Aliyun mirror as fallback");
+    assert.ok(google < aliyun, "google() must come before the Aliyun mirror");
+  }
+});

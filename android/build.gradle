@@ -3,12 +3,13 @@
 buildscript {
     repositories {
         maven { url uri("local-maven") }
-        // The local network can terminate TLS to dl.google.com; keep Google's
-        // repository as a fallback after a public mirror.
-        maven { url "https://maven.aliyun.com/repository/google" }
-        maven { url "https://maven.aliyun.com/repository/public" }
+        // 官方源在前、国内镜像兜底：镜像可能返回 5xx（实测
+        // maven.aliyun.com/repository/google 返回 502），而任一仓库硬失败会
+        // 让 Gradle 连带禁用整个 repository 并中止构建。
         google()
         mavenCentral()
+        maven { url "https://maven.aliyun.com/repository/google" }
+        maven { url "https://maven.aliyun.com/repository/public" }
     }
     dependencies {
         classpath 'com.android.tools.build:gradle:8.13.0'
@@ -40,10 +41,10 @@ if (externalGradleBuildDir) {
 allprojects {
     repositories {
         maven { url uri("${rootProject.projectDir}/local-maven") }
-        maven { url "https://maven.aliyun.com/repository/google" }
-        maven { url "https://maven.aliyun.com/repository/public" }
         google()
         mavenCentral()
+        maven { url "https://maven.aliyun.com/repository/google" }
+        maven { url "https://maven.aliyun.com/repository/public" }
     }
 }
 

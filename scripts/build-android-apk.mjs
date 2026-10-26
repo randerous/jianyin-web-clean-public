@@ -390,9 +390,11 @@ function countGeneratedAppleDoubleFiles() {
 async function assembleRelease(env) {
   const command = process.platform === "win32" ? resolve(androidRoot, "gradlew.bat") : resolve(androidRoot, "gradlew");
   const cleaner = setInterval(removeGeneratedAppleDoubleFiles, 750);
+  // 声明在 try 之外：下方 catch 的重试分支也要用它拷贝产物，
+  // 原先声明在 try 内，重试分支引用时抛 ReferenceError。
+  const gradleBuildRoot = env.JIANYIN_ANDROID_GRADLE_BUILD_DIR;
+  const externalApkPath = resolve(gradleBuildRoot, "app", "outputs", "apk", "release", "app-release.apk");
   try {
-    const gradleBuildRoot = env.JIANYIN_ANDROID_GRADLE_BUILD_DIR;
-    const externalApkPath = resolve(gradleBuildRoot, "app", "outputs", "apk", "release", "app-release.apk");
     rmSync(gradleBuildRoot, { recursive: true, force: true });
     removeGeneratedAppleDoubleFiles();
     await runStreaming("Assemble Android release APK", command, ["assembleRelease"], { cwd: androidRoot, env });
