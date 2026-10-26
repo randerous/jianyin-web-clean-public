@@ -107,11 +107,14 @@ jobs:
           if-no-files-found: error
 
       - name: Create GitHub release
-        if: startsWith(github.ref, 'refs/tags/v')
+        # tag 推送发布；workflow_dispatch 时需显式给出 tag 输入才发布，
+        # 否则 github.ref 仍是 refs/heads/main，原条件会静默跳过发布步骤。
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           TAG="${GITHUB_REF_NAME}"
+          if [ -n "${{ inputs.tag }}" ]; then TAG="${{ inputs.tag }}"; fi
           APK=android/app/build/outputs/apk/release/app-release.apk
           SHA256=$(sha256sum "$APK" | awk '{print $1}')
           NOTES=$(awk -v tag="## ${TAG#v} " '
