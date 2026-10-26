@@ -17,7 +17,14 @@ const execFileAsync = promisify(execFile);
 const UPDATE_REPOSITORY = "randerous/jianyin-web-clean-public";
 const UPDATE_API_URL = `https://api.github.com/repos/${UPDATE_REPOSITORY}/releases/latest`;
 const UPDATE_CACHE_TTL_MS = 5 * 60 * 1000;
+const LATEST_UPDATE_CACHE_KEY = "latest";
 const UPDATE_RESTART_EXIT_CODE = 75;
+// resolvedUrlCache 单独容量（条目数）。一次账号同步最多写入 8 个歌单 × 1000 首：
+// 客户端 src/lib/api.ts:471 固定 limit=8，服务端每单上限为 createApp 内的 PLAYLIST_CANDIDATE_LIMIT=1000。
+// 要让在播歌单与上一批歌单的解析结果同时留在缓存里，容量取两批同步 2×8000 + 一次歌单详情 1000 + 一次搜索候选 180 = 17180。
+// 单条目实测 237 B（bench/results/before.json entryMemory），满额约 4.1 MB，较原先 1000 条上限增加约 3.9 MB。
+const ACCOUNT_PLAYLIST_SYNC_LIMIT = 8;
+export const RESOLVED_URL_CACHE_MAX = 2 * ACCOUNT_PLAYLIST_SYNC_LIMIT * 1000 + 1000 + 180;
 function isPackagedLauncher() {
   return process.env.JIANYIN_PACKAGED_LAUNCHER === "1";
 }
@@ -38,12 +45,17 @@ const sharedStatePath = process.env.JIANYIN_STATE_PATH
   : resolve(__dirname, ".jianyin-shared-state.json");
 const sharedStateLockTails = new Map();
 
-// 统一 TTL 缓存：收拢原先 8 个手写 Map（原先只懒过期、无容量上限，长驻进程内存缓慢增长）。
+// 统一 TTL 缓存：收拢原先 9 个手写 Map（原先只懒过期、无容量上限，长驻进程内存缓慢增长）。
 // 条目即调用方传入的对象（原地附加 expiresAt），因此既有 get 读取代码（cached.data / cached.expiresAt）零改动。
-// - set 时惰性清扫过期条目并按插入序做 LRU 驱逐，max 限制内存上限
+// - 容量约束：set 内同步按 LRU 顺序驱逐，size 一旦超过 max 立即回到 max（不延迟）
+// - 过期清理：按写入配额的增量清扫。get 读到过期条目立即删除（读路径不返回过期数据）；
+//   全表清扫改为游标推进，每次 set 最多检查 sweepBudget 条，长驻进程不再每次写入都 O(n) 遍历。
+//   代价是过期条目会驻留到游标扫到为止：满额时最慢 ceil(size / sweepBudget) 次写入清完一轮，
+//   内存上界仍受 max 约束（滞留条目计入 size，且恒在最冷端，不会挤掉存活条目）。
 // - get 触碰最近使用的条目（移到 Map 尾部），让驱逐优先淘汰冷数据
-export function createTtlCache(ttlMs, { max = 1000 } = {}) {
+export function createTtlCache(ttlMs, { max = 1000, sweepBudget = 32 } = {}) {
   const store = new Map();
+  let sweepCursor = null;
   const cache = {
     get(key) {
       const entry = store.get(key);
@@ -60,7 +72,10 @@ export function createTtlCache(ttlMs, { max = 1000 } = {}) {
       if (store.has(key)) store.delete(key);
       value.expiresAt = Date.now() + ttlMs;
       store.set(key, value);
-      cache.sweep();
+      while (store.size > max) {
+        store.delete(store.keys().next().value);
+      }
+      cache.sweepSome();
     },
     has(key) {
       return cache.get(key) !== undefined;
@@ -70,7 +85,25 @@ export function createTtlCache(ttlMs, { max = 1000 } = {}) {
     },
     clear() {
       store.clear();
+      sweepCursor = null;
     },
+    // 增量清扫：从上次停下的位置继续推进，单次最多检查 sweepBudget 条；走到尾部后重开游标。
+    // 容量约束与过期清理互不依赖：即使过期条目暂时滞留，set 仍会把 size 压回 max，
+    // 且滞留条目恒在 LRU 头部（过期顺序即写入顺序），先于任何存活条目被驱逐。
+    sweepSome() {
+      const now = Date.now();
+      if (!sweepCursor) sweepCursor = store.keys();
+      for (let checked = 0; checked < sweepBudget; checked += 1) {
+        const next = sweepCursor.next();
+        if (next.done) {
+          sweepCursor = null;
+          return;
+        }
+        const entry = store.get(next.value);
+        if (entry && entry.expiresAt <= now) store.delete(next.value);
+      }
+    },
+    // 全表清扫过期条目，并兜底一次容量约束；供显式调用。
     sweep() {
       const now = Date.now();
       for (const [key, entry] of store) {
@@ -79,6 +112,7 @@ export function createTtlCache(ttlMs, { max = 1000 } = {}) {
       while (store.size > max) {
         store.delete(store.keys().next().value);
       }
+      sweepCursor = null;
     },
     get size() {
       return store.size;
@@ -127,7 +161,7 @@ const FLAC_BASE_URL = "https://flac.music.hi.cn";
 const FLAC_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
 
-	const resolvedUrlCache = createTtlCache(RESOLVED_URL_TTL_MS);
+	const resolvedUrlCache = createTtlCache(RESOLVED_URL_TTL_MS, { max: RESOLVED_URL_CACHE_MAX });
 	const searchCache = createTtlCache(SEARCH_CACHE_TTL_MS);
 	const flacSearchCache = createTtlCache(SEARCH_CACHE_TTL_MS);
 	const flacSearchInFlight = new Map();
@@ -139,7 +173,7 @@ const FLAC_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/5
 	const radarSongsInFlight = new Map();
 	const biliStreamCache = createTtlCache(RESOLVED_URL_TTL_MS);
 	const flacStreamCache = createTtlCache(RESOLVED_URL_TTL_MS);
-	let latestUpdateCache = null;
+	const latestUpdateCache = createTtlCache(UPDATE_CACHE_TTL_MS, { max: 1 });
 	let latestUpdateInFlight = null;
 	let flacCookie = "";
 	let flacCookieAt = 0;
@@ -1823,7 +1857,8 @@ function playableRejectReason(data) {
 	}
 
 async function getLatestUpdate() {
-  if (latestUpdateCache && latestUpdateCache.expiresAt > Date.now()) return latestUpdateCache.data;
+  const cachedUpdate = latestUpdateCache.get(LATEST_UPDATE_CACHE_KEY);
+  if (cachedUpdate) return cachedUpdate.data;
   if (latestUpdateInFlight) return latestUpdateInFlight;
   latestUpdateInFlight = (async () => {
     const githubHeaders = {
@@ -1890,7 +1925,7 @@ async function getLatestUpdate() {
         windowsLauncher: assets.find((asset) => asset.name === "jianyin-windows-launcher.exe") ?? null
       }
     };
-    latestUpdateCache = { data, expiresAt: Date.now() + UPDATE_CACHE_TTL_MS };
+    latestUpdateCache.set(LATEST_UPDATE_CACHE_KEY, { data });
     return data;
   })().finally(() => {
     latestUpdateInFlight = null;

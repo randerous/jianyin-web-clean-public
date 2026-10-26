@@ -194,6 +194,32 @@ function recentSongsWith(song: Song, songs: Song[]) {
 }
 
 
+function mapSongsPreserving(songs: Song[], replace: (song: Song) => Song) {
+  let changed = false;
+  const next = songs.map((song) => {
+    const replaced = replace(song);
+    if (replaced !== song) changed = true;
+    return replaced;
+  });
+  return changed ? next : songs;
+}
+
+function withResolvedSongs(playlist: Playlist, replace: (song: Song) => Song, nextCover: string) {
+  const songs = mapSongsPreserving(playlist.songs, replace);
+  if (songs === playlist.songs && nextCover === playlist.cover) return playlist;
+  return { ...playlist, songs, cover: nextCover };
+}
+
+function mapPlaylistsPreserving(playlists: Playlist[], update: (playlist: Playlist) => Playlist) {
+  let changed = false;
+  const next = playlists.map((playlist) => {
+    const updated = update(playlist);
+    if (updated !== playlist) changed = true;
+    return updated;
+  });
+  return changed ? next : playlists;
+}
+
 function preserveDownloadedCache(existing: Song, incoming: Song) {
   const key = downloadCacheKey(existing);
   if (!key || downloadCacheKey(incoming)) return incoming;
@@ -654,15 +680,12 @@ export default function App() {
       setHistory((items) => items.map(replaceResolved));
       setDownloadHistory((items) => items.map(replaceResolved));
       setFavorites((items) => items.map(replaceResolved));
-      setPlaylists((items) => items.map((playlist) => ({ ...playlist, songs: playlist.songs.map(replaceResolved) })));
-      setPreviewPlaylist((playlist) => playlist ? { ...playlist, songs: playlist.songs.map(replaceResolved) } : playlist);
-      setHomeData((data) => ({
-        ...data,
-        recommendedPlaylists: data.recommendedPlaylists.map((playlist) => ({
-          ...playlist,
-          songs: playlist.songs.map(replaceResolved)
-        }))
-      }));
+      setPlaylists((items) => mapPlaylistsPreserving(items, (playlist) => withResolvedSongs(playlist, replaceResolved, playlist.cover)));
+      setPreviewPlaylist((playlist) => playlist ? withResolvedSongs(playlist, replaceResolved, playlist.cover) : playlist);
+      setHomeData((data) => {
+        const recommendedPlaylists = mapPlaylistsPreserving(data.recommendedPlaylists, (playlist) => withResolvedSongs(playlist, replaceResolved, playlist.cover));
+        return recommendedPlaylists === data.recommendedPlaylists ? data : { ...data, recommendedPlaylists };
+      });
     });
   }, [currentSong, withDownloadedCache]);
 
@@ -1305,23 +1328,16 @@ export default function App() {
       }
       setRemoteResults((items) => items.map(replaceResolved));
       setFavorites((items) => items.map(replaceResolved));
-      setPlaylists((items) => items.map((playlist) => {
-        const songs = playlist.songs.map(replaceResolved);
-        return { ...playlist, songs, cover: coverAfterSongResolved(playlist, originalKey, playable.cover) };
-      }));
-      setPreviewPlaylist((playlist) => playlist ? {
-        ...playlist,
-        songs: playlist.songs.map(replaceResolved),
-        cover: coverAfterSongResolved(playlist, originalKey, playable.cover)
-      } : playlist);
-      setHomeData((data) => ({
-        ...data,
-        recommendedPlaylists: data.recommendedPlaylists.map((playlist) => ({
-          ...playlist,
-          songs: playlist.songs.map(replaceResolved),
-          cover: coverAfterSongResolved(playlist, originalKey, playable.cover)
-        }))
-      }));
+      setPlaylists((items) => mapPlaylistsPreserving(items, (playlist) =>
+        withResolvedSongs(playlist, replaceResolved, coverAfterSongResolved(playlist, originalKey, playable.cover))));
+      setPreviewPlaylist((playlist) => playlist
+        ? withResolvedSongs(playlist, replaceResolved, coverAfterSongResolved(playlist, originalKey, playable.cover))
+        : playlist);
+      setHomeData((data) => {
+        const recommendedPlaylists = mapPlaylistsPreserving(data.recommendedPlaylists, (playlist) =>
+          withResolvedSongs(playlist, replaceResolved, coverAfterSongResolved(playlist, originalKey, playable.cover)));
+        return recommendedPlaylists === data.recommendedPlaylists ? data : { ...data, recommendedPlaylists };
+      });
       setQueue(nextQueue);
       setQueueIndex(nextIndex);
       setHistory((items) => [playable, ...items.filter((item) => {
@@ -2236,6 +2252,48 @@ export default function App() {
     };
   }, [accountOpen, activePlaylist, activePlaylistSaved, createOpen, floatingLyric, neteaseOpen, playerOpen, settingsOpen, tab]);
 
+  // PlaylistDetail 已 memo：以下回调必须保持引用稳定，否则 1000 行详情会随进度更新整树重渲染。
+  const closePlaylistDetail = useCallback(() => {
+    setActivePlaylistId(null);
+    if (!activePlaylistSaved) setPreviewPlaylist(null);
+  }, [activePlaylistSaved]);
+
+  const saveActivePlaylist = useCallback(() => {
+    if (!activePlaylist) return;
+    setPlaylists((items) => [activePlaylist, ...items.filter((item) => item.id !== activePlaylist.id)]);
+    setPreviewPlaylist((playlist) => playlist?.id === activePlaylist.id ? null : playlist);
+    setToast("已收藏歌单");
+  }, [activePlaylist]);
+
+  const addSelectedToActivePlaylist = useCallback((songs: Song[]) => {
+    if (!activePlaylist || !activePlaylistSaved) return;
+    addSongsToPlaylist(activePlaylist.id, songs);
+  }, [activePlaylist, activePlaylistSaved, addSongsToPlaylist]);
+
+  const createPlaylistWithSelected = useCallback((name: string, songs: Song[]) => {
+    const playlist: Playlist = { id: `local_${Date.now()}`, sharedId: createOpaqueSharedId("shared_playlist"), name, cover: songs[0]?.cover ?? cover(3), songs, source: "local" };
+    setPlaylists((items) => [playlist, ...items]);
+    setSelected(new Set());
+    setToast(`已创建歌单并添加 ${songs.length} 首歌曲`);
+  }, []);
+
+  const removeSelectedFromActivePlaylist = useCallback(() => {
+    if (!activePlaylist || !activePlaylistSaved) return;
+    if (activePlaylist.id === FAVORITES_ID) {
+      setToast("我喜欢的音乐不能移除歌曲");
+      setSelected(new Set());
+      return;
+    }
+    const keys = selected;
+    setPlaylists((items) => items.map((playlist) => playlist.id === activePlaylist.id ? { ...playlist, songs: playlist.songs.filter((song) => !keys.has(songKey(song))) } : playlist));
+    setSelected(new Set());
+  }, [activePlaylist, activePlaylistSaved, selected]);
+
+  const reverseActivePlaylist = useCallback(() => {
+    if (!activePlaylist || !activePlaylistSaved) return;
+    setPlaylists((items) => items.map((playlist) => playlist.id === activePlaylist.id ? { ...playlist, songs: [...playlist.songs].reverse() } : playlist));
+  }, [activePlaylist, activePlaylistSaved]);
+
   const releaseNotes = Array.isArray(updateInfo?.releaseNotes) ? updateInfo.releaseNotes : [];
   const shellClassName = [
     "app-shell",
@@ -2392,10 +2450,7 @@ export default function App() {
           saved={activePlaylistSaved}
           favoriteKeys={favoriteKeys}
           selected={selected}
-          onClose={() => {
-            setActivePlaylistId(null);
-            if (!activePlaylistSaved) setPreviewPlaylist(null);
-          }}
+          onClose={closePlaylistDetail}
           onPlay={playSong}
           onFavorite={toggleFavorite}
           onDownload={downloadSong}
@@ -2403,30 +2458,11 @@ export default function App() {
           onDeleteDownload={deleteDownloadedSongs}
           onAddToQueue={addSongsToQueue}
           onSelect={toggleSelectedSong}
-          onSavePlaylist={() => {
-            setPlaylists((items) => [activePlaylist, ...items.filter((item) => item.id !== activePlaylist.id)]);
-            setPreviewPlaylist((playlist) => playlist?.id === activePlaylist.id ? null : playlist);
-            setToast("已收藏歌单");
-          }}
-          onAddSelected={(songs) => activePlaylistSaved && addSongsToPlaylist(activePlaylist.id, songs)}
-          onCreatePlaylistWithSelected={(name, songs) => {
-            const playlist: Playlist = { id: `local_${Date.now()}`, sharedId: createOpaqueSharedId("shared_playlist"), name, cover: songs[0]?.cover ?? cover(3), songs, source: "local" };
-            setPlaylists((items) => [playlist, ...items]);
-            setSelected(new Set());
-            setToast(`已创建歌单并添加 ${songs.length} 首歌曲`);
-          }}
-          onRemoveSelected={() => {
-            if (!activePlaylistSaved) return;
-            if (activePlaylist.id === FAVORITES_ID) {
-              setToast("我喜欢的音乐不能移除歌曲");
-              setSelected(new Set());
-              return;
-            }
-            const keys = selected;
-            setPlaylists((items) => items.map((playlist) => playlist.id === activePlaylist.id ? { ...playlist, songs: playlist.songs.filter((song) => !keys.has(songKey(song))) } : playlist));
-            setSelected(new Set());
-          }}
-          onReverse={() => activePlaylistSaved && setPlaylists((items) => items.map((playlist) => playlist.id === activePlaylist.id ? { ...playlist, songs: [...playlist.songs].reverse() } : playlist))}
+          onSavePlaylist={saveActivePlaylist}
+          onAddSelected={addSelectedToActivePlaylist}
+          onCreatePlaylistWithSelected={createPlaylistWithSelected}
+          onRemoveSelected={removeSelectedFromActivePlaylist}
+          onReverse={reverseActivePlaylist}
         />
       )}
 

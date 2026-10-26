@@ -1,10 +1,42 @@
 # Changelog
 
+## 1.0.45 - 2026-10-26
+
+- 服务端 TTL 缓存性能与容量修正（`server.mjs:55-122`、`server.mjs:164`、`server.mjs:176`）：
+  - `resolveSongUrls` 的解析结果缓存 `resolvedUrlCache` 容量从 1000 提升到 17180 条
+    （`server.mjs:26-27`、`server.mjs:164`）。原上限 1000 恰等于单个歌单的候选上限，
+    一次账号同步（8 个歌单 × 1000 首）后重新同步同一批歌单需要重新上行解析 8000 首，
+    改后为 0 首（`bench/results/before-clean.json`、`bench/results/after-clean.json`）。
+  - `createTtlCache.set()` 的全表过期清扫改为游标增量清扫，每次写入最多检查 32 条；
+    容量驱逐仍在 set 内同步完成，LRU 语义不变（`server.mjs:56-122`）。
+    1000 次 set 在既有 5000 条规模下由 22.518 ms 降至 0.651 ms（同一轮次内横向比较）。
+  - 第 9 个 TTL 缓存 `latestUpdateCache` 迁入 `createTtlCache`，不再手写 `expiresAt`
+    （`server.mjs:176`、`server.mjs:1860`、`server.mjs:1928`）。
+
+- 歌单详情渲染路径优化（`src/screens/PlaylistDetail.tsx`、`src/App.tsx`）：
+  - `PlaylistDetail` 改为 `memo` 包装，6 个内联回调改为 `useCallback`，
+    解析回填在无实际变化时保持 `playlist` / `songs` 引用（`src/App.tsx:197-221`、
+    `:2255-2295`、`src/screens/PlaylistDetail.tsx:84-85`）。
+  - 改动前单次播放进度更新会触发 1000 行 `SongRow` 全部重新执行函数体；
+    改动后纯进度更新路径的 JS 执行时间由 21.7–25.7 ms 降至 13.7–16.7 ms，
+    播放结束自动切歌时的解析回填由 262.5–299.5 ms 降至 53.5–87.0 ms
+    （CDP `ScriptDuration`，各 3 轮重复）。
+- 本地音频批量读取（`src/lib/storage.ts`）：
+  - `hydrateLocalSongs` 原先对每个本地音频键各做一次 `indexedDB.open` + 事务 + 关闭，
+    200 条缓存恢复即 200 次往返。改为键数超过 16 时单事务游标扫描一次
+    （`src/lib/storage.ts:524-560`、`:596-660`）。
+  - 200 条孤儿缓存恢复由 208 ms 降至 170 ms（3 轮中位数，12/12 配对样本改善），
+    57 条场景由 155 ms 降至 141 ms。
+- 版本号 1.0.45 / versionCode 46 / Windows Launcher RuntimeVersion 1.0.45。
+- 均衡器相关代码（`src/lib/audio-effects.ts`、`NativeAudioEffects.java`）本版未改动。
+
 ## 1.0.44 - 2026-08-30
 
 - 架构重构（行为等价，全量测试通过）：
   - 服务端 8 个手写 TTL 缓存 Map 收拢为 `createTtlCache`（TTL 不变，
-    新增 1000 条 LRU 上限与惰性清扫，防长驻进程内存增长）。
+    新增 1000 条 LRU 上限与惰性清扫，防长驻进程内存增长）。本版遗漏的
+    `latestUpdateCache`（更新检查结果）当时仍手写 `expiresAt`、无容量上限，
+    已于 1.0.45 迁入。
   - `App.tsx` 3098 → 2661 行：首页/搜索/我的/歌单详情/播放条等 12 个
     展示组件拆分到 `src/screens/` 与 `src/components/`，props 接口不变。
 - 加固"删除未缓存下载条目"e2e：删除前消化 reload 对账写入并重置计数基线，

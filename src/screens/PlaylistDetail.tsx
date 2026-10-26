@@ -1,5 +1,5 @@
 import { Download, ListPlus, Play, Plus, Search, Trash2, X } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import SongRow from "../components/SongRow";
 import { httpsCoverUrl } from "../lib/api";
 import { isDownloadCachedSong } from "../lib/download-key";
@@ -7,7 +7,7 @@ import { songKey } from "../lib/storage";
 import type { Playlist, Song } from "../types";
 import { playlistDisplayCount } from "./shared";
 
-export function PlaylistDetail({ playlist, saved, favoriteKeys, selected, onClose, onPlay, onFavorite, onDownload, onDownloadSelected, onDeleteDownload, onAddToQueue, onSelect, onSavePlaylist, onAddSelected, onCreatePlaylistWithSelected, onRemoveSelected, onReverse }: {
+function PlaylistDetailImpl({ playlist, saved, favoriteKeys, selected, onClose, onPlay, onFavorite, onDownload, onDownloadSelected, onDeleteDownload, onAddToQueue, onSelect, onSavePlaylist, onAddSelected, onCreatePlaylistWithSelected, onRemoveSelected, onReverse }: {
   playlist: Playlist;
   saved: boolean;
   favoriteKeys: Set<string>;
@@ -81,3 +81,5 @@ export function PlaylistDetail({ playlist, saved, favoriteKeys, selected, onClos
     </div>
   );
 }
+
+export const PlaylistDetail = memo(PlaylistDetailImpl);
